@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img src="./docs/images/light-topbar-shadow-reduced.png" alt="CrewDock top bar with workspace tabs" width="100%" />
+  <img src="./docs/images/source-control-panel.png" alt="CrewDock source control panel with branch status and changed files" width="100%" />
 </p>
 
 <p align="center">
@@ -25,6 +25,7 @@ multiple contexts, but you still want everything to feel immediate.
 - Real shell sessions spawned by Rust with `portable-pty`
 - Multi-pane grids powered by `xterm.js`
 - Fast workspace switching without tearing down the current app-run sessions
+- Built-in source control visibility for branch status and changed files
 - Built-in launcher commands for opening and navigating folders quickly
 - Themeable desktop chrome with light and dark looks
 - Local persistence for tabs, layouts, active workspace, and theme choice
@@ -88,6 +89,7 @@ flowchart TD
 - Workspace creation flow with 1 to 16 starting terminals
 - Real directional pane splitting
 - Per-pane shell input and resize wiring
+- Source control sidebar with branch, ahead/behind, dirty state, and changed files
 - Launcher commands for `help`, `pwd`, `ls`, `cd`, relative paths, absolute paths, `~`, and `open`
 - Local persistence across app relaunches
 - Six built-in themes
