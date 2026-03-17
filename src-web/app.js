@@ -3,7 +3,10 @@ import { FitAddon } from "./vendor/addon-fit.mjs";
 
 const STATE_EVENT = "crewdock://state-changed";
 const TERMINAL_DATA_EVENT = "crewdock://terminal-data";
+const RUNTIME_EVENT = "crewdock://runtime-event";
 const MAX_PENDING_TERMINAL_BYTES = 4 * 1024 * 1024;
+const MAX_RUNTIME_ACTIVITY_ITEMS = 80;
+const MAX_WORKSPACE_ATTENTION_COUNT = 99;
 const LAUNCHER_CARD_TRANSITION_MS = 360;
 const GIT_REFRESH_INTERVAL_MS = 3000;
 const DEFAULT_THEME_ID = "one-dark";
@@ -548,6 +551,7 @@ const uiState = {
   appliedThemeId: null,
   launcherVisible: false,
   settingsVisible: false,
+  settingsSection: "workbench",
   pendingWorkspaceDraft: null,
   launcherCommandValue: "",
   launcherHistory: [],
@@ -571,6 +575,8 @@ const uiState = {
   workspaceTabsScrollLeft: 0,
   workspaceTabsLastActiveWorkspaceId: null,
   workspaceTabsLastCount: 0,
+  runtimeActivity: [],
+  runtimeAttentionByWorkspace: new Map(),
 };
 
 const paneTerminals = new Map();
@@ -601,6 +607,13 @@ async function init() {
   if (bridge.listenTerminalData) {
     await bridge.listenTerminalData((payload) => {
       appendTerminalData(payload.paneId, payload.data);
+    });
+  }
+
+  if (bridge.listenRuntimeEvents) {
+    await bridge.listenRuntimeEvents((event) => {
+      recordRuntimeEvent(event);
+      render();
     });
   }
 
@@ -636,6 +649,10 @@ function detectPlatform() {
   }
 
   return "other";
+}
+
+function normalizeSettingsSection(section) {
+  return section === "guide" ? "guide" : "workbench";
 }
 
 function createBridge() {
@@ -688,6 +705,8 @@ function createBridge() {
         tauriApi.event.listen(STATE_EVENT, (event) => handler(event.payload)),
       listenTerminalData: (handler) =>
         tauriApi.event.listen(TERMINAL_DATA_EVENT, (event) => handler(event.payload)),
+      listenRuntimeEvents: (handler) =>
+        tauriApi.event.listen(RUNTIME_EVENT, (event) => handler(event.payload)),
     };
   }
 
@@ -697,6 +716,7 @@ function createBridge() {
 function createMockBridge() {
   const stateListeners = new Set();
   const terminalListeners = new Set();
+  const runtimeListeners = new Set();
   const launcher = {
     basePath: "/Users/ashutoshbele/Desktop/ashlab/crewdock",
     presets: [
@@ -756,6 +776,12 @@ function createMockBridge() {
     }
   }
 
+  function emitRuntimeEvent(payload) {
+    for (const listener of runtimeListeners) {
+      listener(structuredClone(payload));
+    }
+  }
+
   function startWorkspace(workspace) {
     if (!workspace || workspace.started) {
       return;
@@ -777,6 +803,12 @@ function createMockBridge() {
 
         currentPane.status = "ready";
         emitState();
+        emitRuntimeEvent({
+          kind: "paneReady",
+          workspaceId: workspace.id,
+          paneId: currentPane.id,
+          label: currentPane.label,
+        });
         emitTerminal({
           paneId: pane.id,
           data:
@@ -833,6 +865,10 @@ function createMockBridge() {
     listenTerminalData: async (handler) => {
       terminalListeners.add(handler);
       return () => terminalListeners.delete(handler);
+    },
+    listenRuntimeEvents: async (handler) => {
+      runtimeListeners.add(handler);
+      return () => runtimeListeners.delete(handler);
     },
     startDragging: async () => {},
     setTheme: async (themeId) => {
@@ -963,6 +999,12 @@ function createMockBridge() {
         window.setTimeout(() => {
           pane.status = "ready";
           emitState();
+          emitRuntimeEvent({
+            kind: "paneReady",
+            workspaceId: workspace.id,
+            paneId: pane.id,
+            label: pane.label,
+          });
           emitTerminal({
             paneId: pane.id,
             data:
@@ -983,11 +1025,21 @@ function createMockBridge() {
         return emitState();
       }
 
+      const closedPane = workspace.panes.find((pane) => pane.id === paneId) || null;
       workspace.panes = workspace.panes.filter((pane) => pane.id !== paneId);
       relabelMockPanes(workspace.panes);
       workspace.layout = deriveLayoutForPaneCount(workspace.panes.length);
       workspace.paneLayout = removePaneLayout(workspace.paneLayout, paneId);
-      return emitState();
+      const snapshot = emitState();
+      if (closedPane) {
+        emitRuntimeEvent({
+          kind: "paneClosed",
+          workspaceId: workspace.id,
+          paneId,
+          label: closedPane.label,
+        });
+      }
+      return snapshot;
     },
     showInFinder: async () => {},
     runLauncherCommand: async (input) => {
@@ -1132,6 +1184,7 @@ async function handleClick(event) {
 
   if (target.dataset.action === "show-settings") {
     uiState.settingsVisible = true;
+    uiState.settingsSection = "workbench";
     uiState.gitPanelVisible = false;
     closeQuickSwitcher();
     uiState.pendingWorkspaceDraft = null;
@@ -1143,6 +1196,15 @@ async function handleClick(event) {
   if (target.dataset.action === "close-settings") {
     uiState.settingsVisible = false;
     render();
+    return;
+  }
+
+  if (target.dataset.action === "show-settings-section") {
+    const nextSection = normalizeSettingsSection(target.dataset.settingsSection);
+    if (uiState.settingsSection !== nextSection) {
+      uiState.settingsSection = nextSection;
+      render();
+    }
     return;
   }
 
@@ -1293,6 +1355,7 @@ async function handleClick(event) {
     if (!workspaceId || workspaceId === uiState.snapshot?.activeWorkspaceId) {
       uiState.launcherVisible = false;
       uiState.settingsVisible = false;
+      markWorkspaceAttentionSeen(workspaceId || null);
       closeQuickSwitcher();
       render();
       return;
@@ -1320,6 +1383,8 @@ async function handleClick(event) {
     }
 
     clearWorkspaceBuffers(workspaceId);
+    uiState.runtimeAttentionByWorkspace.delete(workspaceId);
+    uiState.runtimeActivity = uiState.runtimeActivity.filter((entry) => entry.workspaceId !== workspaceId);
     if (uiState.mountedWorkspaceId === workspaceId) {
       disposeAllTerminals();
       uiState.mountedWorkspaceId = null;
@@ -1434,6 +1499,11 @@ function handleWindowResize() {
 
 function handleWindowFocus() {
   syncGitRefreshLoop();
+  const activeWorkspaceId = uiState.snapshot?.activeWorkspaceId || null;
+  const didClearAttention = markWorkspaceAttentionSeen(activeWorkspaceId);
+  if (didClearAttention && activeWorkspaceId) {
+    render();
+  }
   void refreshActiveWorkspaceGitStatus({ force: true });
 }
 
@@ -1573,6 +1643,7 @@ async function handleKeyDown(event) {
   if ((event.metaKey || event.ctrlKey) && event.key === ",") {
     event.preventDefault();
     uiState.settingsVisible = true;
+    uiState.settingsSection = "workbench";
     uiState.gitPanelVisible = false;
     closeQuickSwitcher();
     uiState.pendingWorkspaceDraft = null;
@@ -1699,6 +1770,7 @@ async function activateWorkspace(workspaceId) {
   uiState.gitPanelVisible = false;
   uiState.pendingWorkspaceDraft = null;
   uiState.contextMenu = null;
+  markWorkspaceAttentionSeen(workspaceId);
   closeQuickSwitcher();
   void refreshActiveWorkspaceGitStatus({ force: true });
 }
@@ -1731,6 +1803,130 @@ function closeQuickSwitcher() {
 
 function getWorkspaceById(workspaceId, snapshot = uiState.snapshot) {
   return snapshot?.workspaces?.find((workspace) => workspace.id === workspaceId) || null;
+}
+
+function syncRuntimeActivityState(snapshot = uiState.snapshot) {
+  const workspaceIds = new Set((snapshot?.workspaces || []).map((workspace) => workspace.id));
+
+  for (const workspaceId of uiState.runtimeAttentionByWorkspace.keys()) {
+    if (!workspaceIds.has(workspaceId)) {
+      uiState.runtimeAttentionByWorkspace.delete(workspaceId);
+    }
+  }
+
+  uiState.runtimeActivity = uiState.runtimeActivity.filter((entry) => workspaceIds.has(entry.workspaceId));
+
+  if (snapshot?.activeWorkspaceId && document.hasFocus()) {
+    markWorkspaceAttentionSeen(snapshot.activeWorkspaceId);
+  }
+}
+
+function markWorkspaceAttentionSeen(workspaceId) {
+  if (!workspaceId) {
+    return false;
+  }
+
+  const attention = uiState.runtimeAttentionByWorkspace.get(workspaceId);
+  if (!attention || attention.unreadCount <= 0) {
+    return false;
+  }
+
+  uiState.runtimeAttentionByWorkspace.set(workspaceId, {
+    ...attention,
+    unreadCount: 0,
+  });
+  return true;
+}
+
+function recordRuntimeEvent(event) {
+  const normalizedEvent = normalizeRuntimeEvent(event);
+  if (!normalizedEvent) {
+    return;
+  }
+
+  const workspace = getWorkspaceById(normalizedEvent.workspaceId);
+  if (!workspace) {
+    return;
+  }
+
+  const nextEvent = {
+    ...normalizedEvent,
+    at: Date.now(),
+    message: formatRuntimeEventMessage(normalizedEvent),
+  };
+  const currentAttention =
+    uiState.runtimeAttentionByWorkspace.get(normalizedEvent.workspaceId) || {
+      unreadCount: 0,
+      tone: runtimeEventTone(normalizedEvent.kind),
+      lastEvent: null,
+    };
+  const shouldMarkUnread =
+    normalizedEvent.workspaceId !== uiState.snapshot?.activeWorkspaceId || !document.hasFocus();
+
+  uiState.runtimeAttentionByWorkspace.set(normalizedEvent.workspaceId, {
+    unreadCount: shouldMarkUnread
+      ? Math.min(MAX_WORKSPACE_ATTENTION_COUNT, currentAttention.unreadCount + 1)
+      : 0,
+    tone: runtimeEventTone(normalizedEvent.kind),
+    lastEvent: nextEvent,
+  });
+
+  uiState.runtimeActivity.unshift(nextEvent);
+  if (uiState.runtimeActivity.length > MAX_RUNTIME_ACTIVITY_ITEMS) {
+    uiState.runtimeActivity.length = MAX_RUNTIME_ACTIVITY_ITEMS;
+  }
+}
+
+function normalizeRuntimeEvent(event) {
+  if (!event || typeof event !== "object") {
+    return null;
+  }
+
+  if (!event.workspaceId || !event.paneId || typeof event.kind !== "string") {
+    return null;
+  }
+
+  if (!["paneReady", "paneClosed", "paneFailed"].includes(event.kind)) {
+    return null;
+  }
+
+  return {
+    kind: event.kind,
+    workspaceId: event.workspaceId,
+    paneId: event.paneId,
+    label: String(event.label || "Terminal"),
+    error: event.error ? String(event.error) : "",
+  };
+}
+
+function runtimeEventTone(kind) {
+  switch (kind) {
+    case "paneFailed":
+      return "failed";
+    case "paneClosed":
+      return "closed";
+    case "paneReady":
+    default:
+      return "ready";
+  }
+}
+
+function formatRuntimeEventMessage(event) {
+  const label = event.label || "Terminal";
+
+  switch (event.kind) {
+    case "paneFailed":
+      return `${label} failed${event.error ? `: ${event.error}` : ""}`;
+    case "paneClosed":
+      return `${label} closed`;
+    case "paneReady":
+    default:
+      return `${label} is live`;
+  }
+}
+
+function getWorkspaceAttention(workspaceId) {
+  return uiState.runtimeAttentionByWorkspace.get(workspaceId) || null;
 }
 
 function startWorkspaceRename(workspaceId) {
@@ -1814,6 +2010,7 @@ function render() {
   }
 
   applyActiveTheme(getActiveThemeId(uiState.snapshot));
+  syncRuntimeActivityState(uiState.snapshot);
   ensureFrame();
 
   const snapshot = uiState.snapshot;
@@ -1888,9 +2085,25 @@ function render() {
       uiState.mountedWorkspaceId = null;
       uiState.mountedLayoutSignature = null;
     }
-    stageRegion.innerHTML = renderEmptyState(snapshot.launcher.basePath);
+
+    const preservedLauncherInputState = captureLauncherInputState(stageRegion);
+    const nextLauncherSignature = launcherStageSignature(snapshot.launcher.basePath);
+    const shouldRemountLauncher =
+      stageRegion.dataset.stageMode !== "launcher"
+      || stageRegion.dataset.stageSignature !== nextLauncherSignature;
+
+    if (shouldRemountLauncher) {
+      stageRegion.innerHTML = renderEmptyState(snapshot.launcher.basePath);
+      stageRegion.dataset.stageMode = "launcher";
+      stageRegion.dataset.stageSignature = nextLauncherSignature;
+    }
+
     if (!uiState.settingsVisible) {
-      focusLauncherInput();
+      if (shouldRemountLauncher && preservedLauncherInputState?.wasFocused) {
+        restoreLauncherInputState(preservedLauncherInputState);
+      } else {
+        focusLauncherInput();
+      }
     }
     return;
   }
@@ -1911,6 +2124,8 @@ function render() {
     stageRegion.innerHTML = renderWorkspace(activeWorkspace);
     uiState.mountedWorkspaceId = activeWorkspace.id;
     uiState.mountedLayoutSignature = nextLayoutSignature;
+    stageRegion.dataset.stageMode = "workspace";
+    stageRegion.dataset.stageSignature = nextLayoutSignature;
     mountWorkspaceTerminals(activeWorkspace);
   }
 
@@ -2265,14 +2480,47 @@ function renderWorkspaceGitIndicator(summary) {
   `;
 }
 
+function buildWorkspaceTabTitle(workspace, attention) {
+  if (!attention?.unreadCount || !attention.lastEvent?.message) {
+    return workspace.path;
+  }
+
+  return `${workspace.path}\n${attention.lastEvent.message}`;
+}
+
+function renderWorkspaceAttentionBadge(workspace, attention) {
+  if (!attention?.unreadCount || !attention.lastEvent?.message) {
+    return "";
+  }
+
+  const count = attention.unreadCount > 9 ? "9+" : String(attention.unreadCount);
+  const description = `${workspace.name}: ${attention.lastEvent.message}`;
+
+  return `
+    <span
+      class="workspace-tab-attention is-${escapeHtml(attention.tone)}"
+      aria-label="${escapeHtml(description)}"
+      title="${escapeHtml(attention.lastEvent.message)}"
+    >
+      ${escapeHtml(count)}
+    </span>
+  `;
+}
+
 function renderWorkspaceTab(workspace, activeWorkspaceId, label) {
   const activeClass = workspace.id === activeWorkspaceId ? "is-active" : "";
   const liveClass = workspace.isLive ? "is-live" : "is-idle";
   const renameDraft = uiState.workspaceRenameDraft;
   const isRenaming = renameDraft?.workspaceId === workspace.id;
   const gitSummary = workspace.gitSummary || null;
+  const attention = getWorkspaceAttention(workspace.id);
+  const attentionTone = attention?.unreadCount ? attention.tone : "";
+  const tabTitle = buildWorkspaceTabTitle(workspace, attention);
   return `
-    <div class="workspace-tab-shell ${activeClass} ${isRenaming ? "is-renaming" : ""}">
+    <div
+      class="workspace-tab-shell ${activeClass} ${isRenaming ? "is-renaming" : ""} ${attention?.unreadCount ? "has-attention" : ""}"
+      ${attentionTone ? `data-attention-tone="${escapeHtml(attentionTone)}"` : ""}
+    >
       ${
         isRenaming
           ? `
@@ -2304,10 +2552,11 @@ function renderWorkspaceTab(workspace, activeWorkspaceId, label) {
         data-tauri-drag-region="false"
         data-action="switch-workspace"
         data-workspace-id="${escapeHtml(workspace.id)}"
-        title="${escapeHtml(workspace.path)}"
+        title="${escapeHtml(tabTitle)}"
       >
         <span class="workspace-tab-status ${liveClass}" aria-hidden="true"></span>
         <span class="workspace-tab-name">${escapeHtml(label)}</span>
+        ${renderWorkspaceAttentionBadge(workspace, attention)}
         ${renderWorkspaceGitIndicator(gitSummary)}
       </button>
       <button
@@ -2561,6 +2810,14 @@ function renderEmptyState(basePath) {
   `;
 }
 
+function launcherStageSignature(basePath) {
+  return JSON.stringify({
+    basePath,
+    history: uiState.launcherHistory,
+    latestCard: uiState.launcherLatestCard,
+  });
+}
+
 function renderLayoutPicker(presets, draft) {
   const layout = deriveLayoutForPaneCount(draft.paneCount);
   const previewCells = renderPreviewCells(layout);
@@ -2626,6 +2883,12 @@ function renderSettingsSheet(snapshot) {
   const activeThemeId = getActiveThemeId(snapshot);
   const themes = Object.values(THEME_REGISTRY);
   const primaryModifier = getPrimaryModifierLabel();
+  const activeSection = normalizeSettingsSection(uiState.settingsSection);
+  const isWorkbenchSection = activeSection === "workbench";
+  const sectionTitle = isWorkbenchSection ? "Workbench" : "How to use";
+  const sectionCopy = isWorkbenchSection
+    ? "Tune the workbench theme and keep CrewDock's interface aligned with how you like to work."
+    : "Keep the core shortcuts close and move through workspaces faster without breaking terminal flow.";
 
   return `
     <div class="settings-sheet-backdrop" data-action="close-settings">
@@ -2633,8 +2896,8 @@ function renderSettingsSheet(snapshot) {
         <header class="settings-sheet-header">
           <div>
             <p class="settings-sheet-mark">Settings</p>
-            <h2 id="settings-title">Workbench</h2>
-            <p class="settings-sheet-copy">Tune the workbench theme, keep the core shortcuts close, and move through workspaces faster.</p>
+            <h2 id="settings-title">${sectionTitle}</h2>
+            <p class="settings-sheet-copy">${sectionCopy}</p>
           </div>
           <button class="settings-sheet-close" data-action="close-settings" aria-label="Close settings">
             ${renderCloseIcon()}
@@ -2642,24 +2905,47 @@ function renderSettingsSheet(snapshot) {
         </header>
         <div class="settings-sheet-body">
           <aside class="settings-nav" aria-label="Settings sections">
-            <button class="settings-nav-item is-active" type="button" aria-current="page">
+            <button
+              class="settings-nav-item ${isWorkbenchSection ? "is-active" : ""}"
+              type="button"
+              data-action="show-settings-section"
+              data-settings-section="workbench"
+              aria-current="${isWorkbenchSection ? "page" : "false"}"
+            >
               <span class="settings-nav-item-label">Workbench</span>
-              <span class="settings-nav-item-value">${themes.length} themes + guide</span>
+              <span class="settings-nav-item-value">${themes.length} themes</span>
+            </button>
+            <button
+              class="settings-nav-item ${!isWorkbenchSection ? "is-active" : ""}"
+              type="button"
+              data-action="show-settings-section"
+              data-settings-section="guide"
+              aria-current="${!isWorkbenchSection ? "page" : "false"}"
+            >
+              <span class="settings-nav-item-label">How to use</span>
+              <span class="settings-nav-item-value">Shortcuts + flow</span>
             </button>
           </aside>
-          <section class="settings-panel">
-            <div class="settings-panel-intro">
-              <div>
-                <p class="settings-panel-kicker">Theme library</p>
-                <h3>${escapeHtml(getThemeDefinition(activeThemeId).label)}</h3>
-              </div>
-              <p class="settings-panel-copy">Pick a palette and CrewDock updates the launcher, chrome, menus, panes, and xterm colors in place.</p>
-            </div>
-            <div class="settings-theme-grid">
-              ${themes.map((theme) => renderThemeCard(theme, activeThemeId)).join("")}
-            </div>
-            ${renderSettingsGuide(primaryModifier)}
-          </section>
+          ${isWorkbenchSection
+            ? `
+              <section class="settings-panel">
+                <div class="settings-panel-intro">
+                  <div>
+                    <p class="settings-panel-kicker">Theme library</p>
+                    <h3>${escapeHtml(getThemeDefinition(activeThemeId).label)}</h3>
+                  </div>
+                  <p class="settings-panel-copy">Pick a palette and CrewDock updates the launcher, chrome, menus, panes, and xterm colors in place.</p>
+                </div>
+                <div class="settings-theme-grid">
+                  ${themes.map((theme) => renderThemeCard(theme, activeThemeId)).join("")}
+                </div>
+              </section>
+            `
+            : `
+              <section class="settings-panel settings-panel-guide">
+                ${renderSettingsGuide(primaryModifier)}
+              </section>
+            `}
         </div>
       </section>
     </div>
@@ -2717,12 +3003,12 @@ function renderSettingsGuide(primaryModifier) {
 
   return `
     <section class="settings-guide-shell">
-      <div class="settings-panel-intro">
+      <div class="settings-guide-header">
         <div>
-          <p class="settings-panel-kicker">How to use</p>
-          <h3>Shortcuts and workflow</h3>
+          <p class="settings-guide-kicker">How to use</p>
+          <h4 class="settings-guide-title">Shortcuts and workflow</h4>
         </div>
-        <p class="settings-panel-copy">CrewDock feels best when the keyboard drives workspace movement and the terminals stay visually front and center.</p>
+        <p class="settings-guide-summary">CrewDock works best when the keyboard handles movement and the terminals stay visually front and center.</p>
       </div>
       <div class="settings-guide-grid">
         <article class="settings-guide-card">
@@ -4079,10 +4365,49 @@ function focusLauncherInput({ select = false } = {}) {
   }
 
   requestAnimationFrame(() => {
+    if (document.activeElement === input && !select) {
+      return;
+    }
     input.focus();
     if (select) {
       input.select();
     }
+  });
+}
+
+function captureLauncherInputState(root = app) {
+  const input = root.querySelector("[data-launcher-path-input]");
+  if (!(input instanceof HTMLInputElement)) {
+    return null;
+  }
+
+  return {
+    wasFocused: document.activeElement === input,
+    selectionStart: input.selectionStart,
+    selectionEnd: input.selectionEnd,
+  };
+}
+
+function restoreLauncherInputState(state) {
+  if (!state?.wasFocused) {
+    return;
+  }
+
+  const input = app.querySelector("[data-launcher-path-input]");
+  if (!(input instanceof HTMLInputElement)) {
+    return;
+  }
+
+  requestAnimationFrame(() => {
+    input.focus();
+    const maxIndex = input.value.length;
+    const selectionStart = Number.isFinite(state.selectionStart)
+      ? Math.max(0, Math.min(maxIndex, state.selectionStart))
+      : maxIndex;
+    const selectionEnd = Number.isFinite(state.selectionEnd)
+      ? Math.max(selectionStart, Math.min(maxIndex, state.selectionEnd))
+      : selectionStart;
+    input.setSelectionRange(selectionStart, selectionEnd);
   });
 }
 
