@@ -130,81 +130,29 @@ button {
 .workspace-strip {
   position: relative;
   z-index: 3;
-  padding: 4px 10px 0;
+  padding: 3px 10px 0;
   background:
     linear-gradient(180deg, var(--strip-start), var(--strip-end)),
     var(--panel);
   border-bottom: 1px solid var(--strip-border);
-  backdrop-filter: blur(22px);
+  backdrop-filter: blur(18px);
   box-shadow:
     inset 0 1px 0 rgba(255, 255, 255, 0.03),
-    var(--strip-shadow);
+    0 6px 16px rgba(0, 0, 0, 0.08);
 }
 
 .workspace-strip-track {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
   min-height: var(--chrome-height);
-  padding: 2px 0 6px;
+  padding: 2px 0 5px;
 }
 
 .workspace-strip-leading {
   flex: 0 0 var(--chrome-leading-space);
   min-height: 1px;
-}
-
-.workspace-strip-summary {
-  flex: 0 1 228px;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding-right: 2px;
-}
-
-.workspace-strip-summary-mark {
-  flex: 0 0 auto;
-  min-height: 22px;
-  display: inline-flex;
-  align-items: center;
-  padding: 0 10px;
-  border-radius: 999px;
-  border: 1px solid var(--control-border);
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--surface-soft-text);
-  font-size: 0.62rem;
-  font-weight: 600;
-  letter-spacing: 0.18em;
-  text-transform: uppercase;
-}
-
-.workspace-strip-summary-copy {
-  min-width: 0;
-  display: grid;
-  gap: 2px;
-}
-
-.workspace-strip-summary-copy strong,
-.workspace-strip-summary-copy span {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.workspace-strip-summary-copy strong {
-  color: var(--control-text-strong);
-  font-size: 0.84rem;
-  font-weight: 580;
-  letter-spacing: -0.01em;
-}
-
-.workspace-strip-summary-copy span {
-  color: var(--surface-soft-text);
-  font-size: 0.72rem;
-  letter-spacing: 0.01em;
 }
 
 .workspace-tabs-shell {
@@ -213,17 +161,12 @@ button {
   flex: 1;
   display: flex;
   align-items: center;
-  gap: 2px;
-  padding: 4px;
+  gap: 4px;
+  padding: 0;
   overflow: hidden;
-  border-radius: 15px;
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 72%),
-    rgba(9, 12, 16, 0.26);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.03),
-    inset 0 -1px 0 rgba(255, 255, 255, 0.015);
+  border: 0;
+  background: none;
+  box-shadow: none;
 }
 
 .workspace-tabs-viewport {
@@ -231,7 +174,7 @@ button {
   min-width: 0;
   flex: 1;
   overflow: hidden;
-  border-radius: 12px;
+  border-radius: 10px;
 }
 
 .workspace-tabs-viewport::before,
@@ -249,12 +192,12 @@ button {
 
 .workspace-tabs-viewport::before {
   left: 0;
-  background: linear-gradient(90deg, var(--panel-strong), transparent);
+  background: linear-gradient(90deg, rgba(27, 31, 39, 0.92), transparent);
 }
 
 .workspace-tabs-viewport::after {
   right: 0;
-  background: linear-gradient(270deg, var(--panel-strong), transparent);
+  background: linear-gradient(270deg, rgba(27, 31, 39, 0.92), transparent);
 }
 
 .workspace-tabs-shell.has-overflow-left .workspace-tabs-viewport::before {
@@ -268,20 +211,16 @@ button {
 .workspace-tabs-scroll {
   flex: 0 0 0;
   width: 0;
-  height: 28px;
+  height: 24px;
   padding: 0;
   overflow: hidden;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 10px;
+  border-radius: 8px;
   border: 1px solid transparent;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent 70%),
-    var(--control-bg);
+  background: rgba(255, 255, 255, 0.025);
   color: var(--control-text);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
-  backdrop-filter: blur(14px);
   opacity: 0;
   pointer-events: none;
   transform: scale(0.94);
@@ -297,19 +236,17 @@ button {
 
 .workspace-tabs-shell.has-overflow-left .workspace-tabs-scroll-left,
 .workspace-tabs-shell.has-overflow-right .workspace-tabs-scroll-right {
-  flex-basis: 28px;
-  width: 28px;
+  flex-basis: 24px;
+  width: 24px;
   opacity: 1;
   pointer-events: auto;
   transform: scale(1);
-  border-color: var(--control-border);
+  border-color: rgba(255, 255, 255, 0.06);
 }
 
 .workspace-tabs-scroll:hover:not(:disabled) {
   border-color: var(--control-border-strong);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 70%),
-    var(--control-bg-hover);
+  background: rgba(255, 255, 255, 0.045);
   color: var(--control-text-strong);
 }
 
@@ -332,11 +269,7 @@ button {
 }
 
 .workspace-strip-actions::before {
-  content: "";
-  width: 1px;
-  height: 18px;
-  margin-right: 2px;
-  background: linear-gradient(180deg, transparent, var(--control-border-strong), transparent);
+  display: none;
 }
 
 .workspace-tabs {
@@ -344,7 +277,7 @@ button {
   flex: 1;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   overflow-x: auto;
   overscroll-behavior-x: contain;
   scroll-behavior: smooth;
@@ -356,80 +289,52 @@ button {
   display: none;
 }
 
+.workspace-tabs-empty {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  color: var(--surface-soft-text);
+  font-size: 0.72rem;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+}
+
 .workspace-tab-shell {
   flex: 0 0 auto;
   position: relative;
   display: flex;
   align-items: center;
   gap: 2px;
-  max-width: 240px;
-  min-height: 34px;
-  border-radius: 12px;
-  border: 1px solid var(--tab-border);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 70%),
-    var(--tab-bg);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.03),
-    0 1px 0 rgba(0, 0, 0, 0.12);
-  backdrop-filter: blur(14px);
+  max-width: 220px;
+  min-height: 30px;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: rgba(255, 255, 255, 0.02);
+  box-shadow: none;
   transition:
     border-color 160ms ease,
     background 160ms ease,
-    box-shadow 160ms ease,
-    transform 160ms ease;
+    color 160ms ease;
 }
 
 .workspace-tab-shell::after {
-  content: "";
-  position: absolute;
-  left: 12px;
-  right: 12px;
-  bottom: 3px;
-  height: 2px;
-  border-radius: 999px;
-  background: linear-gradient(90deg, transparent, var(--accent), transparent);
-  opacity: 0;
-  transition: opacity 160ms ease;
+  display: none;
 }
 
 .workspace-tab-shell:hover {
-  border-color: var(--tab-border-active);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 70%),
-    var(--tab-bg-hover);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.04),
-    0 10px 18px rgba(0, 0, 0, 0.18);
-  transform: translateY(-1px);
+  border-color: rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .workspace-tab-shell.is-active {
-  border-color: var(--tab-border-active);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.075), rgba(255, 255, 255, 0.01) 48%, transparent 100%),
-    var(--tab-bg-active);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.05),
-    0 14px 24px rgba(0, 0, 0, 0.18);
-}
-
-.workspace-tab-shell.is-active::after {
-  opacity: 0.85;
+  border-color: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .workspace-tab-shell.is-renaming {
-  border-color: var(--tab-border-active);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.075), rgba(255, 255, 255, 0.01) 48%, transparent 100%),
-    var(--tab-bg-active);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.05),
-    0 14px 24px rgba(0, 0, 0, 0.18);
-}
-
-.workspace-tab-shell.is-renaming::after {
-  opacity: 0.85;
+  border-color: rgba(97, 175, 239, 0.16);
+  background: rgba(255, 255, 255, 0.06);
 }
 
 .workspace-tab-main {
@@ -438,59 +343,88 @@ button {
   flex: 1;
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 0 12px 0 13px;
-  min-height: 34px;
+  gap: 8px;
+  padding: 0 10px 0 11px;
+  min-height: 30px;
 }
 
 .workspace-tab-status {
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   flex: 0 0 auto;
   border-radius: 999px;
   background: var(--surface-soft-text);
-  opacity: 0.48;
-  box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.02);
+  opacity: 0.4;
+  box-shadow: none;
 }
 
 .workspace-tab-status.is-live {
   background: var(--accent);
-  opacity: 0.88;
-  box-shadow: 0 0 0 4px var(--accent-soft);
+  opacity: 0.76;
+  box-shadow: none;
 }
 
 .workspace-tab-name {
+  min-width: 0;
+  flex: 1;
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--tab-text);
-  font-size: 0.86rem;
+  font-size: 0.8rem;
   letter-spacing: -0.01em;
-  font-weight: 560;
+  font-weight: 540;
 }
 
 .workspace-tab-shell.is-active .workspace-tab-name {
   color: var(--tab-text-active);
 }
 
+.workspace-tab-git {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+  box-shadow: none;
+}
+
+.workspace-tab-git.is-clean {
+  background: #8fd7a2;
+}
+
+.workspace-tab-git.is-dirty {
+  background: #f2c36a;
+}
+
+.workspace-tab-git.is-conflicted,
+.workspace-tab-git.is-error {
+  background: var(--danger);
+}
+
+.workspace-tab-git.is-neutral,
+.workspace-tab-git.is-pending {
+  background: rgba(255, 255, 255, 0.18);
+}
+
 .workspace-tab-rename-form {
-  padding-right: 10px;
+  padding-right: 8px;
 }
 
 .workspace-tab-rename-input {
   width: 100%;
   min-width: 0;
-  height: 26px;
-  padding: 0 10px;
+  height: 22px;
+  padding: 0 8px;
   border: 0;
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.06);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.045);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.045);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
   color: var(--tab-text-active);
   font: inherit;
-  font-size: 0.84rem;
-  font-weight: 560;
+  font-size: 0.78rem;
+  font-weight: 540;
   letter-spacing: -0.01em;
   outline: none;
   appearance: none;
@@ -505,12 +439,12 @@ button {
 
 .workspace-tab-action {
   flex: 0 0 auto;
-  width: 20px;
-  height: 20px;
+  width: 18px;
+  height: 18px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 8px;
+  border-radius: 6px;
   color: var(--tab-close);
   opacity: 0;
   transform: scale(0.92);
@@ -522,15 +456,16 @@ button {
 }
 
 .workspace-tab-rename {
-  margin-right: 4px;
+  margin-right: 2px;
 }
 
 .workspace-tab-close {
-  margin-right: 8px;
+  margin-right: 6px;
 }
 
 .workspace-tab-shell:hover .workspace-tab-action,
-.workspace-tab-shell.is-active .workspace-tab-action {
+.workspace-tab-shell:focus-within .workspace-tab-action,
+.workspace-tab-shell.is-renaming .workspace-tab-action {
   opacity: 1;
   transform: scale(1);
 }
@@ -541,69 +476,192 @@ button {
 }
 
 .workspace-tab-action svg {
-  width: 10px;
-  height: 10px;
+  width: 9px;
+  height: 9px;
 }
 
 .workspace-strip-button,
 .workspace-add {
   flex: 0 0 auto;
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 11px;
-  border: 1px solid var(--control-border);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent 70%),
-    var(--control-bg);
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.025);
   color: var(--control-text);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
-  backdrop-filter: blur(14px);
-  font-size: 1.2rem;
+  box-shadow: none;
+  font-size: 1.1rem;
   line-height: 1;
   transition:
-    transform 160ms ease,
     border-color 160ms ease,
     background 160ms ease,
-    box-shadow 160ms ease,
     color 160ms ease;
 }
 
 .workspace-add {
-  border-color: var(--control-border-strong);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 70%),
-    var(--accent-soft);
-  color: var(--accent);
+  color: var(--control-text);
 }
 
 .workspace-strip-button:hover,
 .workspace-add:hover {
-  transform: translateY(-1px);
   border-color: var(--control-border-strong);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 70%),
-    var(--control-bg-hover);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.04),
-    0 8px 18px rgba(0, 0, 0, 0.18);
+  background: rgba(255, 255, 255, 0.045);
   color: var(--control-text-strong);
 }
 
 .workspace-strip-button svg,
 .workspace-add svg {
-  width: 15px;
-  height: 15px;
+  width: 14px;
+  height: 14px;
 }
 
 .workspace-stage {
   position: relative;
   flex: 1;
   min-height: 0;
-  padding: 6px 12px 12px;
+  padding: 6px 12px 8px;
   overflow: hidden;
+}
+
+.workspace-statusbar-region {
+  position: relative;
+  z-index: 2;
+  flex: 0 0 auto;
+  min-height: 24px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.015), transparent 70%),
+    rgba(17, 20, 25, 0.98);
+}
+
+.workspace-statusbar {
+  min-height: 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 10px;
+  overflow: hidden;
+  color: var(--surface-soft-text);
+}
+
+.workspace-statusbar-group {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0;
+  overflow: hidden;
+}
+
+.workspace-statusbar-group.is-right {
+  flex: 0 0 auto;
+  justify-content: flex-end;
+}
+
+.workspace-statusbar-group > * + * {
+  position: relative;
+  margin-left: 8px;
+  padding-left: 9px;
+}
+
+.workspace-statusbar-group > * + *::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 1px;
+  height: 10px;
+  background: rgba(255, 255, 255, 0.08);
+  transform: translateY(-50%);
+}
+
+.workspace-statusbar-brand,
+.workspace-statusbar-item,
+.workspace-statusbar-button {
+  min-width: 0;
+  max-width: 240px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  color: inherit;
+  font-size: 0.68rem;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-statusbar-brand {
+  flex: 0 0 auto;
+  max-width: none;
+  color: rgba(223, 229, 236, 0.56);
+  font-size: 0.6rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.workspace-statusbar-item {
+  flex: 0 1 auto;
+}
+
+.workspace-statusbar-item.is-primary {
+  color: rgba(243, 246, 250, 0.88);
+}
+
+.workspace-statusbar-item.is-path {
+  max-width: 280px;
+}
+
+.workspace-statusbar-button {
+  flex: 0 1 auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  transition: color 160ms ease;
+}
+
+.workspace-statusbar-button:hover {
+  color: var(--control-text-strong);
+}
+
+.workspace-statusbar-icon {
+  flex: 0 0 auto;
+  width: 11px;
+  height: 11px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.workspace-statusbar-icon svg {
+  width: 11px;
+  height: 11px;
+}
+
+.workspace-statusbar-button.is-clean {
+  color: #8fd7a2;
+}
+
+.workspace-statusbar-button.is-dirty,
+.workspace-statusbar-item.is-dirty {
+  color: #f2c36a;
+}
+
+.workspace-statusbar-button.is-conflicted,
+.workspace-statusbar-button.is-error,
+.workspace-statusbar-item.is-conflicted,
+.workspace-statusbar-item.is-error {
+  color: var(--danger);
+}
+
+.workspace-statusbar-button.is-neutral,
+.workspace-statusbar-button.is-pending,
+.workspace-statusbar-item.is-neutral {
+  color: var(--surface-soft-text);
 }
 
 .workspace-empty {
@@ -867,6 +925,225 @@ button {
 .workspace-modal::-webkit-scrollbar-thumb {
   border-radius: 999px;
   background: var(--scrollbar-thumb);
+}
+
+.workspace-quick-switcher-backdrop {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: start center;
+  padding: clamp(56px, 10vh, 96px) 20px 24px;
+  background: rgba(8, 10, 14, 0.36);
+  backdrop-filter: blur(18px);
+  pointer-events: auto;
+}
+
+.workspace-quick-switcher {
+  width: min(560px, 100%);
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 18px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 22%),
+    rgba(22, 25, 31, 0.98);
+  box-shadow:
+    0 24px 64px rgba(0, 0, 0, 0.34),
+    inset 0 1px 0 rgba(255, 255, 255, 0.025);
+}
+
+.workspace-quick-switcher-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.workspace-quick-switcher-mark {
+  margin: 0 0 4px;
+  color: var(--muted);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.workspace-quick-switcher h2 {
+  margin: 0;
+  font-size: 0.94rem;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+
+.workspace-quick-switcher-close {
+  width: 26px;
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.025);
+  color: var(--control-text);
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    color 160ms ease;
+}
+
+.workspace-quick-switcher-close:hover {
+  border-color: var(--control-border-strong);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--control-text-strong);
+}
+
+.workspace-quick-switcher-close svg {
+  width: 11px;
+  height: 11px;
+}
+
+.workspace-quick-switcher-search {
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.workspace-quick-switcher-search-mark {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--surface-soft-text);
+  font-size: 0.66rem;
+  font-weight: 700;
+}
+
+.workspace-quick-switcher-input {
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 0.82rem;
+  outline: none;
+}
+
+.workspace-quick-switcher-input::placeholder {
+  color: var(--surface-soft-text);
+}
+
+.workspace-quick-switcher-list {
+  max-height: min(420px, 52vh);
+  display: grid;
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+.workspace-quick-switcher-item {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 2px;
+  border: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 0;
+  background: none;
+  color: var(--text);
+  text-align: left;
+  transition: background 140ms ease;
+}
+
+.workspace-quick-switcher-item:last-child {
+  border-bottom: 0;
+}
+
+.workspace-quick-switcher-item:hover,
+.workspace-quick-switcher-item.is-active {
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.workspace-quick-switcher-item-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.workspace-quick-switcher-item-dot.is-clean {
+  background: #8fd7a2;
+}
+
+.workspace-quick-switcher-item-dot.is-dirty {
+  background: #f2c36a;
+}
+
+.workspace-quick-switcher-item-dot.is-conflicted,
+.workspace-quick-switcher-item-dot.is-error {
+  background: var(--danger);
+}
+
+.workspace-quick-switcher-item-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.workspace-quick-switcher-item-copy strong,
+.workspace-quick-switcher-item-copy span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-quick-switcher-item-copy strong {
+  font-size: 0.78rem;
+  font-weight: 600;
+}
+
+.workspace-quick-switcher-item-copy span {
+  color: var(--surface-soft-text);
+  font-size: 0.68rem;
+}
+
+.workspace-quick-switcher-item-badge {
+  color: rgba(243, 246, 250, 0.72);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.workspace-quick-switcher-empty {
+  display: grid;
+  gap: 4px;
+  padding: 8px 2px 0;
+  color: var(--surface-soft-text);
+}
+
+.workspace-quick-switcher-empty strong {
+  color: var(--control-text-strong);
+  font-size: 0.8rem;
+}
+
+.workspace-quick-switcher-empty span {
+  font-size: 0.68rem;
 }
 
 .workspace-modal-header {
@@ -1402,6 +1679,522 @@ button {
   border: 1px solid var(--swatch-ring);
 }
 
+.workspace-git-backdrop {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: stretch end;
+  padding: 14px;
+  background:
+    linear-gradient(270deg, rgba(8, 10, 14, 0.54) 0%, rgba(8, 10, 14, 0.28) 22%, rgba(8, 10, 14, 0) 54%);
+  backdrop-filter: blur(6px);
+  pointer-events: auto;
+}
+
+.workspace-git-panel {
+  width: min(364px, calc(100vw - 28px));
+  height: 100%;
+  max-height: min(780px, calc(100vh - 28px));
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent 18%),
+    rgba(22, 25, 31, 0.98);
+  box-shadow:
+    0 20px 56px rgba(0, 0, 0, 0.32),
+    inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.workspace-git-panel-body::-webkit-scrollbar {
+  width: 8px;
+}
+
+.workspace-git-panel-body::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: var(--scrollbar-thumb);
+}
+
+.workspace-git-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 12px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.workspace-git-panel-heading {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.workspace-git-panel-mark {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.workspace-git-panel-title-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.workspace-git-panel h2 {
+  margin: 0;
+  font-family: "SF Pro Display", "Avenir Next", sans-serif;
+  font-size: 0.98rem;
+  font-weight: 600;
+  letter-spacing: -0.015em;
+  line-height: 1.1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-git-panel-state {
+  flex: 0 0 auto;
+  min-height: 18px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.025);
+  color: var(--surface-soft-text);
+  font-size: 0.64rem;
+  font-weight: 600;
+}
+
+.workspace-git-panel-state.is-clean {
+  border-color: rgba(115, 199, 135, 0.24);
+  color: #9bdbab;
+}
+
+.workspace-git-panel-state.is-dirty {
+  border-color: rgba(224, 181, 108, 0.24);
+  color: #f0cf87;
+}
+
+.workspace-git-panel-state.is-conflicted,
+.workspace-git-panel-state.is-error {
+  border-color: rgba(224, 108, 117, 0.28);
+  color: #f39aa1;
+}
+
+.workspace-git-panel-copy {
+  margin: 0;
+  color: var(--surface-soft-text);
+  font-size: 0.68rem;
+  line-height: 1.4;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-git-panel-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.workspace-git-panel-button {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.025);
+  color: var(--control-text);
+  transition:
+    transform 160ms ease,
+    border-color 160ms ease,
+    background 160ms ease,
+    color 160ms ease;
+}
+
+.workspace-git-panel-button:hover {
+  transform: translateY(-1px);
+  border-color: var(--control-border-strong);
+  background: var(--control-bg-hover);
+  color: var(--control-text-strong);
+}
+
+.workspace-git-panel-button svg {
+  width: 12px;
+  height: 12px;
+}
+
+.workspace-git-panel-body {
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  padding: 10px 12px 14px;
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+.workspace-git-summary-shell {
+  min-width: 0;
+  display: grid;
+  gap: 7px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+}
+
+.workspace-git-summary-line {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+}
+
+.workspace-git-summary-branch {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--control-text-strong);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.workspace-git-summary-branch strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-git-summary-branch-icon {
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+}
+
+.workspace-git-summary-branch-icon svg {
+  width: 12px;
+  height: 12px;
+}
+
+.workspace-git-summary-meta {
+  min-height: 18px;
+  display: inline-flex;
+  align-items: center;
+  color: var(--surface-soft-text);
+  font-size: 0.66rem;
+  letter-spacing: 0.01em;
+}
+
+.workspace-git-summary-meta.is-clean {
+  color: #9bdbab;
+}
+
+.workspace-git-summary-meta.is-dirty {
+  color: #f0cf87;
+}
+
+.workspace-git-summary-meta.is-conflicted,
+.workspace-git-summary-meta.is-error {
+  color: #f39aa1;
+}
+
+.workspace-git-summary-paths {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.workspace-git-summary-path {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.workspace-git-summary-path span,
+.workspace-git-section-mark {
+  color: var(--surface-soft-text);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.workspace-git-summary-path strong {
+  min-width: 0;
+  color: rgba(223, 229, 236, 0.9);
+  font-size: 0.72rem;
+  font-weight: 500;
+  line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-git-change-shell {
+  display: grid;
+  gap: 10px;
+  padding-top: 2px;
+}
+
+.workspace-git-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+}
+
+.workspace-git-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0;
+  border: 0;
+  background: none;
+  border-radius: 0;
+  color: var(--text);
+}
+
+.workspace-git-chip strong {
+  font-size: 0.68rem;
+  font-weight: 700;
+}
+
+.workspace-git-chip span {
+  color: var(--surface-soft-text);
+  font-size: 0.68rem;
+  font-weight: 600;
+}
+
+.workspace-git-chip.is-conflicted strong {
+  color: #f39aa1;
+}
+
+.workspace-git-chip.is-staged strong {
+  color: #7db9f3;
+}
+
+.workspace-git-chip.is-modified strong {
+  color: #f0cf87;
+}
+
+.workspace-git-chip.is-deleted strong {
+  color: #f39aa1;
+}
+
+.workspace-git-chip.is-renamed strong {
+  color: #b8a9ff;
+}
+
+.workspace-git-chip.is-untracked strong {
+  color: #9bdbab;
+}
+
+.workspace-git-chip.is-clean strong {
+  color: #9bdbab;
+}
+
+.workspace-git-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 2px;
+}
+
+.workspace-git-section-head > div {
+  display: grid;
+  gap: 2px;
+}
+
+.workspace-git-section-head strong {
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.workspace-git-section-total {
+  min-width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--surface-soft-text);
+  font-size: 0.64rem;
+  font-weight: 700;
+}
+
+.workspace-git-file-sections {
+  display: grid;
+  gap: 10px;
+}
+
+.workspace-git-file-section {
+  display: grid;
+  gap: 4px;
+}
+
+.workspace-git-file-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.workspace-git-file-section-head strong {
+  font-size: 0.64rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.workspace-git-file-section-head span {
+  color: var(--surface-soft-text);
+  font-size: 0.66rem;
+}
+
+.workspace-git-file-list {
+  display: grid;
+  gap: 0;
+}
+
+.workspace-git-file-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 0;
+  border-radius: 0;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  transition:
+    border-color 140ms ease,
+    background 140ms ease;
+}
+
+.workspace-git-file-row:hover {
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.workspace-git-file-row:last-child {
+  border-bottom: 0;
+}
+
+.workspace-git-file-icon {
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--surface-soft-text);
+}
+
+.workspace-git-file-icon svg {
+  width: 13px;
+  height: 13px;
+}
+
+.workspace-git-file-copy {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.workspace-git-file-copy strong,
+.workspace-git-file-copy span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-git-file-copy strong {
+  font-size: 0.74rem;
+  font-weight: 600;
+}
+
+.workspace-git-file-copy span {
+  color: var(--surface-soft-text);
+  font-size: 0.66rem;
+}
+
+.workspace-git-file-status {
+  min-width: auto;
+  height: auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  background: none;
+  color: var(--surface-soft-text);
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.workspace-git-file-status.is-modified {
+  color: #f0cf87;
+}
+
+.workspace-git-file-status.is-staged {
+  color: #7db9f3;
+}
+
+.workspace-git-file-status.is-untracked {
+  color: #9bdbab;
+}
+
+.workspace-git-file-status.is-deleted,
+.workspace-git-file-status.is-conflicted {
+  color: #f39aa1;
+}
+
+.workspace-git-file-status.is-renamed {
+  color: #b8a9ff;
+}
+
+.workspace-git-empty {
+  min-height: 84px;
+  display: grid;
+  place-items: start;
+  gap: 6px;
+  padding: 8px 0 0;
+  border: 0;
+  color: var(--surface-soft-text);
+  text-align: left;
+}
+
+.workspace-git-empty strong {
+  color: var(--control-text-strong);
+  font-size: 0.82rem;
+}
+
+.workspace-git-empty p {
+  max-width: 38ch;
+  margin: 0;
+  font-size: 0.7rem;
+  line-height: 1.45;
+}
+
+.workspace-git-panel > .workspace-git-empty {
+  margin: 12px;
+}
+
 .workspace-screen {
   height: 100%;
   overflow: hidden;
@@ -1420,7 +2213,7 @@ button {
   height: 100%;
   overflow: hidden;
   padding: 1px;
-  border-radius: 14px;
+  border-radius: 10px;
   background: var(--pane-seam);
 }
 
@@ -1478,12 +2271,83 @@ button {
   border-color: rgba(240, 143, 102, 0.22);
 }
 
+.terminal-pane-header {
+  min-height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 100%),
+    rgba(255, 255, 255, 0.01);
+}
+
+.terminal-pane-title,
+.terminal-pane-meta {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.terminal-pane-title strong,
+.terminal-pane-meta span {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.terminal-pane-title strong {
+  color: rgba(243, 246, 250, 0.82);
+  font-size: 0.66rem;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.terminal-pane-status {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.16);
+}
+
+.terminal-pane-status.is-ready {
+  background: #8fd7a2;
+}
+
+.terminal-pane-status.is-booting {
+  background: #f2c36a;
+}
+
+.terminal-pane-status.is-failed {
+  background: var(--danger);
+}
+
+.terminal-pane-meta {
+  color: var(--surface-soft-text);
+  font-size: 0.64rem;
+}
+
+.terminal-pane-meta-separator {
+  width: 3px;
+  height: 3px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+}
+
 .terminal-host {
   position: relative;
   flex: 1;
   min-height: 0;
   min-width: 0;
-  padding: 10px 12px;
+  padding: 8px 12px 10px;
   background: linear-gradient(180deg, var(--pane-top-gloss), transparent 10%);
 }
 
@@ -1579,8 +2443,20 @@ button {
 }
 
 @media (max-width: 980px) {
-  .workspace-strip-summary {
+  .workspace-statusbar-brand {
     display: none;
+  }
+
+  .workspace-quick-switcher {
+    width: min(520px, 100%);
+  }
+
+  .workspace-statusbar-item.is-path {
+    max-width: 220px;
+  }
+
+  .workspace-git-panel {
+    width: min(400px, 100%);
   }
 
   .settings-sheet {
@@ -1627,7 +2503,7 @@ button {
   }
 
   .workspace-tabs-shell {
-    padding: 3px;
+    padding: 0;
   }
 
   .workspace-tab-shell {
@@ -1640,6 +2516,49 @@ button {
 
   .workspace-stage {
     padding: 6px 10px 10px;
+  }
+
+  .workspace-statusbar {
+    padding: 0 8px;
+  }
+
+  .workspace-statusbar-group.is-right {
+    display: none;
+  }
+
+  .workspace-quick-switcher-backdrop {
+    padding: 16px;
+    place-items: start stretch;
+  }
+
+  .workspace-quick-switcher {
+    width: 100%;
+    padding: 12px;
+    border-radius: 16px;
+  }
+
+  .workspace-git-backdrop {
+    padding: 12px;
+    background: rgba(8, 10, 14, 0.56);
+  }
+
+  .workspace-git-panel {
+    width: 100%;
+    max-height: 100%;
+    border-radius: 20px;
+  }
+
+  .workspace-git-panel-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .workspace-git-panel-actions {
+    justify-content: flex-end;
+  }
+
+  .workspace-git-panel-title-row {
+    flex-wrap: wrap;
   }
 
   .workspace-modal-backdrop {

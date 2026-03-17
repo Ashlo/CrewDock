@@ -5,6 +5,7 @@ const STATE_EVENT = "crewdock://state-changed";
 const TERMINAL_DATA_EVENT = "crewdock://terminal-data";
 const MAX_PENDING_TERMINAL_BYTES = 4 * 1024 * 1024;
 const LAUNCHER_CARD_TRANSITION_MS = 360;
+const GIT_REFRESH_INTERVAL_MS = 3000;
 const DEFAULT_THEME_ID = "one-dark";
 const LAUNCHER_COMMANDS = Object.freeze(["help", "pwd", "ls", "cd", "open", "clear"]);
 const PATH_AWARE_LAUNCHER_COMMANDS = new Set(["ls", "cd", "open"]);
@@ -559,6 +560,11 @@ const uiState = {
   launcherCommandCursor: null,
   contextMenu: null,
   maximizedPaneId: null,
+  gitPanelVisible: false,
+  quickSwitcherVisible: false,
+  quickSwitcherQuery: "",
+  quickSwitcherCursor: 0,
+  quickSwitcherShouldFocus: false,
   workspaceRenameDraft: null,
   workspaceRenameShouldFocus: false,
   workspaceRenameSaving: false,
@@ -573,6 +579,9 @@ const workspacePaneIds = new Map();
 const terminalViewportLines = new Map();
 let launcherCardTransitionTimer = 0;
 let launcherCardAnimationFrame = 0;
+let gitRefreshIntervalTimer = 0;
+let gitRefreshInFlight = null;
+let gitRefreshQueuedWorkspaceId = null;
 
 void init();
 
@@ -606,9 +615,13 @@ async function init() {
   document.addEventListener("pointerdown", handlePointerDown, true);
   document.addEventListener("scroll", handleScroll, true);
   document.addEventListener("wheel", handleWheel, { passive: false });
+  window.addEventListener("focus", handleWindowFocus);
+  window.addEventListener("blur", handleWindowBlur);
   window.addEventListener("resize", handleWindowResize);
 
   render();
+  syncGitRefreshLoop();
+  void refreshActiveWorkspaceGitStatus();
 }
 
 function detectPlatform() {
@@ -636,6 +649,8 @@ function createBridge() {
         tauriApi.core.invoke("create_workspace", { path, paneCount }),
       renameWorkspace: (workspaceId, name) =>
         tauriApi.core.invoke("rename_workspace", { workspaceId, name }),
+      refreshWorkspaceGitStatus: (workspaceId) =>
+        tauriApi.core.invoke("refresh_workspace_git_status", { workspaceId }),
       switchWorkspace: (workspaceId) =>
         tauriApi.core.invoke("switch_workspace", { workspaceId }),
       closeWorkspace: (workspaceId) =>
@@ -712,6 +727,7 @@ function createMockBridge() {
         path: workspace.path,
         layout: workspace.layout,
         isLive: workspace.started,
+        gitSummary: workspace.gitDetail?.summary || null,
       })),
       activeWorkspaceId,
       activeWorkspace: activeWorkspace
@@ -722,6 +738,7 @@ function createMockBridge() {
             layout: activeWorkspace.layout,
             panes: activeWorkspace.panes.map((pane) => ({ ...pane })),
             paneLayout: structuredClone(activeWorkspace.paneLayout),
+            gitDetail: activeWorkspace.gitDetail ? structuredClone(activeWorkspace.gitDetail) : null,
           }
         : null,
     };
@@ -781,6 +798,32 @@ function createMockBridge() {
     return parts[parts.length - 1] || path;
   }
 
+  function buildMockGitDetail(path) {
+    return {
+      summary: {
+        state: "clean",
+        branch: "main",
+        upstream: "origin/main",
+        ahead: 0,
+        behind: 0,
+        counts: {
+          staged: 0,
+          modified: 0,
+          deleted: 0,
+          renamed: 0,
+          untracked: 0,
+          conflicted: 0,
+        },
+        isDirty: false,
+        hasConflicts: false,
+        message: null,
+      },
+      repoRoot: path,
+      workspaceRelativePath: null,
+      files: [],
+    };
+  }
+
   return {
     getAppSnapshot: async () => emitState(),
     listenState: async (handler) => {
@@ -823,6 +866,7 @@ function createMockBridge() {
         path: normalizedPath,
         layout,
         started: false,
+        gitDetail: buildMockGitDetail(normalizedPath),
         panes: Array.from({ length: layout.paneCount }, (_, index) => ({
           id: `pane-${workspaceCounter}-${index + 1}`,
           label: `Shell ${String(index + 1).padStart(2, "0")}`,
@@ -848,6 +892,13 @@ function createMockBridge() {
       }
 
       workspace.name = nextName;
+      return emitState();
+    },
+    refreshWorkspaceGitStatus: async (workspaceId) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      if (workspace) {
+        workspace.gitDetail = buildMockGitDetail(workspace.path);
+      }
       return emitState();
     },
     switchWorkspace: async (workspaceId) => {
@@ -1056,8 +1107,21 @@ function syncMountedTerminalThemes(theme = getCurrentThemeDefinition()) {
 }
 
 async function handleClick(event) {
-  const target = event.target.closest("[data-action]");
+  const clickedElement = event.target instanceof Element ? event.target : null;
+  const target = clickedElement?.closest("[data-action]");
   if (!target) {
+    return;
+  }
+
+  if (target.dataset.action === "close-settings" && clickedElement?.closest(".settings-sheet")) {
+    return;
+  }
+
+  if (target.dataset.action === "close-git-panel" && clickedElement?.closest(".workspace-git-panel")) {
+    return;
+  }
+
+  if (target.dataset.action === "close-quick-switcher" && clickedElement?.closest(".workspace-quick-switcher")) {
     return;
   }
 
@@ -1068,6 +1132,8 @@ async function handleClick(event) {
 
   if (target.dataset.action === "show-settings") {
     uiState.settingsVisible = true;
+    uiState.gitPanelVisible = false;
+    closeQuickSwitcher();
     uiState.pendingWorkspaceDraft = null;
     uiState.contextMenu = null;
     render();
@@ -1083,10 +1149,43 @@ async function handleClick(event) {
   if (target.dataset.action === "show-launcher") {
     uiState.launcherVisible = true;
     uiState.settingsVisible = false;
+    uiState.gitPanelVisible = false;
+    closeQuickSwitcher();
     uiState.pendingWorkspaceDraft = null;
     uiState.contextMenu = null;
     uiState.maximizedPaneId = null;
     render();
+    return;
+  }
+
+  if (target.dataset.action === "show-git-panel") {
+    if (!uiState.snapshot?.activeWorkspace) {
+      return;
+    }
+
+    uiState.gitPanelVisible = true;
+    uiState.settingsVisible = false;
+    closeQuickSwitcher();
+    uiState.pendingWorkspaceDraft = null;
+    render();
+    void refreshActiveWorkspaceGitStatus();
+    return;
+  }
+
+  if (target.dataset.action === "close-git-panel") {
+    uiState.gitPanelVisible = false;
+    render();
+    return;
+  }
+
+  if (target.dataset.action === "close-quick-switcher") {
+    closeQuickSwitcher();
+    render();
+    return;
+  }
+
+  if (target.dataset.action === "refresh-git-status") {
+    await refreshActiveWorkspaceGitStatus({ force: true });
     return;
   }
 
@@ -1102,6 +1201,8 @@ async function handleClick(event) {
 
   if (target.dataset.action === "open-workspace") {
     uiState.settingsVisible = false;
+    uiState.gitPanelVisible = false;
+    closeQuickSwitcher();
     await beginWorkspaceCreation();
     return;
   }
@@ -1112,6 +1213,7 @@ async function handleClick(event) {
       return;
     }
 
+    closeQuickSwitcher();
     startWorkspaceRename(workspaceId);
     render();
     return;
@@ -1177,9 +1279,12 @@ async function handleClick(event) {
     );
     uiState.launcherVisible = false;
     uiState.settingsVisible = false;
+    uiState.gitPanelVisible = false;
+    closeQuickSwitcher();
     uiState.pendingWorkspaceDraft = null;
     clearLauncherCommandState();
     render();
+    void refreshActiveWorkspaceGitStatus({ force: true });
     return;
   }
 
@@ -1188,14 +1293,23 @@ async function handleClick(event) {
     if (!workspaceId || workspaceId === uiState.snapshot?.activeWorkspaceId) {
       uiState.launcherVisible = false;
       uiState.settingsVisible = false;
+      closeQuickSwitcher();
       render();
       return;
     }
 
-    uiState.snapshot = await bridge.switchWorkspace(workspaceId);
-    uiState.launcherVisible = false;
-    uiState.settingsVisible = false;
+    await activateWorkspace(workspaceId);
     render();
+    return;
+  }
+
+  if (target.dataset.action === "quick-switch-workspace") {
+    const workspaceId = target.dataset.workspaceId;
+    if (!workspaceId) {
+      return;
+    }
+
+    await activateWorkspace(workspaceId);
     return;
   }
 
@@ -1213,6 +1327,7 @@ async function handleClick(event) {
 
     uiState.snapshot = await bridge.closeWorkspace(workspaceId);
     render();
+    void refreshActiveWorkspaceGitStatus({ force: true });
   }
 }
 
@@ -1317,6 +1432,15 @@ function handleWindowResize() {
   );
 }
 
+function handleWindowFocus() {
+  syncGitRefreshLoop();
+  void refreshActiveWorkspaceGitStatus({ force: true });
+}
+
+function handleWindowBlur() {
+  syncGitRefreshLoop();
+}
+
 function handleFocusOut(event) {
   const renameInput = event.target.closest("[data-workspace-rename-input]");
   if (!renameInput || uiState.workspaceRenameSaving) {
@@ -1352,6 +1476,15 @@ async function handleSubmit(event) {
 }
 
 function handleInput(event) {
+  const quickSwitcherInput = event.target.closest("[data-quick-switcher-input]");
+  if (quickSwitcherInput) {
+    uiState.quickSwitcherQuery = quickSwitcherInput.value;
+    syncQuickSwitcherCursor();
+    uiState.quickSwitcherShouldFocus = true;
+    render();
+    return;
+  }
+
   const renameInput = event.target.closest("[data-workspace-rename-input]");
   if (renameInput && uiState.workspaceRenameDraft) {
     uiState.workspaceRenameDraft = {
@@ -1389,6 +1522,44 @@ function handleChange(event) {
 }
 
 async function handleKeyDown(event) {
+  const quickSwitcherInput = event.target.closest("[data-quick-switcher-input]");
+  if (quickSwitcherInput) {
+    const items = getQuickSwitcherItems();
+
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeQuickSwitcher();
+      render();
+      return;
+    }
+
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      moveQuickSwitcherCursor(1, items.length);
+      uiState.quickSwitcherShouldFocus = true;
+      render();
+      return;
+    }
+
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      moveQuickSwitcherCursor(-1, items.length);
+      uiState.quickSwitcherShouldFocus = true;
+      render();
+      return;
+    }
+
+    if (event.key === "Enter") {
+      event.preventDefault();
+      const item = items[uiState.quickSwitcherCursor] || items[0] || null;
+      if (item) {
+        await activateWorkspace(item.id);
+        render();
+      }
+      return;
+    }
+  }
+
   const renameInput = event.target.closest("[data-workspace-rename-input]");
   if (renameInput) {
     if (event.key === "Escape") {
@@ -1402,8 +1573,41 @@ async function handleKeyDown(event) {
   if ((event.metaKey || event.ctrlKey) && event.key === ",") {
     event.preventDefault();
     uiState.settingsVisible = true;
+    uiState.gitPanelVisible = false;
+    closeQuickSwitcher();
     uiState.pendingWorkspaceDraft = null;
     uiState.contextMenu = null;
+    render();
+    return;
+  }
+
+  if ((event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === "k") {
+    event.preventDefault();
+    openQuickSwitcher();
+    render();
+    return;
+  }
+
+  if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "g") {
+    event.preventDefault();
+    if (!uiState.snapshot?.activeWorkspace) {
+      return;
+    }
+
+    uiState.gitPanelVisible = !uiState.gitPanelVisible;
+    if (uiState.gitPanelVisible) {
+      uiState.settingsVisible = false;
+      closeQuickSwitcher();
+      uiState.pendingWorkspaceDraft = null;
+      void refreshActiveWorkspaceGitStatus({ force: true });
+    }
+    render();
+    return;
+  }
+
+  if (uiState.quickSwitcherVisible && event.key === "Escape") {
+    event.preventDefault();
+    closeQuickSwitcher();
     render();
     return;
   }
@@ -1411,6 +1615,13 @@ async function handleKeyDown(event) {
   if (uiState.settingsVisible && event.key === "Escape") {
     event.preventDefault();
     uiState.settingsVisible = false;
+    render();
+    return;
+  }
+
+  if (uiState.gitPanelVisible && event.key === "Escape") {
+    event.preventDefault();
+    uiState.gitPanelVisible = false;
     render();
     return;
   }
@@ -1470,7 +1681,52 @@ async function beginWorkspaceCreation() {
     snapshot?.launcher?.presets,
   );
   uiState.launcherVisible = true;
+  closeQuickSwitcher();
   render();
+}
+
+async function activateWorkspace(workspaceId) {
+  if (!workspaceId) {
+    return;
+  }
+
+  if (workspaceId !== uiState.snapshot?.activeWorkspaceId) {
+    uiState.snapshot = await bridge.switchWorkspace(workspaceId);
+  }
+
+  uiState.launcherVisible = false;
+  uiState.settingsVisible = false;
+  uiState.gitPanelVisible = false;
+  uiState.pendingWorkspaceDraft = null;
+  uiState.contextMenu = null;
+  closeQuickSwitcher();
+  void refreshActiveWorkspaceGitStatus({ force: true });
+}
+
+function openQuickSwitcher() {
+  if (!uiState.snapshot?.workspaces?.length) {
+    return;
+  }
+
+  uiState.quickSwitcherVisible = true;
+  uiState.launcherVisible = false;
+  uiState.quickSwitcherQuery = "";
+  uiState.quickSwitcherCursor = Math.max(
+    0,
+    uiState.snapshot.workspaces.findIndex((workspace) => workspace.id === uiState.snapshot?.activeWorkspaceId),
+  );
+  uiState.quickSwitcherShouldFocus = true;
+  uiState.settingsVisible = false;
+  uiState.gitPanelVisible = false;
+  uiState.pendingWorkspaceDraft = null;
+  uiState.contextMenu = null;
+}
+
+function closeQuickSwitcher() {
+  uiState.quickSwitcherVisible = false;
+  uiState.quickSwitcherQuery = "";
+  uiState.quickSwitcherCursor = 0;
+  uiState.quickSwitcherShouldFocus = false;
 }
 
 function getWorkspaceById(workspaceId, snapshot = uiState.snapshot) {
@@ -1491,6 +1747,7 @@ function startWorkspaceRename(workspaceId) {
   uiState.workspaceRenameSaving = false;
   uiState.launcherVisible = false;
   uiState.settingsVisible = false;
+  uiState.gitPanelVisible = false;
   uiState.contextMenu = null;
 }
 
@@ -1543,6 +1800,7 @@ function ensureFrame() {
     <div class="app-shell">
       <header class="workspace-strip" data-region="strip"></header>
       <section class="workspace-stage" data-region="stage"></section>
+      <footer class="workspace-statusbar-region" data-region="status"></footer>
       <div class="workspace-context-layer" data-region="context"></div>
       <div class="workspace-modal-layer" data-region="modal"></div>
     </div>
@@ -1583,29 +1841,46 @@ function render() {
     uiState.contextMenu = null;
   }
 
+  if (uiState.gitPanelVisible && !activeWorkspace) {
+    uiState.gitPanelVisible = false;
+  }
+
+  if (uiState.quickSwitcherVisible && snapshot.workspaces.length === 0) {
+    closeQuickSwitcher();
+  }
+
   const stripRegion = app.querySelector('[data-region="strip"]');
   const stageRegion = app.querySelector('[data-region="stage"]');
+  const statusRegion = app.querySelector('[data-region="status"]');
   const contextRegion = app.querySelector('[data-region="context"]');
   const modalRegion = app.querySelector('[data-region="modal"]');
 
   stripRegion.innerHTML = renderWorkspaceStrip(
     snapshot.workspaces,
     snapshot.activeWorkspaceId,
-    activeWorkspace,
   );
+  statusRegion.innerHTML = renderWorkspaceStatusBar(snapshot, activeWorkspace);
   syncWorkspaceTabRail(snapshot.activeWorkspaceId, snapshot.workspaces.length);
   if (uiState.workspaceRenameDraft && uiState.workspaceRenameShouldFocus) {
     focusWorkspaceRenameInput();
   }
-  modalRegion.innerHTML = uiState.settingsVisible
-    ? renderSettingsSheet(snapshot)
-    : uiState.pendingWorkspaceDraft
-      ? renderLayoutPicker(snapshot.launcher.presets, uiState.pendingWorkspaceDraft)
-      : "";
+  modalRegion.innerHTML = uiState.quickSwitcherVisible
+    ? renderQuickSwitcher(snapshot)
+    : uiState.settingsVisible
+      ? renderSettingsSheet(snapshot)
+      : uiState.pendingWorkspaceDraft
+        ? renderLayoutPicker(snapshot.launcher.presets, uiState.pendingWorkspaceDraft)
+        : uiState.gitPanelVisible && activeWorkspace
+          ? renderGitPanel(activeWorkspace)
+          : "";
   contextRegion.innerHTML =
     uiState.contextMenu && activeWorkspace
       ? renderContextMenu(uiState.contextMenu, activeWorkspace, snapshot)
       : "";
+  if (uiState.quickSwitcherVisible && uiState.quickSwitcherShouldFocus) {
+    focusQuickSwitcherInput();
+  }
+  syncGitRefreshLoop();
 
   if (shouldShowLauncher) {
     if (uiState.mountedWorkspaceId) {
@@ -1642,22 +1917,11 @@ function render() {
   syncWorkspace(activeWorkspace);
 }
 
-function renderWorkspaceStrip(workspaces, activeWorkspaceId, activeWorkspace) {
+function renderWorkspaceStrip(workspaces, activeWorkspaceId) {
   const tabLabels = buildWorkspaceTabLabels(workspaces);
   return `
     <div class="workspace-strip-track" data-tauri-drag-region>
       <div class="workspace-strip-leading" data-tauri-drag-region aria-hidden="true"></div>
-      <div
-        class="workspace-strip-summary"
-        data-tauri-drag-region
-        title="${escapeHtml(activeWorkspace?.path || "CrewDock")}"
-      >
-        <span class="workspace-strip-summary-mark">CrewDock</span>
-        <div class="workspace-strip-summary-copy">
-          <strong>${escapeHtml(activeWorkspace?.name || "Launcher")}</strong>
-          <span>${escapeHtml(renderStripSummaryMeta(activeWorkspace, workspaces.length))}</span>
-        </div>
-      </div>
       <div class="workspace-tabs-shell" data-workspace-tabs-shell data-tauri-drag-region>
         <button
           class="workspace-tabs-scroll workspace-tabs-scroll-left"
@@ -1672,15 +1936,19 @@ function renderWorkspaceStrip(workspaces, activeWorkspaceId, activeWorkspace) {
         </button>
         <div class="workspace-tabs-viewport" data-workspace-tabs-viewport data-tauri-drag-region>
           <div class="workspace-tabs" data-workspace-tabs data-tauri-drag-region>
-            ${workspaces
-              .map((workspace) =>
-                renderWorkspaceTab(
-                  workspace,
-                  activeWorkspaceId,
-                  tabLabels.get(workspace.id) || workspace.name,
-                ),
-              )
-              .join("")}
+            ${
+              workspaces.length
+                ? workspaces
+                    .map((workspace) =>
+                      renderWorkspaceTab(
+                        workspace,
+                        activeWorkspaceId,
+                        tabLabels.get(workspace.id) || workspace.name,
+                      ),
+                    )
+                    .join("")
+                : '<span class="workspace-tabs-empty" data-tauri-drag-region="true">No workspaces open</span>'
+            }
           </div>
         </div>
         <button
@@ -1719,19 +1987,6 @@ function renderWorkspaceStrip(workspaces, activeWorkspaceId, activeWorkspace) {
   `;
 }
 
-function renderStripSummaryMeta(activeWorkspace, workspaceCount) {
-  if (!activeWorkspace) {
-    if (workspaceCount <= 0) {
-      return "Open a folder to start";
-    }
-
-    return `${workspaceCount} ${workspaceCount === 1 ? "workspace" : "workspaces"} ready`;
-  }
-
-  const paneCount = activeWorkspace.panes?.length || activeWorkspace.layout?.paneCount || 0;
-  return `${paneCount} ${paneCount === 1 ? "pane" : "panes"} / ${compactWorkspacePath(activeWorkspace.path)}`;
-}
-
 function renderSettingsIcon() {
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -1757,6 +2012,30 @@ function renderChevronIcon(direction) {
   `;
 }
 
+function renderBranchIcon() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M7 3a3 3 0 1 1 0 6v7.2a3 3 0 1 1-2 0V9a3 3 0 0 1 2-6Zm0 2a1 1 0 1 0 0 2 1 1 0 0 0 0-2Zm10 4a3 3 0 1 1-2.9 3.8H9v2h5.1A3 3 0 1 1 17 9Zm0 2a1 1 0 1 0 0 2 1 1 0 0 0 0-2Zm0 7a1 1 0 1 0 0 2 1 1 0 0 0 0-2Z" fill="currentColor"></path>
+    </svg>
+  `;
+}
+
+function renderRefreshIcon() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M12 5a7 7 0 0 1 6.2 3.8V6.5h2v6h-6v-2h2.7A5 5 0 1 0 17 15h2a7 7 0 1 1-7-10Z" fill="currentColor"></path>
+    </svg>
+  `;
+}
+
+function renderFileIcon() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M7 3h6.8L19 8.2V19a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Zm6 1.8V9h4.2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></path>
+    </svg>
+  `;
+}
+
 function renderTabRenameIcon() {
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -1773,11 +2052,225 @@ function renderTabCloseIcon() {
   `;
 }
 
+function renderWorkspaceStatusBar(snapshot, activeWorkspace) {
+  const leftItems = [`<span class="workspace-statusbar-brand">CrewDock</span>`];
+  const rightItems = [];
+
+  if (!activeWorkspace) {
+    leftItems.push(renderStatusBarItem("Launcher", "Source folders and workspace creation"));
+
+    if (snapshot.workspaces.length > 0) {
+      rightItems.push(
+        renderStatusBarItem(
+          `${snapshot.workspaces.length} ${snapshot.workspaces.length === 1 ? "workspace" : "workspaces"}`,
+        ),
+      );
+    }
+
+    rightItems.push(
+      renderStatusBarItem(compactWorkspacePath(snapshot.launcher.basePath), snapshot.launcher.basePath, "is-path"),
+    );
+  } else {
+    const summary = activeWorkspace.gitDetail?.summary || null;
+    const paneCount = activeWorkspace.panes?.length || activeWorkspace.layout?.paneCount || 0;
+    const pathLabel = compactWorkspacePath(activeWorkspace.path);
+
+    leftItems.push(renderStatusBarItem(pathLabel, activeWorkspace.path, "is-path is-primary"));
+    leftItems.push(renderStatusBarGitButton(summary));
+
+    const stateLabel = formatStatusBarState(summary);
+    if (stateLabel) {
+      rightItems.push(renderStatusBarItem(stateLabel, null, `is-${getGitTone(summary)}`));
+    }
+
+    const syncLabel = formatStatusBarSync(summary);
+    if (syncLabel) {
+      rightItems.push(renderStatusBarItem(syncLabel, summary?.upstream || "Repository sync"));
+    }
+
+    rightItems.push(
+      renderStatusBarItem(
+        `${paneCount} ${paneCount === 1 ? "pane" : "panes"}`,
+        `${paneCount} ${paneCount === 1 ? "pane" : "panes"} active`,
+      ),
+    );
+  }
+
+  return `
+    <div class="workspace-statusbar" role="status" aria-live="polite">
+      <div class="workspace-statusbar-group">
+        ${leftItems.join("")}
+      </div>
+      <div class="workspace-statusbar-group is-right">
+        ${rightItems.join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderStatusBarItem(label, title = null, className = "") {
+  return `
+    <span class="workspace-statusbar-item ${className}"${title ? ` title="${escapeHtml(title)}"` : ""}>
+      ${escapeHtml(label)}
+    </span>
+  `;
+}
+
+function renderStatusBarGitButton(summary) {
+  const tone = getGitTone(summary);
+  const label = summary ? formatGitBranchLabel(summary) : "Checking repo";
+  return `
+    <button
+      class="workspace-statusbar-item workspace-statusbar-button is-${tone}"
+      type="button"
+      data-action="show-git-panel"
+      title="${escapeHtml(formatGitBadgeTitle(summary))}"
+      aria-label="${escapeHtml(formatGitBadgeTitle(summary))}"
+    >
+      <span class="workspace-statusbar-icon" aria-hidden="true">${renderBranchIcon()}</span>
+      <span>${escapeHtml(label)}</span>
+    </button>
+  `;
+}
+
+function formatStatusBarState(summary) {
+  if (!summary) {
+    return "Checking";
+  }
+
+  if (summary.state === "error") {
+    return "Git unavailable";
+  }
+
+  if (summary.state === "not-repo") {
+    return "No repo";
+  }
+
+  if (summary.hasConflicts) {
+    return "Conflicted";
+  }
+
+  if (summary.isDirty) {
+    return "Dirty";
+  }
+
+  return null;
+}
+
+function formatStatusBarSync(summary) {
+  if (!summary || !summary.upstream) {
+    return null;
+  }
+
+  const ahead = Number(summary.ahead || 0);
+  const behind = Number(summary.behind || 0);
+  if (ahead <= 0 && behind <= 0) {
+    return null;
+  }
+
+  return `+${ahead} / -${behind}`;
+}
+
+function renderQuickSwitcher(snapshot) {
+  const items = getQuickSwitcherItems(snapshot);
+  const activeItem = items[uiState.quickSwitcherCursor] || items[0] || null;
+
+  return `
+    <div class="workspace-quick-switcher-backdrop" data-action="close-quick-switcher">
+      <section class="workspace-quick-switcher" role="dialog" aria-modal="true" aria-labelledby="quick-switcher-title">
+        <header class="workspace-quick-switcher-header">
+          <div>
+            <p class="workspace-quick-switcher-mark">Quick Switch</p>
+            <h2 id="quick-switcher-title">Jump to workspace</h2>
+          </div>
+          <button
+            class="workspace-quick-switcher-close"
+            type="button"
+            data-action="close-quick-switcher"
+            aria-label="Close quick switcher"
+            title="Close quick switcher"
+          >
+            ${renderCloseIcon()}
+          </button>
+        </header>
+        <div class="workspace-quick-switcher-search">
+          <span class="workspace-quick-switcher-search-mark">K</span>
+          <input
+            class="workspace-quick-switcher-input"
+            data-quick-switcher-input
+            type="text"
+            value="${escapeHtml(uiState.quickSwitcherQuery)}"
+            placeholder="Search workspaces"
+            autocomplete="off"
+            autocapitalize="off"
+            spellcheck="false"
+          />
+        </div>
+        <div class="workspace-quick-switcher-list" role="listbox" aria-activedescendant="${activeItem ? `quick-switcher-${escapeHtml(activeItem.id)}` : ""}">
+          ${
+            items.length
+              ? items
+                  .map((item, index) => renderQuickSwitcherItem(item, index === uiState.quickSwitcherCursor))
+                  .join("")
+              : `
+                <div class="workspace-quick-switcher-empty">
+                  <strong>No matching workspaces</strong>
+                  <span>Try a different name or path.</span>
+                </div>
+              `
+          }
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function renderQuickSwitcherItem(item, isActive) {
+  return `
+    <button
+      id="quick-switcher-${escapeHtml(item.id)}"
+      class="workspace-quick-switcher-item ${isActive ? "is-active" : ""}"
+      type="button"
+      role="option"
+      aria-selected="${isActive ? "true" : "false"}"
+      data-action="quick-switch-workspace"
+      data-workspace-id="${escapeHtml(item.id)}"
+      title="${escapeHtml(item.path)}"
+    >
+      <span class="workspace-quick-switcher-item-dot is-${getGitTone(item.gitSummary || null)}" aria-hidden="true"></span>
+      <span class="workspace-quick-switcher-item-copy">
+        <strong>${escapeHtml(item.label)}</strong>
+        <span>${escapeHtml(item.meta)}</span>
+      </span>
+      ${
+        item.isActive
+          ? '<span class="workspace-quick-switcher-item-badge">Current</span>'
+          : ""
+      }
+    </button>
+  `;
+}
+
+function renderWorkspaceGitIndicator(summary) {
+  if (!summary || summary.state === "not-repo" || summary.state === "error") {
+    return "";
+  }
+
+  return `
+    <span
+      class="workspace-tab-git is-${getGitTone(summary)}"
+      aria-hidden="true"
+      title="${escapeHtml(formatGitBadgeTitle(summary))}"
+    ></span>
+  `;
+}
+
 function renderWorkspaceTab(workspace, activeWorkspaceId, label) {
   const activeClass = workspace.id === activeWorkspaceId ? "is-active" : "";
   const liveClass = workspace.isLive ? "is-live" : "is-idle";
   const renameDraft = uiState.workspaceRenameDraft;
   const isRenaming = renameDraft?.workspaceId === workspace.id;
+  const gitSummary = workspace.gitSummary || null;
   return `
     <div class="workspace-tab-shell ${activeClass} ${isRenaming ? "is-renaming" : ""}">
       ${
@@ -1815,6 +2308,7 @@ function renderWorkspaceTab(workspace, activeWorkspaceId, label) {
       >
         <span class="workspace-tab-status ${liveClass}" aria-hidden="true"></span>
         <span class="workspace-tab-name">${escapeHtml(label)}</span>
+        ${renderWorkspaceGitIndicator(gitSummary)}
       </button>
       <button
         class="workspace-tab-action workspace-tab-rename"
@@ -1861,6 +2355,63 @@ function buildWorkspaceTabLabels(workspaces) {
   }
 
   return labels;
+}
+
+function getQuickSwitcherItems(snapshot = uiState.snapshot) {
+  const workspaces = snapshot?.workspaces || [];
+  const labels = buildWorkspaceTabLabels(workspaces);
+  const query = uiState.quickSwitcherQuery.trim().toLowerCase();
+
+  return workspaces
+    .map((workspace) => {
+      const label = labels.get(workspace.id) || workspace.name;
+      const paneCount = workspace.layout?.paneCount || 0;
+      return {
+        id: workspace.id,
+        path: workspace.path,
+        label,
+        gitSummary: workspace.gitSummary || null,
+        isActive: workspace.id === snapshot?.activeWorkspaceId,
+        meta: `${paneCount} ${paneCount === 1 ? "pane" : "panes"} • ${compactWorkspacePath(workspace.path)}`,
+      };
+    })
+    .filter((workspace) => {
+      if (!query) {
+        return true;
+      }
+
+      return `${workspace.label} ${workspace.path}`.toLowerCase().includes(query);
+    });
+}
+
+function syncQuickSwitcherCursor() {
+  const items = getQuickSwitcherItems();
+  if (!items.length) {
+    uiState.quickSwitcherCursor = 0;
+    return;
+  }
+
+  uiState.quickSwitcherCursor = clampQuickSwitcherCursor(uiState.quickSwitcherCursor, items.length);
+}
+
+function moveQuickSwitcherCursor(delta, itemCount) {
+  if (itemCount <= 0) {
+    uiState.quickSwitcherCursor = 0;
+    return;
+  }
+
+  uiState.quickSwitcherCursor = clampQuickSwitcherCursor(
+    uiState.quickSwitcherCursor + delta,
+    itemCount,
+  );
+}
+
+function clampQuickSwitcherCursor(index, itemCount) {
+  if (itemCount <= 0) {
+    return 0;
+  }
+
+  return Math.max(0, Math.min(itemCount - 1, index));
 }
 
 function syncWorkspaceTabRail(activeWorkspaceId, workspaceCount) {
@@ -2167,6 +2718,557 @@ function renderThemeCard(theme, activeThemeId) {
   `;
 }
 
+function renderGitPanel(workspace) {
+  const detail = workspace.gitDetail || null;
+  const summary = detail?.summary || null;
+  return `
+    <div class="workspace-git-backdrop" data-action="close-git-panel">
+      <section class="workspace-git-panel" role="dialog" aria-modal="true" aria-labelledby="git-panel-title">
+        <header class="workspace-git-panel-header">
+          <div class="workspace-git-panel-heading">
+            <p class="workspace-git-panel-mark">Source Control</p>
+            <div class="workspace-git-panel-title-row">
+              <h2 id="git-panel-title">${escapeHtml(workspace.name)}</h2>
+              ${
+                summary
+                  ? `
+                    <span class="workspace-git-panel-state is-${getGitTone(summary)}">
+                      ${escapeHtml(formatGitStateText(summary))}
+                    </span>
+                  `
+                  : ""
+              }
+            </div>
+            <p class="workspace-git-panel-copy">${escapeHtml(workspace.path)}</p>
+          </div>
+          <div class="workspace-git-panel-actions">
+            <button
+              class="workspace-git-panel-button"
+              type="button"
+              data-action="refresh-git-status"
+              aria-label="Refresh git status"
+              title="Refresh git status"
+            >
+              ${renderRefreshIcon()}
+            </button>
+            <button
+              class="workspace-git-panel-button"
+              type="button"
+              data-action="close-git-panel"
+              aria-label="Close git panel"
+              title="Close git panel"
+            >
+              ${renderCloseIcon()}
+            </button>
+          </div>
+        </header>
+        ${
+          detail
+            ? renderGitPanelBody(detail)
+            : renderGitPanelEmpty(
+                "Checking repository",
+                "CrewDock is collecting Git metadata for this workspace.",
+              )
+        }
+      </section>
+    </div>
+  `;
+}
+
+function renderGitPanelBody(detail) {
+  const summary = detail.summary;
+  if (summary.state === "not-repo") {
+    return renderGitPanelEmpty(
+      "No repository detected",
+      summary.message || "This workspace is not inside a Git repository.",
+    );
+  }
+
+  if (summary.state === "error") {
+    return renderGitPanelEmpty(
+      "Git unavailable",
+      summary.message || "CrewDock could not load Git status for this workspace.",
+    );
+  }
+
+  const fileCount = detail.files?.length || 0;
+
+  return `
+    <div class="workspace-git-panel-body">
+      <section class="workspace-git-summary-shell">
+        <div class="workspace-git-summary-line">
+          <span class="workspace-git-summary-branch">
+            <span class="workspace-git-summary-branch-icon" aria-hidden="true">${renderBranchIcon()}</span>
+            <strong>${escapeHtml(formatGitBranchLabel(summary))}</strong>
+          </span>
+          <span class="workspace-git-summary-meta">${escapeHtml(summary.upstream || "Local only")}</span>
+          <span class="workspace-git-summary-meta">${escapeHtml(summary.upstream ? `+${summary.ahead} / -${summary.behind}` : "No remote")}</span>
+          <span class="workspace-git-summary-meta is-${getGitTone(summary)}">${escapeHtml(formatGitStateText(summary))}</span>
+        </div>
+        <div class="workspace-git-summary-paths">
+          ${
+            detail.repoRoot
+              ? `
+                <div class="workspace-git-summary-path">
+                  <span>Repository</span>
+                  <strong title="${escapeHtml(detail.repoRoot)}">${escapeHtml(detail.repoRoot)}</strong>
+                </div>
+              `
+              : ""
+          }
+          ${
+            detail.workspaceRelativePath
+              ? `
+                <div class="workspace-git-summary-path">
+                  <span>Workspace path</span>
+                  <strong title="${escapeHtml(detail.workspaceRelativePath)}">${escapeHtml(detail.workspaceRelativePath)}</strong>
+                </div>
+              `
+              : ""
+          }
+        </div>
+        <div class="workspace-git-chip-row">
+          ${renderGitSummaryChips(summary)}
+        </div>
+      </section>
+      <section class="workspace-git-change-shell">
+        <header class="workspace-git-section-head">
+          <div>
+            <p class="workspace-git-section-mark">Changes</p>
+            <strong>${fileCount === 0 ? "Working tree clean" : `${fileCount} ${fileCount === 1 ? "file" : "files"}`}</strong>
+          </div>
+          <span class="workspace-git-section-total">${fileCount}</span>
+        </header>
+        ${
+          fileCount
+            ? `
+              <div class="workspace-git-file-sections">
+                ${renderGitFileSections(detail.files)}
+              </div>
+            `
+            : renderGitPanelEmpty(
+                "No pending changes",
+                "Staged, modified, and untracked files will appear here.",
+              )
+        }
+      </section>
+    </div>
+  `;
+}
+
+function renderGitPanelEmpty(title, copy) {
+  return `
+    <div class="workspace-git-empty">
+      <strong>${escapeHtml(title)}</strong>
+      <p>${escapeHtml(copy)}</p>
+    </div>
+  `;
+}
+
+function renderGitSummaryChips(summary) {
+  const chips = [];
+  const counts = summary.counts || {};
+  const definitions = [
+    ["staged", "Staged"],
+    ["modified", "Modified"],
+    ["deleted", "Deleted"],
+    ["renamed", "Renamed"],
+    ["untracked", "Untracked"],
+    ["conflicted", "Conflicted"],
+  ];
+
+  for (const [key, label] of definitions) {
+    const value = Number(counts[key] || 0);
+    if (value > 0) {
+      chips.push(`
+        <span class="workspace-git-chip is-${key}">
+          <span>${escapeHtml(label)}</span>
+          <strong>${value}</strong>
+        </span>
+      `);
+    }
+  }
+
+  if (chips.length === 0) {
+    chips.push(`
+      <span class="workspace-git-chip is-clean">
+        <span>Changes</span>
+        <strong>0</strong>
+      </span>
+    `);
+  }
+
+  return chips.join("");
+}
+
+function renderGitFileSections(files) {
+  const groups = new Map();
+  const order = ["conflicted", "staged", "changes", "untracked"];
+
+  for (const file of files) {
+    const key = getGitFileSectionKey(file);
+    const bucket = groups.get(key) || [];
+    bucket.push(file);
+    groups.set(key, bucket);
+  }
+
+  return order
+    .filter((key) => groups.has(key))
+    .map((key) => {
+      const bucket = groups.get(key) || [];
+      return `
+        <section class="workspace-git-file-section">
+          <header class="workspace-git-file-section-head">
+            <strong>${escapeHtml(formatGitFileSectionLabel(key))}</strong>
+            <span>${bucket.length}</span>
+          </header>
+          <div class="workspace-git-file-list">
+            ${bucket.map((file) => renderGitFileRow(file)).join("")}
+          </div>
+        </section>
+      `;
+    })
+    .join("");
+}
+
+function renderGitFileRow(file) {
+  const pathParts = splitGitFilePath(file.path);
+  const presentation = getGitFilePresentation(file);
+  const secondaryParts = [];
+
+  if (pathParts.directory) {
+    secondaryParts.push(pathParts.directory);
+  }
+
+  if (file.originalPath) {
+    secondaryParts.push(`from ${file.originalPath}`);
+  }
+
+  return `
+    <article class="workspace-git-file-row">
+      <span class="workspace-git-file-icon" aria-hidden="true">${renderFileIcon()}</span>
+      <div class="workspace-git-file-copy">
+        <strong title="${escapeHtml(file.path)}">${escapeHtml(pathParts.name)}</strong>
+        <span title="${escapeHtml(file.path)}">${escapeHtml(secondaryParts.join(" • ") || ".")}</span>
+      </div>
+      <span
+        class="workspace-git-file-status is-${presentation.tone}"
+        title="${escapeHtml(presentation.label)}"
+        aria-label="${escapeHtml(presentation.label)}"
+      >
+        ${escapeHtml(presentation.code)}
+      </span>
+    </article>
+  `;
+}
+
+function getGitFileSectionKey(file) {
+  switch (file.kind) {
+    case "conflicted":
+      return "conflicted";
+    case "staged":
+      return "staged";
+    case "untracked":
+      return "untracked";
+    default:
+      return "changes";
+  }
+}
+
+function formatGitFileSectionLabel(key) {
+  switch (key) {
+    case "conflicted":
+      return "Conflicts";
+    case "staged":
+      return "Staged Changes";
+    case "untracked":
+      return "Untracked";
+    default:
+      return "Changes";
+  }
+}
+
+function splitGitFilePath(path) {
+  const normalized = String(path || "").replaceAll("\\", "/");
+  const segments = normalized.split("/").filter(Boolean);
+  const name = segments.pop() || normalized || "file";
+  return {
+    name,
+    directory: segments.join("/"),
+  };
+}
+
+function getGitFilePresentation(file) {
+  let status = file.indexStatus || file.worktreeStatus || "modified";
+
+  switch (file.kind) {
+    case "conflicted":
+      status = "unmerged";
+      break;
+    case "untracked":
+      status = "untracked";
+      break;
+    case "deleted":
+      status = "deleted";
+      break;
+    case "renamed":
+      status = "renamed";
+      break;
+    default:
+      break;
+  }
+
+  let tone = "modified";
+  if (status === "unmerged") {
+    tone = "conflicted";
+  } else if (status === "untracked") {
+    tone = "untracked";
+  } else if (status === "added") {
+    tone = "staged";
+  } else if (status === "deleted") {
+    tone = "deleted";
+  } else if (status === "renamed" || status === "copied") {
+    tone = "renamed";
+  }
+
+  return {
+    code: formatGitFileStatusCode(status),
+    label: formatGitFileStatusLabel(status),
+    tone,
+  };
+}
+
+function formatGitFileStatusCode(status) {
+  switch (status) {
+    case "added":
+      return "A";
+    case "deleted":
+      return "D";
+    case "renamed":
+      return "R";
+    case "copied":
+      return "C";
+    case "untracked":
+      return "U";
+    case "unmerged":
+      return "!";
+    default:
+      return "M";
+  }
+}
+
+function getGitTone(summary) {
+  if (!summary) {
+    return "pending";
+  }
+
+  if (summary.state === "conflicted") {
+    return "conflicted";
+  }
+
+  if (summary.state === "error") {
+    return "error";
+  }
+
+  if (summary.state === "not-repo") {
+    return "neutral";
+  }
+
+  if (summary.state === "dirty" || summary.isDirty) {
+    return "dirty";
+  }
+
+  return "clean";
+}
+
+function formatGitBranchLabel(summary) {
+  if (!summary) {
+    return "Checking repo";
+  }
+
+  if (summary.state === "not-repo") {
+    return "No repo";
+  }
+
+  if (summary.state === "error") {
+    return "Git error";
+  }
+
+  if (summary.state === "detached") {
+    return summary.branch ? `Detached @ ${summary.branch}` : "Detached HEAD";
+  }
+
+  return summary.branch || "Repository";
+}
+
+function formatGitBadgeMeta(summary) {
+  if (!summary) {
+    return "Loading";
+  }
+
+  if (summary.state === "not-repo") {
+    return "No repository";
+  }
+
+  if (summary.state === "error") {
+    return "Unavailable";
+  }
+
+  if (summary.hasConflicts) {
+    return `${summary.counts?.conflicted || 0} conflict${summary.counts?.conflicted === 1 ? "" : "s"}`;
+  }
+
+  if (summary.isDirty) {
+    return "Dirty";
+  }
+
+  if ((summary.ahead || 0) > 0 || (summary.behind || 0) > 0) {
+    return `+${summary.ahead || 0} / -${summary.behind || 0}`;
+  }
+
+  return "Clean";
+}
+
+function formatGitBadgeTitle(summary) {
+  if (!summary) {
+    return "Open git panel";
+  }
+
+  const pieces = [formatGitBranchLabel(summary), formatGitBadgeMeta(summary)];
+  if (summary.message) {
+    pieces.push(summary.message);
+  }
+  return pieces.filter(Boolean).join(" • ");
+}
+
+function formatGitStateText(summary) {
+  if (!summary) {
+    return "Checking";
+  }
+
+  if (summary.state === "not-repo") {
+    return "No repository";
+  }
+
+  if (summary.state === "error") {
+    return "Unavailable";
+  }
+
+  if (summary.state === "detached") {
+    return summary.isDirty ? "Detached / Dirty" : "Detached";
+  }
+
+  if (summary.state === "conflicted") {
+    return "Conflicted";
+  }
+
+  if (summary.state === "dirty") {
+    return "Dirty";
+  }
+
+  return "Clean";
+}
+
+function formatGitFileKindLabel(kind) {
+  switch (kind) {
+    case "conflicted":
+      return "Conflicted";
+    case "renamed":
+      return "Renamed";
+    case "deleted":
+      return "Deleted";
+    case "staged":
+      return "Staged";
+    case "untracked":
+      return "Untracked";
+    default:
+      return "Modified";
+  }
+}
+
+function formatGitFileStatusLabel(status) {
+  switch (status) {
+    case "added":
+      return "Added";
+    case "deleted":
+      return "Deleted";
+    case "renamed":
+      return "Renamed";
+    case "copied":
+      return "Copied";
+    case "type-changed":
+      return "Type changed";
+    case "untracked":
+      return "Untracked";
+    case "unmerged":
+      return "Unmerged";
+    default:
+      return "Modified";
+  }
+}
+
+function syncGitRefreshLoop() {
+  const shouldRefresh = Boolean(
+    uiState.snapshot?.activeWorkspaceId
+      && document.hasFocus()
+      && bridge.refreshWorkspaceGitStatus,
+  );
+
+  if (!shouldRefresh) {
+    if (gitRefreshIntervalTimer) {
+      window.clearInterval(gitRefreshIntervalTimer);
+      gitRefreshIntervalTimer = 0;
+    }
+    return;
+  }
+
+  if (gitRefreshIntervalTimer) {
+    return;
+  }
+
+  gitRefreshIntervalTimer = window.setInterval(() => {
+    void refreshActiveWorkspaceGitStatus();
+  }, GIT_REFRESH_INTERVAL_MS);
+}
+
+async function refreshActiveWorkspaceGitStatus({ force = false } = {}) {
+  const workspaceId = uiState.snapshot?.activeWorkspaceId;
+  if (!workspaceId || !bridge.refreshWorkspaceGitStatus) {
+    return uiState.snapshot;
+  }
+
+  if (gitRefreshInFlight) {
+    gitRefreshQueuedWorkspaceId = workspaceId;
+    return gitRefreshInFlight;
+  }
+
+  gitRefreshInFlight = (async () => {
+    try {
+      const snapshot = await bridge.refreshWorkspaceGitStatus(workspaceId);
+      uiState.snapshot = snapshot;
+      render();
+      return snapshot;
+    } catch (error) {
+      if (force) {
+        console.error(error);
+      }
+      return uiState.snapshot;
+    } finally {
+      const queuedWorkspaceId = gitRefreshQueuedWorkspaceId;
+      gitRefreshInFlight = null;
+      gitRefreshQueuedWorkspaceId = null;
+      if (
+        queuedWorkspaceId
+        && queuedWorkspaceId === uiState.snapshot?.activeWorkspaceId
+      ) {
+        void refreshActiveWorkspaceGitStatus({ force: true });
+      }
+    }
+  })();
+
+  return gitRefreshInFlight;
+}
+
 function renderCountPreset(preset, selectedCount) {
   const isActive = preset.paneCount === selectedCount ? "is-active" : "";
   return `
@@ -2313,20 +3415,21 @@ function renderWorkspace(workspace) {
   const maximizedPane = uiState.maximizedPaneId
     ? workspace.panes.find((pane) => pane.id === uiState.maximizedPaneId) || null
     : null;
+  const paneIndexById = new Map(workspace.panes.map((pane, index) => [pane.id, index]));
   return `
     <main class="workspace-screen ${maximizedPane ? "is-maximized" : ""}">
       <section class="terminal-layout">
         ${
           maximizedPane
-            ? renderPaneShell(maximizedPane)
-            : renderPaneLayout(paneLayout, workspace)
+            ? renderPaneShell(maximizedPane, paneIndexById.get(maximizedPane.id) || 0)
+            : renderPaneLayout(paneLayout, workspace, paneIndexById)
         }
       </section>
     </main>
   `;
 }
 
-function renderPaneLayout(node, workspace) {
+function renderPaneLayout(node, workspace, paneIndexById) {
   const layoutNode = normalizePaneLayoutNode(node);
   if (!layoutNode) {
     return "";
@@ -2335,14 +3438,14 @@ function renderPaneLayout(node, workspace) {
   if (layoutNode.kind === "leaf") {
     const pane = workspace.panes.find((entry) => entry.id === layoutNode.paneId);
     return pane
-      ? `<div class="pane-branch is-leaf">${renderPaneShell(pane)}</div>`
+      ? `<div class="pane-branch is-leaf">${renderPaneShell(pane, paneIndexById.get(pane.id) || 0)}</div>`
       : "";
   }
 
   return `
     <div class="pane-split" data-axis="${escapeHtml(layoutNode.axis)}">
-      <div class="pane-branch">${renderPaneLayout(layoutNode.first, workspace)}</div>
-      <div class="pane-branch">${renderPaneLayout(layoutNode.second, workspace)}</div>
+      <div class="pane-branch">${renderPaneLayout(layoutNode.first, workspace, paneIndexById)}</div>
+      <div class="pane-branch">${renderPaneLayout(layoutNode.second, workspace, paneIndexById)}</div>
     </div>
   `;
 }
@@ -2400,12 +3503,37 @@ function workspaceLayoutSignature(workspace) {
   return JSON.stringify(resolveWorkspacePaneLayout(workspace));
 }
 
-function renderPaneShell(pane) {
+function renderPaneShell(pane, paneIndex) {
+  const statusLabel = formatPaneStatusLabel(pane.status);
   return `
     <article class="terminal-pane" data-pane-id="${escapeHtml(pane.id)}" data-status="${escapeHtml(pane.status)}">
+      <header class="terminal-pane-header">
+        <div class="terminal-pane-title">
+          <span class="terminal-pane-status is-${escapeHtml(pane.status)}" aria-hidden="true"></span>
+          <strong>Terminal ${paneIndex + 1}</strong>
+        </div>
+        <div class="terminal-pane-meta">
+          <span>${escapeHtml(statusLabel)}</span>
+        </div>
+      </header>
       <div class="terminal-host" data-terminal-host="${escapeHtml(pane.id)}"></div>
     </article>
   `;
+}
+
+function formatPaneStatusLabel(status) {
+  switch (status) {
+    case "ready":
+      return "Live";
+    case "booting":
+      return "Booting";
+    case "failed":
+      return "Error";
+    case "closed":
+      return "Closed";
+    default:
+      return "Idle";
+  }
 }
 
 function renderContextMenu(contextMenu, workspace) {
@@ -2833,6 +3961,22 @@ function focusLauncherInput({ select = false } = {}) {
     if (select) {
       input.select();
     }
+  });
+}
+
+function focusQuickSwitcherInput({ select = false } = {}) {
+  const input = app.querySelector("[data-quick-switcher-input]");
+  if (!input) {
+    uiState.quickSwitcherShouldFocus = false;
+    return;
+  }
+
+  requestAnimationFrame(() => {
+    input.focus();
+    if (select) {
+      input.select();
+    }
+    uiState.quickSwitcherShouldFocus = false;
   });
 }
 
