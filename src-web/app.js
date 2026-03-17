@@ -2625,6 +2625,7 @@ function renderLayoutPicker(presets, draft) {
 function renderSettingsSheet(snapshot) {
   const activeThemeId = getActiveThemeId(snapshot);
   const themes = Object.values(THEME_REGISTRY);
+  const primaryModifier = getPrimaryModifierLabel();
 
   return `
     <div class="settings-sheet-backdrop" data-action="close-settings">
@@ -2632,8 +2633,8 @@ function renderSettingsSheet(snapshot) {
         <header class="settings-sheet-header">
           <div>
             <p class="settings-sheet-mark">Settings</p>
-            <h2 id="settings-title">Appearance</h2>
-            <p class="settings-sheet-copy">Theme the whole workbench and every live terminal without restarting sessions.</p>
+            <h2 id="settings-title">Workbench</h2>
+            <p class="settings-sheet-copy">Tune the workbench theme, keep the core shortcuts close, and move through workspaces faster.</p>
           </div>
           <button class="settings-sheet-close" data-action="close-settings" aria-label="Close settings">
             ${renderCloseIcon()}
@@ -2642,8 +2643,8 @@ function renderSettingsSheet(snapshot) {
         <div class="settings-sheet-body">
           <aside class="settings-nav" aria-label="Settings sections">
             <button class="settings-nav-item is-active" type="button" aria-current="page">
-              <span class="settings-nav-item-label">Appearance</span>
-              <span class="settings-nav-item-value">${themes.length} themes</span>
+              <span class="settings-nav-item-label">Workbench</span>
+              <span class="settings-nav-item-value">${themes.length} themes + guide</span>
             </button>
           </aside>
           <section class="settings-panel">
@@ -2657,11 +2658,132 @@ function renderSettingsSheet(snapshot) {
             <div class="settings-theme-grid">
               ${themes.map((theme) => renderThemeCard(theme, activeThemeId)).join("")}
             </div>
+            ${renderSettingsGuide(primaryModifier)}
           </section>
         </div>
       </section>
     </div>
   `;
+}
+
+function renderSettingsGuide(primaryModifier) {
+  const shortcuts = [
+    {
+      label: "Open settings",
+      copy: "Jump back to this panel without leaving the keyboard.",
+      keys: [primaryModifier, ","],
+    },
+    {
+      label: "Quick switch workspaces",
+      copy: "Search workspaces by name or path and jump instantly.",
+      keys: [primaryModifier, "K"],
+    },
+    {
+      label: "Open source control",
+      copy: "Bring up the Git drawer for the active workspace.",
+      keys: [primaryModifier, "Shift", "G"],
+    },
+    {
+      label: "Complete launcher paths",
+      copy: "Autocomplete folders while using the launcher command bar.",
+      keys: ["Tab"],
+    },
+    {
+      label: "Split or close panes",
+      copy: "Use the pane context menu shortcuts for the common pane actions.",
+      keys: [primaryModifier, "D"],
+    },
+    {
+      label: "Dismiss overlays",
+      copy: "Close the switcher, settings, Git drawer, or rename mode.",
+      keys: ["Esc"],
+    },
+  ];
+
+  const tips = [
+    {
+      title: "Start from the launcher",
+      copy: "Open a folder, choose the pane count first, then use manual splits only when the layout needs to become asymmetric.",
+    },
+    {
+      title: "Switch from the keyboard",
+      copy: "Use quick switch for workspace changes, then keep your eyes on the terminals instead of hunting through tabs.",
+    },
+    {
+      title: "Let the footer carry context",
+      copy: "Use the bottom status bar for branch, sync, and pane state so the top strip can stay focused on navigation.",
+    },
+  ];
+
+  return `
+    <section class="settings-guide-shell">
+      <div class="settings-panel-intro">
+        <div>
+          <p class="settings-panel-kicker">How to use</p>
+          <h3>Shortcuts and workflow</h3>
+        </div>
+        <p class="settings-panel-copy">CrewDock feels best when the keyboard drives workspace movement and the terminals stay visually front and center.</p>
+      </div>
+      <div class="settings-guide-grid">
+        <article class="settings-guide-card">
+          <div class="settings-guide-card-head">
+            <strong>Key bindings</strong>
+            <span>Core</span>
+          </div>
+          <div class="settings-guide-list">
+            ${shortcuts.map((shortcut) => renderSettingsShortcutRow(shortcut)).join("")}
+          </div>
+        </article>
+        <article class="settings-guide-card">
+          <div class="settings-guide-card-head">
+            <strong>Recommended flow</strong>
+            <span>Practical</span>
+          </div>
+          <div class="settings-guide-tips">
+            ${tips
+              .map(
+                (tip) => `
+                  <div class="settings-guide-tip">
+                    <strong>${escapeHtml(tip.title)}</strong>
+                    <p>${escapeHtml(tip.copy)}</p>
+                  </div>
+                `,
+              )
+              .join("")}
+          </div>
+        </article>
+      </div>
+    </section>
+  `;
+}
+
+function renderSettingsShortcutRow(shortcut) {
+  return `
+    <div class="settings-guide-item">
+      <div class="settings-guide-copy">
+        <strong>${escapeHtml(shortcut.label)}</strong>
+        <span>${escapeHtml(shortcut.copy)}</span>
+      </div>
+      <div class="settings-guide-keys">
+        ${renderSettingsShortcutKeys(shortcut.keys)}
+      </div>
+    </div>
+  `;
+}
+
+function renderSettingsShortcutKeys(keys) {
+  return keys
+    .map(
+      (key, index) => `
+        ${index > 0 ? '<span class="settings-guide-key-separator">+</span>' : ""}
+        <span class="settings-guide-key">${escapeHtml(key)}</span>
+      `,
+    )
+    .join("");
+}
+
+function getPrimaryModifierLabel() {
+  return document.body.dataset.platform === "macos" ? "Cmd" : "Ctrl";
 }
 
 function renderCloseIcon() {

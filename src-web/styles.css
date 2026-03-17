@@ -1558,6 +1558,126 @@ button {
   gap: 14px;
 }
 
+.settings-guide-shell {
+  display: grid;
+  gap: 16px;
+  padding-top: 4px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.settings-guide-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, 0.85fr);
+  gap: 14px;
+}
+
+.settings-guide-card {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 18px;
+  border: 1px solid var(--surface-card-border);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent 30%),
+    var(--theme-card-bg);
+}
+
+.settings-guide-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-guide-card-head strong {
+  font-size: 0.96rem;
+  font-weight: 600;
+}
+
+.settings-guide-card-head span {
+  color: var(--surface-soft-text);
+  font-size: 0.68rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.settings-guide-list,
+.settings-guide-tips {
+  display: grid;
+  gap: 10px;
+}
+
+.settings-guide-item,
+.settings-guide-tip {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.settings-guide-list .settings-guide-item:first-child,
+.settings-guide-tips .settings-guide-tip:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.settings-guide-item {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 14px;
+}
+
+.settings-guide-copy {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.settings-guide-copy strong,
+.settings-guide-tip strong {
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.settings-guide-copy span,
+.settings-guide-tip p {
+  margin: 0;
+  color: var(--surface-soft-text);
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+
+.settings-guide-keys {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 6px;
+  max-width: 190px;
+}
+
+.settings-guide-key {
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 8px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--control-text-strong);
+  font-size: 0.68rem;
+  font-weight: 600;
+}
+
+.settings-guide-key-separator {
+  color: var(--surface-soft-text);
+  font-size: 0.66rem;
+  align-self: center;
+}
+
 .settings-theme-card {
   min-width: 0;
   display: grid;
@@ -2468,6 +2588,10 @@ button {
   }
 
   .settings-theme-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-guide-grid {
     grid-template-columns: 1fr;
   }
 
