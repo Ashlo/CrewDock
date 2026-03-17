@@ -1466,7 +1466,7 @@ button {
   place-items: center;
   padding: clamp(16px, 3vw, 28px);
   background: var(--overlay-bg);
-  backdrop-filter: blur(24px);
+  backdrop-filter: blur(18px);
   pointer-events: auto;
 }
 
@@ -1474,17 +1474,15 @@ button {
   width: min(980px, 100%);
   max-height: min(760px, calc(100vh - 32px));
   display: grid;
-  gap: 22px;
-  padding: 22px;
+  gap: 18px;
+  padding: 18px 20px 20px;
   overflow: auto;
-  border-radius: 24px;
-  border: 1px solid var(--surface-card-border);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 30%),
-    var(--modal-bg);
+  border-radius: 20px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: color-mix(in srgb, var(--modal-bg) 94%, black 6%);
   box-shadow:
-    0 28px 80px rgba(0, 0, 0, 0.34),
-    inset 0 1px 0 rgba(255, 255, 255, 0.03);
+    0 22px 56px rgba(0, 0, 0, 0.26),
+    inset 0 1px 0 rgba(255, 255, 255, 0.02);
 }
 
 .settings-sheet-header {
@@ -1498,8 +1496,8 @@ button {
 .settings-panel-kicker {
   margin: 0 0 6px;
   color: var(--muted);
-  font-size: 0.76rem;
-  letter-spacing: 0.22em;
+  font-size: 0.68rem;
+  letter-spacing: 0.18em;
   text-transform: uppercase;
 }
 
@@ -1511,8 +1509,8 @@ button {
 }
 
 .settings-sheet h2 {
-  font-size: clamp(1.8rem, 3vw, 2.6rem);
-  line-height: 1;
+  font-size: clamp(1.6rem, 2.4vw, 2.15rem);
+  line-height: 1.04;
 }
 
 .settings-sheet-copy,
@@ -1523,27 +1521,31 @@ button {
   color: var(--surface-soft-text);
 }
 
+.settings-sheet-copy {
+  max-width: 52ch;
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
 .settings-sheet-close {
-  width: 34px;
-  height: 34px;
+  width: 30px;
+  height: 30px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 11px;
-  border: 1px solid var(--control-border);
-  background: var(--control-bg);
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.02);
   color: var(--control-text);
   transition:
-    transform 160ms ease,
     border-color 160ms ease,
     background 160ms ease,
     color 160ms ease;
 }
 
 .settings-sheet-close:hover {
-  transform: translateY(-1px);
-  border-color: var(--control-border-strong);
-  background: var(--control-bg-hover);
+  border-color: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.05);
   color: var(--control-text-strong);
 }
 
@@ -1554,8 +1556,8 @@ button {
 
 .settings-sheet-body {
   display: grid;
-  grid-template-columns: 180px minmax(0, 1fr);
-  gap: 18px;
+  grid-template-columns: 156px minmax(0, 1fr);
+  gap: 22px;
   min-height: 0;
 }
 
@@ -1564,47 +1566,69 @@ button {
   min-width: 0;
   display: grid;
   align-content: start;
-  gap: 14px;
-  padding: 16px;
-  border-radius: 22px;
-  border: 1px solid var(--surface-card-border);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 24%),
-    var(--surface-card-bg);
+  gap: 10px;
+}
+
+.settings-nav {
+  padding: 8px 16px 8px 0;
+  border-right: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.settings-panel {
+  padding: 4px 0 0;
 }
 
 .settings-nav-item {
   width: 100%;
   display: grid;
-  gap: 3px;
-  padding: 12px 13px;
-  border-radius: 16px;
-  border: 1px solid var(--surface-pill-active-border);
-  background: var(--surface-pill-active-bg);
+  gap: 2px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid transparent;
+  background: transparent;
   text-align: left;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    color 160ms ease;
+}
+
+.settings-nav-item:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.settings-nav-item.is-active {
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .settings-nav-item-label {
+  font-size: 0.9rem;
   font-weight: 600;
   color: var(--text);
+}
+
+.settings-nav-item-value {
+  font-size: 0.78rem;
 }
 
 .settings-panel-intro {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 18px;
+  gap: 24px;
 }
 
 .settings-panel-copy {
-  max-width: 34ch;
+  max-width: 31ch;
+  font-size: 0.86rem;
   line-height: 1.5;
 }
 
 .settings-theme-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
+  gap: 12px;
 }
 
 .settings-guide-shell {
@@ -1656,10 +1680,11 @@ button {
   min-width: 0;
   display: grid;
   gap: 12px;
-  padding: 13px 14px;
-  border-radius: 16px;
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  background: rgba(255, 255, 255, 0.018);
+  padding: 12px 0 0;
+  border-radius: 0;
+  border: 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  background: none;
 }
 
 .settings-guide-card-head {
@@ -1670,13 +1695,13 @@ button {
 }
 
 .settings-guide-card-head strong {
-  font-size: 0.96rem;
+  font-size: 0.84rem;
   font-weight: 600;
 }
 
 .settings-guide-card-head span {
   color: var(--surface-soft-text);
-  font-size: 0.68rem;
+  font-size: 0.64rem;
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -1760,39 +1785,33 @@ button {
 .settings-theme-card {
   min-width: 0;
   display: grid;
-  gap: 14px;
-  padding: 14px;
-  border-radius: 18px;
-  border: 1px solid var(--surface-card-border);
-  background: var(--theme-card-bg);
+  gap: 12px;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.02);
   text-align: left;
   transition:
-    transform 160ms ease,
     border-color 160ms ease,
-    background 160ms ease,
-    box-shadow 160ms ease;
+    background 160ms ease;
 }
 
 .settings-theme-card:hover {
-  transform: translateY(-1px);
-  border-color: var(--control-border-strong);
-  background: var(--theme-card-hover-bg);
-  box-shadow: 0 14px 28px var(--theme-card-shadow);
+  border-color: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.035);
 }
 
 .settings-theme-card.is-active {
-  border-color: var(--surface-pill-active-border);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 80%),
-    var(--surface-pill-active-bg);
+  border-color: color-mix(in srgb, var(--accent) 22%, rgba(255, 255, 255, 0.08));
+  background: color-mix(in srgb, var(--accent) 7%, rgba(255, 255, 255, 0.02));
 }
 
 .settings-theme-preview {
   display: grid;
-  gap: 10px;
-  padding: 12px;
-  border-radius: 14px;
-  border: 1px solid var(--theme-preview-border);
+  gap: 8px;
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--theme-preview-border) 84%, transparent);
   background: var(--theme-preview-workbench);
 }
 
@@ -1802,8 +1821,8 @@ button {
 }
 
 .settings-theme-preview-strip span {
-  width: 34px;
-  height: 8px;
+  width: 28px;
+  height: 7px;
   border-radius: 999px;
   background: var(--theme-preview-panel);
 }
@@ -1813,17 +1832,17 @@ button {
 }
 
 .settings-theme-preview-terminal {
-  min-height: 58px;
+  min-height: 52px;
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 12px;
-  border-radius: 12px;
-  border: 1px solid var(--theme-preview-border);
+  padding: 10px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--theme-preview-border) 84%, transparent);
   background: var(--theme-preview-pane);
   color: var(--theme-preview-text);
   font-family: "SFMono-Regular", "Menlo", monospace;
-  font-size: 0.82rem;
+  font-size: 0.76rem;
 }
 
 .settings-theme-preview-prompt {
@@ -1844,35 +1863,37 @@ button {
 
 .settings-theme-meta strong {
   display: block;
-  margin: 0 0 4px;
-  font-size: 0.98rem;
+  margin: 0 0 3px;
+  font-size: 0.92rem;
 }
 
 .settings-theme-meta p {
+  font-size: 0.8rem;
   line-height: 1.45;
 }
 
 .settings-theme-badge {
   flex: 0 0 auto;
-  min-height: 28px;
+  min-height: 24px;
   display: inline-flex;
   align-items: center;
-  padding: 0 10px;
+  padding: 0 9px;
   border-radius: 999px;
-  border: 1px solid var(--surface-pill-active-border);
-  background: var(--surface-pill-active-bg);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
   color: var(--text);
-  font-size: 0.78rem;
+  font-size: 0.72rem;
+  font-weight: 600;
 }
 
 .settings-theme-swatches {
   display: flex;
-  gap: 8px;
+  gap: 7px;
 }
 
 .settings-theme-swatch {
-  width: 14px;
-  height: 14px;
+  width: 12px;
+  height: 12px;
   flex: 0 0 auto;
   border-radius: 999px;
   border: 1px solid var(--swatch-ring);
@@ -2474,7 +2495,7 @@ button {
   min-height: 28px;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 12px;
   padding: 0 10px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.04);
@@ -2483,8 +2504,12 @@ button {
     rgba(255, 255, 255, 0.01);
 }
 
-.terminal-pane-title,
-.terminal-pane-meta {
+.terminal-pane[data-density="compact"] .terminal-pane-header {
+  min-height: 24px;
+  padding: 0 8px;
+}
+
+.terminal-pane-title {
   min-width: 0;
   display: inline-flex;
   align-items: center;
@@ -2493,14 +2518,10 @@ button {
   white-space: nowrap;
 }
 
-.terminal-pane-title strong,
-.terminal-pane-meta span {
+.terminal-pane-title strong {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.terminal-pane-title strong {
   color: rgba(243, 246, 250, 0.82);
   font-size: 0.66rem;
   font-weight: 600;
@@ -2508,37 +2529,13 @@ button {
   text-transform: uppercase;
 }
 
-.terminal-pane-status {
-  width: 6px;
-  height: 6px;
-  flex: 0 0 auto;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.16);
+.terminal-pane[data-density="compact"] .terminal-pane-title {
+  gap: 5px;
 }
 
-.terminal-pane-status.is-ready {
-  background: #8fd7a2;
-}
-
-.terminal-pane-status.is-booting {
-  background: #f2c36a;
-}
-
-.terminal-pane-status.is-failed {
-  background: var(--danger);
-}
-
-.terminal-pane-meta {
-  color: var(--surface-soft-text);
-  font-size: 0.64rem;
-}
-
-.terminal-pane-meta-separator {
-  width: 3px;
-  height: 3px;
-  flex: 0 0 auto;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.14);
+.terminal-pane[data-density="compact"] .terminal-pane-title strong {
+  font-size: 0.61rem;
+  letter-spacing: 0.04em;
 }
 
 .terminal-host {
@@ -2548,6 +2545,10 @@ button {
   min-width: 0;
   padding: 8px 12px 10px;
   background: linear-gradient(180deg, var(--pane-top-gloss), transparent 10%);
+}
+
+.terminal-pane[data-density="compact"] .terminal-host {
+  padding: 6px 10px 8px;
 }
 
 .terminal-host .xterm {

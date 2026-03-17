@@ -7,6 +7,7 @@ export function createUiState() {
     launcherVisible: false,
     settingsVisible: false,
     settingsSection: "workbench",
+    activePaneId: null,
     pendingWorkspaceDraft: null,
     launcherCommandValue: "",
     launcherHistory: [],

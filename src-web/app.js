@@ -11,6 +11,10 @@ import {
   renderLayoutPicker,
 } from "./launcher.js";
 import { createRuntimeStore, createUiState } from "./store.js";
+import {
+  buildWorkspaceTabLabels,
+  renderWorkspaceStrip,
+} from "./workspace-strip.js";
 
 const MAX_PENDING_TERMINAL_BYTES = 4 * 1024 * 1024;
 const MAX_RUNTIME_ACTIVITY_ITEMS = 80;
@@ -18,6 +22,7 @@ const MAX_WORKSPACE_ATTENTION_COUNT = 99;
 const LAUNCHER_CARD_TRANSITION_MS = 360;
 const GIT_REFRESH_INTERVAL_MS = 3000;
 const DEFAULT_THEME_ID = "one-dark";
+const COMPACT_PANE_HEIGHT = 420;
 const LAUNCHER_COMMANDS = Object.freeze(["help", "pwd", "ls", "cd", "open", "clear"]);
 const PATH_AWARE_LAUNCHER_COMMANDS = new Set(["ls", "cd", "open"]);
 
@@ -600,6 +605,12 @@ async function init() {
     });
   }
 
+  if (bridge.listenDragDrop) {
+    await bridge.listenDragDrop((payload) => {
+      void handleNativeDragDrop(payload).catch((error) => console.error(error));
+    });
+  }
+
   document.addEventListener("click", handleClick);
   document.addEventListener("contextmenu", handleContextMenu);
   document.addEventListener("mousedown", handleMouseDown, true);
@@ -632,6 +643,104 @@ function detectPlatform() {
   }
 
   return "other";
+}
+
+function getActiveWorkspace() {
+  return uiState.snapshot?.activeWorkspace || null;
+}
+
+function resolveActivePaneId(workspace = getActiveWorkspace()) {
+  if (!workspace?.panes?.length) {
+    return null;
+  }
+
+  if (workspace.panes.some((pane) => pane.id === uiState.activePaneId)) {
+    return uiState.activePaneId;
+  }
+
+  return workspace.panes[0].id;
+}
+
+function syncActivePaneId(workspace = getActiveWorkspace()) {
+  uiState.activePaneId = resolveActivePaneId(workspace);
+  return uiState.activePaneId;
+}
+
+function setActivePaneId(paneId, workspace = getActiveWorkspace()) {
+  if (!paneId || !workspace?.panes?.some((pane) => pane.id === paneId)) {
+    return syncActivePaneId(workspace);
+  }
+
+  uiState.activePaneId = paneId;
+  return paneId;
+}
+
+function normalizeDropPosition(position) {
+  if (!position) {
+    return null;
+  }
+
+  const scaleFactor = window.devicePixelRatio || 1;
+  const logicalPosition = typeof position.toLogical === "function"
+    ? position.toLogical(scaleFactor)
+    : position;
+  const x = Number(logicalPosition?.x);
+  const y = Number(logicalPosition?.y);
+
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    return null;
+  }
+
+  return { x, y };
+}
+
+function resolvePaneIdFromDropPosition(position) {
+  const logicalPosition = normalizeDropPosition(position);
+  if (!logicalPosition) {
+    return null;
+  }
+
+  const element = document.elementFromPoint(logicalPosition.x, logicalPosition.y);
+  return element?.closest?.("[data-pane-id]")?.dataset?.paneId || null;
+}
+
+function normalizeDroppedPaths(paths) {
+  return Array.from(
+    new Set(
+      (Array.isArray(paths) ? paths : []).filter(
+        (path) => typeof path === "string" && path.trim().length > 0,
+      ),
+    ),
+  );
+}
+
+function quoteShellPath(path) {
+  return `'${String(path).replaceAll("'", "'\\''")}'`;
+}
+
+function formatDroppedPathsForShell(paths) {
+  return `${paths.map(quoteShellPath).join(" ")} `;
+}
+
+async function handleNativeDragDrop(payload) {
+  if (!payload || payload.type !== "drop") {
+    return;
+  }
+
+  const workspace = getActiveWorkspace();
+  const paths = normalizeDroppedPaths(payload.paths);
+  if (!workspace || paths.length === 0) {
+    return;
+  }
+
+  const paneId = resolvePaneIdFromDropPosition(payload.position) || resolveActivePaneId(workspace);
+  if (!paneId) {
+    return;
+  }
+
+  setActivePaneId(paneId, workspace);
+  await bridge.writeToPane(paneId, formatDroppedPathsForShell(paths));
+  paneTerminals.get(paneId)?.terminal.focus();
 }
 
 function normalizeSettingsSection(section) {
@@ -934,6 +1043,7 @@ function handleContextMenu(event) {
     return;
   }
 
+  setActivePaneId(paneId);
   uiState.contextMenu = {
     paneId,
     x: event.clientX,
@@ -962,6 +1072,13 @@ function handleMouseDown(event) {
 }
 
 function handlePointerDown(event) {
+  const paneId = event.target instanceof Element
+    ? event.target.closest("[data-pane-id]")?.dataset?.paneId || null
+    : null;
+  if (paneId) {
+    setActivePaneId(paneId);
+  }
+
   if (!uiState.contextMenu) {
     return;
   }
@@ -1541,6 +1658,12 @@ function render() {
   const activeWorkspace = snapshot.activeWorkspace;
   const shouldShowLauncher = uiState.launcherVisible || !activeWorkspace;
 
+  if (activeWorkspace) {
+    syncActivePaneId(activeWorkspace);
+  } else {
+    uiState.activePaneId = null;
+  }
+
   if (
     uiState.workspaceRenameDraft &&
     !snapshot.workspaces.some((workspace) => workspace.id === uiState.workspaceRenameDraft.workspaceId)
@@ -1576,10 +1699,15 @@ function render() {
   const contextRegion = app.querySelector('[data-region="context"]');
   const modalRegion = app.querySelector('[data-region="modal"]');
 
-  stripRegion.innerHTML = renderWorkspaceStrip(
-    snapshot.workspaces,
-    snapshot.activeWorkspaceId,
-  );
+  stripRegion.innerHTML = renderWorkspaceStrip({
+    workspaces: snapshot.workspaces,
+    activeWorkspaceId: snapshot.activeWorkspaceId,
+    workspaceRenameDraft: uiState.workspaceRenameDraft,
+    getWorkspaceAttention,
+    escapeHtml,
+    getGitTone,
+    formatGitBadgeTitle,
+  });
   statusRegion.innerHTML = renderWorkspaceStatusBar(snapshot, activeWorkspace);
   syncWorkspaceTabRail(snapshot.activeWorkspaceId, snapshot.workspaces.length);
   if (uiState.workspaceRenameDraft && uiState.workspaceRenameShouldFocus) {
@@ -1666,101 +1794,6 @@ function render() {
   syncWorkspace(activeWorkspace);
 }
 
-function renderWorkspaceStrip(workspaces, activeWorkspaceId) {
-  const tabLabels = buildWorkspaceTabLabels(workspaces);
-  return `
-    <div class="workspace-strip-track" data-tauri-drag-region>
-      <div class="workspace-strip-leading" data-tauri-drag-region aria-hidden="true"></div>
-      <div class="workspace-tabs-shell" data-workspace-tabs-shell data-tauri-drag-region>
-        <button
-          class="workspace-tabs-scroll workspace-tabs-scroll-left"
-          type="button"
-          data-tauri-drag-region="false"
-          data-action="scroll-workspaces-left"
-          aria-label="Scroll workspaces left"
-          title="Scroll workspaces left"
-          disabled
-        >
-          ${renderChevronIcon("left")}
-        </button>
-        <div class="workspace-tabs-viewport" data-workspace-tabs-viewport data-tauri-drag-region>
-          <div class="workspace-tabs" data-workspace-tabs data-tauri-drag-region>
-            ${
-              workspaces.length
-                ? workspaces
-                    .map((workspace) =>
-                      renderWorkspaceTab(
-                        workspace,
-                        activeWorkspaceId,
-                        tabLabels.get(workspace.id) || workspace.name,
-                      ),
-                    )
-                    .join("")
-                : '<span class="workspace-tabs-empty" data-tauri-drag-region="true">No workspaces open</span>'
-            }
-          </div>
-        </div>
-        <button
-          class="workspace-tabs-scroll workspace-tabs-scroll-right"
-          type="button"
-          data-tauri-drag-region="false"
-          data-action="scroll-workspaces-right"
-          aria-label="Scroll workspaces right"
-          title="Scroll workspaces right"
-          disabled
-        >
-          ${renderChevronIcon("right")}
-        </button>
-      </div>
-      <div class="workspace-strip-actions">
-        <button
-          class="workspace-strip-button workspace-settings-button"
-          data-tauri-drag-region="false"
-          data-action="show-settings"
-          aria-label="Open settings"
-          title="Settings"
-        >
-          ${renderSettingsIcon()}
-        </button>
-        <button
-          class="workspace-add"
-          data-tauri-drag-region="false"
-          data-action="show-launcher"
-          aria-label="New workspace"
-          title="New workspace"
-        >
-          ${renderPlusIcon()}
-        </button>
-      </div>
-    </div>
-  `;
-}
-
-function renderSettingsIcon() {
-  return `
-    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <path d="M10.3 2.8h3.4l.5 2.2c.5.1.9.3 1.4.6l2-1.1 2.4 2.4-1.1 2c.3.4.5.9.6 1.4l2.2.5v3.4l-2.2.5c-.1.5-.3.9-.6 1.4l1.1 2-2.4 2.4-2-1.1c-.4.3-.9.5-1.4.6l-.5 2.2h-3.4l-.5-2.2c-.5-.1-.9-.3-1.4-.6l-2 1.1-2.4-2.4 1.1-2c-.3-.4-.5-.9-.6-1.4l-2.2-.5v-3.4l2.2-.5c.1-.5.3-.9.6-1.4l-1.1-2 2.4-2.4 2 1.1c.4-.3.9-.5 1.4-.6l.5-2.2Zm1.7 5.2a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z" fill="currentColor"></path>
-    </svg>
-  `;
-}
-
-function renderPlusIcon() {
-  return `
-    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6Z" fill="currentColor"></path>
-    </svg>
-  `;
-}
-
-function renderChevronIcon(direction) {
-  const rotation = direction === "left" ? " style=\"transform: rotate(180deg)\"" : "";
-  return `
-    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"${rotation}>
-      <path d="m9.2 6.7 5.3 5.3-5.3 5.3-1.4-1.4 3.9-3.9-3.9-3.9Z" fill="currentColor"></path>
-    </svg>
-  `;
-}
-
 function renderBranchIcon() {
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -1781,22 +1814,6 @@ function renderFileIcon() {
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
       <path d="M7 3h6.8L19 8.2V19a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Zm6 1.8V9h4.2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></path>
-    </svg>
-  `;
-}
-
-function renderTabRenameIcon() {
-  return `
-    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <path d="m15.1 5.2 3.7 3.7-9.9 9.9-4.4.7.7-4.4 9.9-9.9Zm1.4-1.4 1.1-1.1a1.8 1.8 0 0 1 2.6 0l1.1 1.1a1.8 1.8 0 0 1 0 2.6l-1.1 1.1-3.7-3.7Z" fill="currentColor"></path>
-    </svg>
-  `;
-}
-
-function renderTabCloseIcon() {
-  return `
-    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <path d="m7.4 6 4.6 4.6L16.6 6 18 7.4 13.4 12 18 16.6 16.6 18 12 13.4 7.4 18 6 16.6 10.6 12 6 7.4Z" fill="currentColor"></path>
     </svg>
   `;
 }
@@ -1998,146 +2015,6 @@ function renderQuickSwitcherItem(item, isActive) {
       }
     </button>
   `;
-}
-
-function renderWorkspaceGitIndicator(summary) {
-  if (!summary || summary.state === "not-repo" || summary.state === "error") {
-    return "";
-  }
-
-  return `
-    <span
-      class="workspace-tab-git is-${getGitTone(summary)}"
-      aria-hidden="true"
-      title="${escapeHtml(formatGitBadgeTitle(summary))}"
-    ></span>
-  `;
-}
-
-function buildWorkspaceTabTitle(workspace, attention) {
-  if (!attention?.unreadCount || !attention.lastEvent?.message) {
-    return workspace.path;
-  }
-
-  return `${workspace.path}\n${attention.lastEvent.message}`;
-}
-
-function renderWorkspaceAttentionBadge(workspace, attention) {
-  if (!attention?.unreadCount || !attention.lastEvent?.message) {
-    return "";
-  }
-
-  const count = attention.unreadCount > 9 ? "9+" : String(attention.unreadCount);
-  const description = `${workspace.name}: ${attention.lastEvent.message}`;
-
-  return `
-    <span
-      class="workspace-tab-attention is-${escapeHtml(attention.tone)}"
-      aria-label="${escapeHtml(description)}"
-      title="${escapeHtml(attention.lastEvent.message)}"
-    >
-      ${escapeHtml(count)}
-    </span>
-  `;
-}
-
-function renderWorkspaceTab(workspace, activeWorkspaceId, label) {
-  const activeClass = workspace.id === activeWorkspaceId ? "is-active" : "";
-  const liveClass = workspace.isLive ? "is-live" : "is-idle";
-  const renameDraft = uiState.workspaceRenameDraft;
-  const isRenaming = renameDraft?.workspaceId === workspace.id;
-  const gitSummary = workspace.gitSummary || null;
-  const attention = getWorkspaceAttention(workspace.id);
-  const attentionTone = attention?.unreadCount ? attention.tone : "";
-  const tabTitle = buildWorkspaceTabTitle(workspace, attention);
-  return `
-    <div
-      class="workspace-tab-shell ${activeClass} ${isRenaming ? "is-renaming" : ""} ${attention?.unreadCount ? "has-attention" : ""}"
-      ${attentionTone ? `data-attention-tone="${escapeHtml(attentionTone)}"` : ""}
-    >
-      ${
-        isRenaming
-          ? `
-      <form
-        class="workspace-tab-main workspace-tab-rename-form"
-        data-tauri-drag-region="false"
-        data-action="rename-workspace"
-        data-workspace-rename-form
-        data-workspace-id="${escapeHtml(workspace.id)}"
-      >
-        <span class="workspace-tab-status ${liveClass}" aria-hidden="true"></span>
-        <input
-          class="workspace-tab-rename-input"
-          data-workspace-rename-input
-          data-workspace-id="${escapeHtml(workspace.id)}"
-          type="text"
-          value="${escapeHtml(renameDraft.value)}"
-          aria-label="Rename ${escapeHtml(workspace.name)}"
-          title="${escapeHtml(workspace.path)}"
-          autocomplete="off"
-          autocapitalize="off"
-          spellcheck="false"
-        />
-      </form>
-      `
-          : `
-      <button
-        class="workspace-tab-main"
-        data-tauri-drag-region="false"
-        data-action="switch-workspace"
-        data-workspace-id="${escapeHtml(workspace.id)}"
-        title="${escapeHtml(tabTitle)}"
-      >
-        <span class="workspace-tab-status ${liveClass}" aria-hidden="true"></span>
-        <span class="workspace-tab-name">${escapeHtml(label)}</span>
-        ${renderWorkspaceAttentionBadge(workspace, attention)}
-        ${renderWorkspaceGitIndicator(gitSummary)}
-      </button>
-      <button
-        class="workspace-tab-action workspace-tab-rename"
-        data-tauri-drag-region="false"
-        data-action="start-rename-workspace"
-        data-workspace-id="${escapeHtml(workspace.id)}"
-        aria-label="Rename ${escapeHtml(workspace.name)}"
-        title="Rename ${escapeHtml(workspace.name)}"
-      >
-        ${renderTabRenameIcon()}
-      </button>
-      <button
-        class="workspace-tab-action workspace-tab-close"
-        data-tauri-drag-region="false"
-        data-action="close-workspace"
-        data-workspace-id="${escapeHtml(workspace.id)}"
-        aria-label="Close ${escapeHtml(workspace.name)}"
-        title="Close ${escapeHtml(workspace.name)}"
-      >
-        ${renderTabCloseIcon()}
-      </button>
-      `
-      }
-    </div>
-  `;
-}
-
-function buildWorkspaceTabLabels(workspaces) {
-  const labelCounts = new Map();
-  for (const workspace of workspaces) {
-    labelCounts.set(workspace.name, (labelCounts.get(workspace.name) || 0) + 1);
-  }
-
-  const seenLabels = new Map();
-  const labels = new Map();
-  for (const workspace of workspaces) {
-    const total = labelCounts.get(workspace.name) || 1;
-    const nextIndex = (seenLabels.get(workspace.name) || 0) + 1;
-    seenLabels.set(workspace.name, nextIndex);
-    labels.set(
-      workspace.id,
-      total > 1 ? `${workspace.name} ${nextIndex}` : workspace.name,
-    );
-  }
-
-  return labels;
 }
 
 function getQuickSwitcherItems(snapshot = uiState.snapshot) {
@@ -3296,36 +3173,21 @@ function workspaceLayoutSignature(workspace) {
 }
 
 function renderPaneShell(pane, paneIndex) {
-  const statusLabel = formatPaneStatusLabel(pane.status);
   return `
-    <article class="terminal-pane" data-pane-id="${escapeHtml(pane.id)}" data-status="${escapeHtml(pane.status)}">
+    <article
+      class="terminal-pane"
+      data-pane-id="${escapeHtml(pane.id)}"
+      data-status="${escapeHtml(pane.status)}"
+      data-density="default"
+    >
       <header class="terminal-pane-header">
         <div class="terminal-pane-title">
-          <span class="terminal-pane-status is-${escapeHtml(pane.status)}" aria-hidden="true"></span>
           <strong>Terminal ${paneIndex + 1}</strong>
-        </div>
-        <div class="terminal-pane-meta">
-          <span>${escapeHtml(statusLabel)}</span>
         </div>
       </header>
       <div class="terminal-host" data-terminal-host="${escapeHtml(pane.id)}"></div>
     </article>
   `;
-}
-
-function formatPaneStatusLabel(status) {
-  switch (status) {
-    case "ready":
-      return "Live";
-    case "booting":
-      return "Booting";
-    case "failed":
-      return "Error";
-    case "closed":
-      return "Closed";
-    default:
-      return "Idle";
-  }
 }
 
 function renderContextMenu(contextMenu, workspace) {
@@ -3430,9 +3292,16 @@ function mountWorkspaceTerminals(workspace) {
       observer: new ResizeObserver(() => fitTerminal(pane.id)),
       size: { cols: 0, rows: 0 },
       themeId: theme.id,
+      element: host.closest(".terminal-pane"),
     };
 
     state.observer.observe(host);
+    host.addEventListener("focusin", () => {
+      setActivePaneId(pane.id, workspace);
+    });
+    host.addEventListener("pointerdown", () => {
+      setActivePaneId(pane.id, workspace);
+    });
     terminal.onData((data) => {
       bridge.writeToPane(pane.id, data).catch((error) => console.error(error));
     });
@@ -3450,6 +3319,7 @@ function mountWorkspaceTerminals(workspace) {
 
   const firstPane = workspace.panes[0];
   if (firstPane) {
+    setActivePaneId(firstPane.id, workspace);
     requestAnimationFrame(() => {
       paneTerminals.get(firstPane.id)?.terminal.focus();
     });
@@ -3546,6 +3416,7 @@ function fitTerminal(paneId) {
     return;
   }
 
+  syncPaneDensity(pane);
   pane.fitAddon.fit();
   const nextCols = pane.terminal.cols;
   const nextRows = pane.terminal.rows;
@@ -3556,6 +3427,18 @@ function fitTerminal(paneId) {
 
   pane.size = { cols: nextCols, rows: nextRows };
   bridge.resizePane(paneId, nextCols, nextRows).catch((error) => console.error(error));
+}
+
+function syncPaneDensity(pane) {
+  const paneElement = pane?.element;
+  if (!(paneElement instanceof HTMLElement)) {
+    return;
+  }
+
+  const nextDensity = paneElement.clientHeight <= COMPACT_PANE_HEIGHT ? "compact" : "default";
+  if (paneElement.dataset.density !== nextDensity) {
+    paneElement.dataset.density = nextDensity;
+  }
 }
 
 function disposeTerminal(paneId) {

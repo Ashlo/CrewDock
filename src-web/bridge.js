@@ -66,6 +66,19 @@ export function createBridge({
         tauriApi.event.listen(TERMINAL_DATA_EVENT, (event) => handler(event.payload)),
       listenRuntimeEvents: (handler) =>
         tauriApi.event.listen(RUNTIME_EVENT, (event) => handler(event.payload)),
+      listenDragDrop: (handler) => {
+        const currentWebview = tauriApi.webview?.getCurrentWebview?.();
+        if (currentWebview?.onDragDropEvent) {
+          return currentWebview.onDragDropEvent((event) => handler(event.payload));
+        }
+
+        const currentWindow = tauriApi.window?.getCurrentWindow?.();
+        if (currentWindow?.onDragDropEvent) {
+          return currentWindow.onDragDropEvent((event) => handler(event.payload));
+        }
+
+        return Promise.resolve(() => {});
+      },
     };
   }
 
@@ -251,6 +264,7 @@ function createMockBridge({
       runtimeListeners.add(handler);
       return () => runtimeListeners.delete(handler);
     },
+    listenDragDrop: async () => () => {},
     startDragging: async () => {},
     setTheme: async (themeId) => {
       if (!themeRegistry[themeId]) {
