@@ -1,9 +1,17 @@
 import { Terminal } from "./vendor/xterm.mjs";
 import { FitAddon } from "./vendor/addon-fit.mjs";
+import { createBridge } from "./bridge.js";
+import {
+  clampPaneCount,
+  createPendingWorkspaceDraft,
+  deriveLayoutForPaneCount,
+  formatLauncherCompletionMatches,
+  launcherStageSignature,
+  renderEmptyState,
+  renderLayoutPicker,
+} from "./launcher.js";
+import { createRuntimeStore, createUiState } from "./store.js";
 
-const STATE_EVENT = "crewdock://state-changed";
-const TERMINAL_DATA_EVENT = "crewdock://terminal-data";
-const RUNTIME_EVENT = "crewdock://runtime-event";
 const MAX_PENDING_TERMINAL_BYTES = 4 * 1024 * 1024;
 const MAX_RUNTIME_ACTIVITY_ITEMS = 80;
 const MAX_WORKSPACE_ATTENTION_COUNT = 99;
@@ -12,7 +20,6 @@ const GIT_REFRESH_INTERVAL_MS = 3000;
 const DEFAULT_THEME_ID = "one-dark";
 const LAUNCHER_COMMANDS = Object.freeze(["help", "pwd", "ls", "cd", "open", "clear"]);
 const PATH_AWARE_LAUNCHER_COMMANDS = new Set(["ls", "cd", "open"]);
-const MAX_LAUNCHER_COMPLETION_MATCHES = 24;
 
 const THEME_REGISTRY = Object.freeze({
   "one-dark": {
@@ -542,52 +549,28 @@ const APP_THEME_VARIABLES = Object.freeze(
 );
 
 const app = document.querySelector("#app");
-const bridge = createBridge();
+const bridge = createBridge({
+  defaultThemeId: DEFAULT_THEME_ID,
+  themeRegistry: THEME_REGISTRY,
+  normalizeDialogPath,
+  deriveLayoutForPaneCount,
+  buildBalancedPaneLayout,
+  splitPaneLayout,
+  removePaneLayout,
+  relabelMockPanes,
+  completeMockLauncherInput,
+  resolveMockNavigationPath,
+  mockListDirectory,
+});
 
-const uiState = {
-  snapshot: null,
-  mountedWorkspaceId: null,
-  mountedLayoutSignature: null,
-  appliedThemeId: null,
-  launcherVisible: false,
-  settingsVisible: false,
-  settingsSection: "workbench",
-  pendingWorkspaceDraft: null,
-  launcherCommandValue: "",
-  launcherHistory: [],
-  launcherLatestCard: {
-    current: null,
-    previous: null,
-    phase: "idle",
-  },
-  launcherCommands: [],
-  launcherCommandCursor: null,
-  contextMenu: null,
-  maximizedPaneId: null,
-  gitPanelVisible: false,
-  quickSwitcherVisible: false,
-  quickSwitcherQuery: "",
-  quickSwitcherCursor: 0,
-  quickSwitcherShouldFocus: false,
-  workspaceRenameDraft: null,
-  workspaceRenameShouldFocus: false,
-  workspaceRenameSaving: false,
-  workspaceTabsScrollLeft: 0,
-  workspaceTabsLastActiveWorkspaceId: null,
-  workspaceTabsLastCount: 0,
-  runtimeActivity: [],
-  runtimeAttentionByWorkspace: new Map(),
-};
-
-const paneTerminals = new Map();
-const pendingTerminalData = new Map();
-const workspacePaneIds = new Map();
-const terminalViewportLines = new Map();
-let launcherCardTransitionTimer = 0;
-let launcherCardAnimationFrame = 0;
-let gitRefreshIntervalTimer = 0;
-let gitRefreshInFlight = null;
-let gitRefreshQueuedWorkspaceId = null;
+const uiState = createUiState();
+const runtimeStore = createRuntimeStore();
+const {
+  paneTerminals,
+  pendingTerminalData,
+  workspacePaneIds,
+  terminalViewportLines,
+} = runtimeStore;
 
 void init();
 
@@ -653,465 +636,6 @@ function detectPlatform() {
 
 function normalizeSettingsSection(section) {
   return section === "guide" ? "guide" : "workbench";
-}
-
-function createBridge() {
-  const tauriApi = window.__TAURI__;
-
-  if (tauriApi?.core?.invoke) {
-    return {
-      getAppSnapshot: () => tauriApi.core.invoke("get_app_snapshot"),
-      setTheme: (themeId) => tauriApi.core.invoke("set_theme", { themeId }),
-      createWorkspace: (path, paneCount) =>
-        tauriApi.core.invoke("create_workspace", { path, paneCount }),
-      renameWorkspace: (workspaceId, name) =>
-        tauriApi.core.invoke("rename_workspace", { workspaceId, name }),
-      refreshWorkspaceGitStatus: (workspaceId) =>
-        tauriApi.core.invoke("refresh_workspace_git_status", { workspaceId }),
-      switchWorkspace: (workspaceId) =>
-        tauriApi.core.invoke("switch_workspace", { workspaceId }),
-      closeWorkspace: (workspaceId) =>
-        tauriApi.core.invoke("close_workspace", { workspaceId }),
-      splitPane: (paneId, direction) =>
-        tauriApi.core.invoke("split_pane", { paneId, direction }),
-      closePane: (paneId) =>
-        tauriApi.core.invoke("close_pane", { paneId }),
-      showInFinder: (path) =>
-        tauriApi.core.invoke("show_in_finder", { path }),
-      runLauncherCommand: (input) =>
-        tauriApi.core.invoke("run_launcher_command", { input }),
-      completeLauncherInput: (input) =>
-        tauriApi.core.invoke("complete_launcher_input", { input }),
-      resetToLauncher: () => tauriApi.core.invoke("reset_to_launcher"),
-      startDragging: () => tauriApi.core.invoke("plugin:window|start_dragging"),
-      writeToPane: (paneId, data) =>
-        tauriApi.core.invoke("write_to_pane", { paneId, data }),
-      resizePane: (paneId, cols, rows) =>
-        tauriApi.core.invoke("resize_pane", { paneId, cols, rows }),
-      openDirectory: async (defaultPath) => {
-        const options = {
-          title: "Open Workspace Folder",
-          directory: true,
-          multiple: false,
-        };
-        if (defaultPath) {
-          options.defaultPath = defaultPath;
-        }
-
-        const result = await tauriApi.core.invoke("plugin:dialog|open", { options });
-        return normalizeDialogPath(result);
-      },
-      listenState: (handler) =>
-        tauriApi.event.listen(STATE_EVENT, (event) => handler(event.payload)),
-      listenTerminalData: (handler) =>
-        tauriApi.event.listen(TERMINAL_DATA_EVENT, (event) => handler(event.payload)),
-      listenRuntimeEvents: (handler) =>
-        tauriApi.event.listen(RUNTIME_EVENT, (event) => handler(event.payload)),
-    };
-  }
-
-  return createMockBridge();
-}
-
-function createMockBridge() {
-  const stateListeners = new Set();
-  const terminalListeners = new Set();
-  const runtimeListeners = new Set();
-  const launcher = {
-    basePath: "/Users/ashutoshbele/Desktop/ashlab/crewdock",
-    presets: [
-      { id: "count-1", label: "1 terminal", rows: 1, columns: 1, paneCount: 1 },
-      { id: "count-2", label: "2 terminals", rows: 1, columns: 2, paneCount: 2 },
-      { id: "count-4", label: "4 terminals", rows: 2, columns: 2, paneCount: 4 },
-      { id: "count-8", label: "8 terminals", rows: 3, columns: 3, paneCount: 8 },
-      { id: "count-12", label: "12 terminals", rows: 3, columns: 4, paneCount: 12 },
-      { id: "count-16", label: "16 terminals", rows: 4, columns: 4, paneCount: 16 },
-    ],
-  };
-  const settings = {
-    themeId: DEFAULT_THEME_ID,
-  };
-
-  let workspaceCounter = 0;
-  let workspaces = [];
-  let activeWorkspaceId = null;
-
-  function emitState() {
-    const activeWorkspace = workspaces.find((workspace) => workspace.id === activeWorkspaceId);
-    const snapshot = {
-      launcher,
-      settings,
-      workspaces: workspaces.map((workspace) => ({
-        id: workspace.id,
-        name: workspace.name,
-        path: workspace.path,
-        layout: workspace.layout,
-        isLive: workspace.started,
-        gitSummary: workspace.gitDetail?.summary || null,
-      })),
-      activeWorkspaceId,
-      activeWorkspace: activeWorkspace
-        ? {
-            id: activeWorkspace.id,
-            name: activeWorkspace.name,
-            path: activeWorkspace.path,
-            layout: activeWorkspace.layout,
-            panes: activeWorkspace.panes.map((pane) => ({ ...pane })),
-            paneLayout: structuredClone(activeWorkspace.paneLayout),
-            gitDetail: activeWorkspace.gitDetail ? structuredClone(activeWorkspace.gitDetail) : null,
-          }
-        : null,
-    };
-
-    for (const listener of stateListeners) {
-      listener(structuredClone(snapshot));
-    }
-
-    return snapshot;
-  }
-
-  function emitTerminal(payload) {
-    for (const listener of terminalListeners) {
-      listener(structuredClone(payload));
-    }
-  }
-
-  function emitRuntimeEvent(payload) {
-    for (const listener of runtimeListeners) {
-      listener(structuredClone(payload));
-    }
-  }
-
-  function startWorkspace(workspace) {
-    if (!workspace || workspace.started) {
-      return;
-    }
-
-    workspace.started = true;
-    workspace.panes.forEach((pane, index) => {
-      pane.status = "booting";
-      window.setTimeout(() => {
-        if (!workspaces.some((entry) => entry.id === workspace.id)) {
-          return;
-        }
-
-        const currentWorkspace = workspaces.find((entry) => entry.id === workspace.id);
-        const currentPane = currentWorkspace?.panes.find((entry) => entry.id === pane.id);
-        if (!currentPane) {
-          return;
-        }
-
-        currentPane.status = "ready";
-        emitState();
-        emitRuntimeEvent({
-          kind: "paneReady",
-          workspaceId: workspace.id,
-          paneId: currentPane.id,
-          label: currentPane.label,
-        });
-        emitTerminal({
-          paneId: pane.id,
-          data:
-            `CrewDock shell session attached\r\n` +
-            `Session: ${currentPane.label}\r\n` +
-            `Layout: ${workspace.layout.label}\r\n` +
-            `Shell: /bin/zsh\r\n` +
-            `Directory: ${workspace.path}\r\n\r\n` +
-            `This is the mock fallback bridge. Type here and the session will echo.\r\n$ `,
-        });
-      }, 140 + index * 40);
-    });
-
-    emitState();
-  }
-
-  function workspaceName(path) {
-    const parts = path.split("/").filter(Boolean);
-    return parts[parts.length - 1] || path;
-  }
-
-  function buildMockGitDetail(path) {
-    return {
-      summary: {
-        state: "clean",
-        branch: "main",
-        upstream: "origin/main",
-        ahead: 0,
-        behind: 0,
-        counts: {
-          staged: 0,
-          modified: 0,
-          deleted: 0,
-          renamed: 0,
-          untracked: 0,
-          conflicted: 0,
-        },
-        isDirty: false,
-        hasConflicts: false,
-        message: null,
-      },
-      repoRoot: path,
-      workspaceRelativePath: null,
-      files: [],
-    };
-  }
-
-  return {
-    getAppSnapshot: async () => emitState(),
-    listenState: async (handler) => {
-      stateListeners.add(handler);
-      return () => stateListeners.delete(handler);
-    },
-    listenTerminalData: async (handler) => {
-      terminalListeners.add(handler);
-      return () => terminalListeners.delete(handler);
-    },
-    listenRuntimeEvents: async (handler) => {
-      runtimeListeners.add(handler);
-      return () => runtimeListeners.delete(handler);
-    },
-    startDragging: async () => {},
-    setTheme: async (themeId) => {
-      if (!THEME_REGISTRY[themeId]) {
-        throw new Error("theme not found");
-      }
-
-      settings.themeId = themeId;
-      return emitState();
-    },
-    openDirectory: async (defaultPath) => {
-      const value = window.prompt("Workspace folder", defaultPath || "/Users/ashutoshbele/Desktop/ashlab/crewdock");
-      return value?.trim() || null;
-    },
-    resetToLauncher: async () => {
-      workspaces = [];
-      activeWorkspaceId = null;
-      return emitState();
-    },
-    createWorkspace: async (path, paneCount) => {
-      const normalizedPath = path.trim();
-      const layout = deriveLayoutForPaneCount(paneCount);
-      if (!layout) {
-        return emitState();
-      }
-
-      workspaceCounter += 1;
-      const workspace = {
-        id: `workspace-${workspaceCounter}`,
-        name: workspaceName(normalizedPath),
-        path: normalizedPath,
-        layout,
-        started: false,
-        gitDetail: buildMockGitDetail(normalizedPath),
-        panes: Array.from({ length: layout.paneCount }, (_, index) => ({
-          id: `pane-${workspaceCounter}-${index + 1}`,
-          label: `Shell ${String(index + 1).padStart(2, "0")}`,
-          status: "closed",
-        })),
-      };
-      workspace.paneLayout = buildBalancedPaneLayout(
-        workspace.panes.map((pane) => pane.id),
-        layout.columns >= layout.rows,
-      );
-
-      workspaces.push(workspace);
-      activeWorkspaceId = workspace.id;
-      launcher.basePath = normalizedPath;
-      startWorkspace(workspace);
-      return emitState();
-    },
-    renameWorkspace: async (workspaceId, name) => {
-      const workspace = workspaces.find((entry) => entry.id === workspaceId);
-      const nextName = String(name || "").trim();
-      if (!workspace || !nextName) {
-        return emitState();
-      }
-
-      workspace.name = nextName;
-      return emitState();
-    },
-    refreshWorkspaceGitStatus: async (workspaceId) => {
-      const workspace = workspaces.find((entry) => entry.id === workspaceId);
-      if (workspace) {
-        workspace.gitDetail = buildMockGitDetail(workspace.path);
-      }
-      return emitState();
-    },
-    switchWorkspace: async (workspaceId) => {
-      const workspace = workspaces.find((entry) => entry.id === workspaceId);
-      if (!workspace) {
-        return emitState();
-      }
-
-      activeWorkspaceId = workspace.id;
-      launcher.basePath = workspace.path;
-      startWorkspace(workspace);
-      return emitState();
-    },
-    closeWorkspace: async (workspaceId) => {
-      const index = workspaces.findIndex((workspace) => workspace.id === workspaceId);
-      if (index === -1) {
-        return emitState();
-      }
-
-      const isActive = activeWorkspaceId === workspaceId;
-      workspaces.splice(index, 1);
-
-      if (isActive) {
-        if (index > 0) {
-          activeWorkspaceId = workspaces[index - 1]?.id ?? null;
-        } else {
-          activeWorkspaceId = workspaces[0]?.id ?? null;
-        }
-      }
-
-      return emitState();
-    },
-    splitPane: async (paneId, direction) => {
-      const workspace = workspaces.find((entry) => entry.id === activeWorkspaceId);
-      const paneIndex = workspace?.panes.findIndex((pane) => pane.id === paneId) ?? -1;
-      if (!workspace || paneIndex === -1 || workspace.panes.length >= 16) {
-        return emitState();
-      }
-
-      const insertAt = direction === "left" || direction === "up" ? paneIndex : paneIndex + 1;
-      const nextCount = workspace.panes.length + 1;
-      const layout = deriveLayoutForPaneCount(nextCount);
-      const pane = {
-        id: `pane-${workspace.id}-${Date.now()}`,
-        label: "",
-        status: workspace.started ? "booting" : "closed",
-      };
-
-      workspace.panes.splice(insertAt, 0, pane);
-      relabelMockPanes(workspace.panes);
-      workspace.layout = layout;
-      workspace.paneLayout = splitPaneLayout(
-        workspace.paneLayout,
-        paneId,
-        direction === "left" || direction === "right" ? "horizontal" : "vertical",
-        direction === "left" || direction === "up",
-        pane.id,
-      );
-      emitState();
-
-      if (workspace.started) {
-        window.setTimeout(() => {
-          pane.status = "ready";
-          emitState();
-          emitRuntimeEvent({
-            kind: "paneReady",
-            workspaceId: workspace.id,
-            paneId: pane.id,
-            label: pane.label,
-          });
-          emitTerminal({
-            paneId: pane.id,
-            data:
-              `CrewDock shell session attached\r\n` +
-              `Session: ${pane.label}\r\n` +
-              `Layout: ${workspace.layout.label}\r\n` +
-              `Shell: /bin/zsh\r\n` +
-              `Directory: ${workspace.path}\r\n\r\n$ `,
-          });
-        }, 120);
-      }
-
-      return emitState();
-    },
-    closePane: async (paneId) => {
-      const workspace = workspaces.find((entry) => entry.panes.some((pane) => pane.id === paneId));
-      if (!workspace || workspace.panes.length <= 1) {
-        return emitState();
-      }
-
-      const closedPane = workspace.panes.find((pane) => pane.id === paneId) || null;
-      workspace.panes = workspace.panes.filter((pane) => pane.id !== paneId);
-      relabelMockPanes(workspace.panes);
-      workspace.layout = deriveLayoutForPaneCount(workspace.panes.length);
-      workspace.paneLayout = removePaneLayout(workspace.paneLayout, paneId);
-      const snapshot = emitState();
-      if (closedPane) {
-        emitRuntimeEvent({
-          kind: "paneClosed",
-          workspaceId: workspace.id,
-          paneId,
-          label: closedPane.label,
-        });
-      }
-      return snapshot;
-    },
-    showInFinder: async () => {},
-    runLauncherCommand: async (input) => {
-      const command = String(input || "").trim();
-      if (!command) {
-        throw new Error("enter a command. Try help.");
-      }
-
-      if (command === "help") {
-        return {
-          basePath: launcher.basePath,
-          output: ["Commands: help, pwd, ls [path], cd <path>, open [path], clear"],
-          openPath: null,
-          clearOutput: false,
-        };
-      }
-
-      if (command === "pwd") {
-        return {
-          basePath: launcher.basePath,
-          output: [launcher.basePath],
-          openPath: null,
-          clearOutput: false,
-        };
-      }
-
-      if (command === "clear") {
-        return {
-          basePath: launcher.basePath,
-          output: [],
-          openPath: null,
-          clearOutput: true,
-        };
-      }
-
-      if (command === "ls" || command.startsWith("ls ")) {
-        const target = command === "ls" ? launcher.basePath : resolveMockNavigationPath(launcher.basePath, command.slice(3));
-        return {
-          basePath: launcher.basePath,
-          output: mockListDirectory(target),
-          openPath: null,
-          clearOutput: false,
-        };
-      }
-
-      if (command === "open" || command.startsWith("open ")) {
-        const target = command === "open" ? launcher.basePath : resolveMockNavigationPath(launcher.basePath, command.slice(5));
-        launcher.basePath = target;
-        return {
-          basePath: launcher.basePath,
-          output: [`Opening workspace at ${target}`],
-          openPath: target,
-          clearOutput: false,
-        };
-      }
-
-      const nextPath = resolveMockNavigationPath(launcher.basePath, command);
-      launcher.basePath = nextPath;
-      return {
-        basePath: launcher.basePath,
-        output: [`cwd -> ${nextPath}`],
-        openPath: null,
-        clearOutput: false,
-      };
-    },
-    completeLauncherInput: async (input) => completeMockLauncherInput(launcher.basePath, input),
-    writeToPane: async (paneId, data) => {
-      const output = data === "\r" ? "\r\n$ " : data;
-      emitTerminal({ paneId, data: output });
-    },
-    resizePane: async () => {},
-  };
 }
 
 function normalizeThemeId(themeId) {
@@ -2066,7 +1590,12 @@ function render() {
     : uiState.settingsVisible
       ? renderSettingsSheet(snapshot)
       : uiState.pendingWorkspaceDraft
-        ? renderLayoutPicker(snapshot.launcher.presets, uiState.pendingWorkspaceDraft)
+        ? renderLayoutPicker({
+            presets: snapshot.launcher.presets,
+            draft: uiState.pendingWorkspaceDraft,
+            basename,
+            escapeHtml,
+          })
         : uiState.gitPanelVisible && activeWorkspace
           ? renderGitPanel(activeWorkspace)
           : "";
@@ -2087,13 +1616,18 @@ function render() {
     }
 
     const preservedLauncherInputState = captureLauncherInputState(stageRegion);
-    const nextLauncherSignature = launcherStageSignature(snapshot.launcher.basePath);
+    const nextLauncherSignature = launcherStageSignature(snapshot.launcher.basePath, uiState);
     const shouldRemountLauncher =
       stageRegion.dataset.stageMode !== "launcher"
       || stageRegion.dataset.stageSignature !== nextLauncherSignature;
 
     if (shouldRemountLauncher) {
-      stageRegion.innerHTML = renderEmptyState(snapshot.launcher.basePath);
+      stageRegion.innerHTML = renderEmptyState({
+        basePath: snapshot.launcher.basePath,
+        launcherCommandValue: uiState.launcherCommandValue,
+        launcherLatestCard: uiState.launcherLatestCard,
+        escapeHtml,
+      });
       stageRegion.dataset.stageMode = "launcher";
       stageRegion.dataset.stageSignature = nextLauncherSignature;
     }
@@ -2778,105 +2312,6 @@ function normalizeWheelDelta(event, tabs) {
   }
 
   return dominantDelta;
-}
-
-function renderEmptyState(basePath) {
-  return `
-    <div class="workspace-empty">
-      <div class="workspace-empty-panel">
-        <p class="workspace-empty-mark">CrewDock</p>
-        <h1>Open a folder to start a workspace.</h1>
-        <p class="workspace-empty-copy">Each workspace becomes a live tab with its own terminal grid.</p>
-        <button class="workspace-empty-action" data-action="open-workspace">Open workspace</button>
-        <div class="workspace-launch-shell" title="${escapeHtml(basePath)}">
-          ${renderLauncherLatestStage()}
-          <form class="workspace-launch-form" data-action="run-launcher-command" title="${escapeHtml(basePath)}">
-            <span class="workspace-launch-prefix">$</span>
-            <input
-              class="workspace-launch-input"
-              data-launcher-path-input
-              type="text"
-              value="${escapeHtml(uiState.launcherCommandValue)}"
-              placeholder="Type a command"
-              aria-label="Run launcher command"
-              autocomplete="off"
-              autocapitalize="off"
-              spellcheck="false"
-            />
-          </form>
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-function launcherStageSignature(basePath) {
-  return JSON.stringify({
-    basePath,
-    history: uiState.launcherHistory,
-    latestCard: uiState.launcherLatestCard,
-  });
-}
-
-function renderLayoutPicker(presets, draft) {
-  const layout = deriveLayoutForPaneCount(draft.paneCount);
-  const previewCells = renderPreviewCells(layout);
-  return `
-    <div class="workspace-modal-backdrop">
-      <div class="workspace-modal">
-        <div class="workspace-modal-header">
-          <div>
-            <p class="workspace-modal-mark">New workspace</p>
-            <h2>${escapeHtml(basename(draft.path))}</h2>
-            <p class="workspace-modal-path">${escapeHtml(draft.path)}</p>
-          </div>
-          <button class="workspace-modal-cancel" data-action="cancel-layout-picker">Cancel</button>
-        </div>
-        <div class="workspace-layout-builder">
-          <section class="workspace-layout-controls">
-            <p class="workspace-layout-kicker">Terminal count</p>
-            <div class="workspace-count-stepper">
-              <button class="workspace-count-button" data-action="adjust-terminal-count" data-delta="-1" aria-label="Decrease terminal count">-</button>
-              <label class="workspace-count-input-shell">
-                <input
-                  class="workspace-count-input"
-                  data-terminal-count-input
-                  type="number"
-                  min="1"
-                  max="16"
-                  value="${escapeHtml(draft.paneCount)}"
-                  aria-label="Terminal count"
-                />
-                <span>terminals</span>
-              </label>
-              <button class="workspace-count-button" data-action="adjust-terminal-count" data-delta="1" aria-label="Increase terminal count">+</button>
-            </div>
-            <div class="workspace-count-presets">
-              ${presets.map((preset) => renderCountPreset(preset, draft.paneCount)).join("")}
-            </div>
-            <p class="workspace-layout-note">CrewDock balances the grid automatically so you can choose the count first and worry about layout later.</p>
-          </section>
-          <section class="workspace-layout-preview-card">
-            <div class="workspace-layout-preview-head">
-              <p class="workspace-layout-kicker">Preview</p>
-              <div class="workspace-layout-meta">
-                <span>${layout.rows} rows</span>
-                <span>${layout.columns} columns</span>
-              </div>
-            </div>
-            <div class="workspace-layout-preview" style="--rows:${layout.rows}; --columns:${layout.columns};">
-              ${previewCells}
-            </div>
-            <div class="workspace-layout-summary">
-              <strong>${draft.paneCount}</strong>
-              <span>${draft.paneCount === 1 ? "terminal" : "terminals"} in a ${layout.rows} x ${layout.columns} grid</span>
-            </div>
-            <button class="workspace-create-button" data-action="create-workspace">Create workspace</button>
-          </section>
-        </div>
-      </div>
-    </div>
-  `;
 }
 
 function renderSettingsSheet(snapshot) {
@@ -3623,18 +3058,18 @@ function syncGitRefreshLoop() {
   );
 
   if (!shouldRefresh) {
-    if (gitRefreshIntervalTimer) {
-      window.clearInterval(gitRefreshIntervalTimer);
-      gitRefreshIntervalTimer = 0;
+    if (runtimeStore.gitRefreshIntervalTimer) {
+      window.clearInterval(runtimeStore.gitRefreshIntervalTimer);
+      runtimeStore.gitRefreshIntervalTimer = 0;
     }
     return;
   }
 
-  if (gitRefreshIntervalTimer) {
+  if (runtimeStore.gitRefreshIntervalTimer) {
     return;
   }
 
-  gitRefreshIntervalTimer = window.setInterval(() => {
+  runtimeStore.gitRefreshIntervalTimer = window.setInterval(() => {
     void refreshActiveWorkspaceGitStatus();
   }, GIT_REFRESH_INTERVAL_MS);
 }
@@ -3645,12 +3080,12 @@ async function refreshActiveWorkspaceGitStatus({ force = false } = {}) {
     return uiState.snapshot;
   }
 
-  if (gitRefreshInFlight) {
-    gitRefreshQueuedWorkspaceId = workspaceId;
-    return gitRefreshInFlight;
+  if (runtimeStore.gitRefreshInFlight) {
+    runtimeStore.gitRefreshQueuedWorkspaceId = workspaceId;
+    return runtimeStore.gitRefreshInFlight;
   }
 
-  gitRefreshInFlight = (async () => {
+  runtimeStore.gitRefreshInFlight = (async () => {
     try {
       const snapshot = await bridge.refreshWorkspaceGitStatus(workspaceId);
       uiState.snapshot = snapshot;
@@ -3662,9 +3097,9 @@ async function refreshActiveWorkspaceGitStatus({ force = false } = {}) {
       }
       return uiState.snapshot;
     } finally {
-      const queuedWorkspaceId = gitRefreshQueuedWorkspaceId;
-      gitRefreshInFlight = null;
-      gitRefreshQueuedWorkspaceId = null;
+      const queuedWorkspaceId = runtimeStore.gitRefreshQueuedWorkspaceId;
+      runtimeStore.gitRefreshInFlight = null;
+      runtimeStore.gitRefreshQueuedWorkspaceId = null;
       if (
         queuedWorkspaceId
         && queuedWorkspaceId === uiState.snapshot?.activeWorkspaceId
@@ -3674,33 +3109,7 @@ async function refreshActiveWorkspaceGitStatus({ force = false } = {}) {
     }
   })();
 
-  return gitRefreshInFlight;
-}
-
-function renderCountPreset(preset, selectedCount) {
-  const isActive = preset.paneCount === selectedCount ? "is-active" : "";
-  return `
-    <button
-      class="workspace-count-preset ${isActive}"
-      data-action="set-terminal-count"
-      data-pane-count="${preset.paneCount}"
-    >
-      ${preset.paneCount}
-    </button>
-  `;
-}
-
-function createPendingWorkspaceDraft(path, presets) {
-  const defaultCount = presets?.[0]?.paneCount || 1;
-  return {
-    path,
-    paneCount: clampPaneCount(defaultCount),
-  };
-}
-
-function clampPaneCount(value) {
-  const nextValue = Number.isFinite(value) ? Math.round(value) : 1;
-  return Math.min(16, Math.max(1, nextValue));
+  return runtimeStore.gitRefreshInFlight;
 }
 
 function escapeSelectorValue(value) {
@@ -3709,31 +3118,6 @@ function escapeSelectorValue(value) {
   }
 
   return String(value).replace(/["\\]/g, "\\$&");
-}
-
-function deriveLayoutForPaneCount(paneCount) {
-  const count = clampPaneCount(paneCount);
-  const columns = Math.min(4, Math.max(1, Math.ceil(Math.sqrt(count))));
-  const rows = Math.min(4, Math.max(1, Math.ceil(count / columns)));
-  return {
-    id: `count-${count}`,
-    label: `${count} terminals`,
-    rows,
-    columns,
-    paneCount: count,
-  };
-}
-
-function renderPreviewCells(layout) {
-  const totalSlots = layout.rows * layout.columns;
-  const cells = [];
-
-  for (let index = 0; index < totalSlots; index += 1) {
-    const ghostClass = index >= layout.paneCount ? " is-ghost" : "";
-    cells.push(`<span class="preset-cell${ghostClass}"></span>`);
-  }
-
-  return cells.join("");
 }
 
 function buildBalancedPaneLayout(paneIds, preferHorizontal = true) {
@@ -4305,17 +3689,6 @@ function pushLauncherHistory(entry) {
   animateLauncherLatestCard(entry);
 }
 
-function formatLauncherCompletionMatches(matches) {
-  const lines = [];
-  const limited = matches.slice(0, MAX_LAUNCHER_COMPLETION_MATCHES);
-
-  for (let index = 0; index < limited.length; index += 3) {
-    lines.push(limited.slice(index, index + 3).join("    "));
-  }
-
-  return lines;
-}
-
 function clearLauncherCommandState() {
   uiState.launcherCommandValue = "";
   uiState.launcherCommandCursor = null;
@@ -4470,14 +3843,14 @@ function animateLauncherLatestCard(entry) {
     phase: "prepare",
   };
 
-  launcherCardAnimationFrame = window.requestAnimationFrame(() => {
+  runtimeStore.launcherCardAnimationFrame = window.requestAnimationFrame(() => {
     uiState.launcherLatestCard = {
       ...uiState.launcherLatestCard,
       phase: "run",
     };
     render();
 
-    launcherCardTransitionTimer = window.setTimeout(() => {
+    runtimeStore.launcherCardTransitionTimer = window.setTimeout(() => {
       uiState.launcherLatestCard = {
         current: nextEntry,
         previous: null,
@@ -4489,48 +3862,15 @@ function animateLauncherLatestCard(entry) {
 }
 
 function clearLauncherLatestCardTimers() {
-  if (launcherCardAnimationFrame) {
-    window.cancelAnimationFrame(launcherCardAnimationFrame);
-    launcherCardAnimationFrame = 0;
+  if (runtimeStore.launcherCardAnimationFrame) {
+    window.cancelAnimationFrame(runtimeStore.launcherCardAnimationFrame);
+    runtimeStore.launcherCardAnimationFrame = 0;
   }
 
-  if (launcherCardTransitionTimer) {
-    window.clearTimeout(launcherCardTransitionTimer);
-    launcherCardTransitionTimer = 0;
+  if (runtimeStore.launcherCardTransitionTimer) {
+    window.clearTimeout(runtimeStore.launcherCardTransitionTimer);
+    runtimeStore.launcherCardTransitionTimer = 0;
   }
-}
-
-function renderLauncherLatestStage() {
-  const { current, previous, phase } = uiState.launcherLatestCard;
-  if (!current && !previous) {
-    return "";
-  }
-
-  return `
-    <div class="workspace-launch-history-stage ${previous ? `is-transitioning is-${phase}` : "is-settled"}">
-      ${
-        previous
-          ? `<div class="workspace-launch-latest-card is-previous is-${phase}">${renderLauncherHistoryEntry(previous)}</div>`
-          : ""
-      }
-      ${
-        current
-          ? `<div class="workspace-launch-latest-card is-current is-${phase}">${renderLauncherHistoryEntry(current)}</div>`
-          : ""
-      }
-    </div>
-  `;
-}
-
-function renderLauncherHistoryEntry(entry) {
-  const tone = entry.tone === "error" ? "is-error" : "";
-  const output = (entry.output || []).map((line) => `<div>${escapeHtml(line)}</div>`).join("");
-  return `
-    <div class="workspace-launch-entry ${tone}">
-      ${entry.input ? `<div class="workspace-launch-command">$ ${escapeHtml(entry.input)}</div>` : ""}
-      <div class="workspace-launch-output">${output}</div>
-    </div>
-  `;
 }
 
 function normalizeDialogPath(result) {
