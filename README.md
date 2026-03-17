@@ -7,11 +7,11 @@
 </p>
 
 <p align="center">
-  <img src="./light-topbar-shadow-reduced.png" alt="CrewDock top bar with workspace tabs" width="100%" />
+  <img src="./docs/images/light-topbar-shadow-reduced.png" alt="CrewDock top bar with workspace tabs" width="100%" />
 </p>
 
 <p align="center">
-  <img src="./appicon.png" alt="CrewDock app icon" width="112" />
+  <img src="./docs/images/appicon.png" alt="CrewDock app icon" width="112" />
 </p>
 
 CrewDock is a Tauri app that binds each workspace tab to a real local project
@@ -34,28 +34,28 @@ multiple contexts, but you still want everything to feel immediate.
 <table>
   <tr>
     <td width="50%">
-      <img src="./light-theme-empty-state.png" alt="CrewDock empty state and launcher" width="100%" />
+      <img src="./docs/images/light-theme-empty-state.png" alt="CrewDock empty state and launcher" width="100%" />
       <p><strong>Launcher</strong><br/>Start from a folder picker or use the command bar to navigate and open a workspace.</p>
     </td>
     <td width="50%">
-      <img src="./light-theme-create-modal.png" alt="CrewDock workspace creation modal" width="100%" />
+      <img src="./docs/images/light-theme-create-modal.png" alt="CrewDock workspace creation modal" width="100%" />
       <p><strong>Workspace Builder</strong><br/>Choose how many terminals to boot up front, from a single shell to a dense grid.</p>
     </td>
   </tr>
   <tr>
     <td width="50%">
-      <img src="./light-theme-terminal-fixed.png" alt="CrewDock workspace with terminal panes" width="100%" />
+      <img src="./docs/images/light-theme-terminal-fixed.png" alt="CrewDock workspace with terminal panes" width="100%" />
       <p><strong>Live Terminal Grid</strong><br/>Work inside real shell panes, split them directionally, and keep the layout tied to that workspace.</p>
     </td>
     <td width="50%">
-      <img src="./light-theme-settings.png" alt="CrewDock theme settings" width="100%" />
+      <img src="./docs/images/light-theme-settings.png" alt="CrewDock theme settings" width="100%" />
       <p><strong>Theme Switcher</strong><br/>Swap the whole application chrome between built-in themes without losing workspace state.</p>
     </td>
   </tr>
 </table>
 
 <p align="center">
-  <img src="./dark-default.png" alt="CrewDock dark theme workspace view" width="100%" />
+  <img src="./docs/images/dark-default.png" alt="CrewDock dark theme workspace view" width="100%" />
 </p>
 
 ## Workflow
