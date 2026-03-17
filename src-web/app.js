@@ -1,14 +1,30 @@
 import { Terminal } from "./vendor/xterm.mjs";
 import { FitAddon } from "./vendor/addon-fit.mjs";
+import { createBridge } from "./bridge.js";
+import {
+  clampPaneCount,
+  createPendingWorkspaceDraft,
+  deriveLayoutForPaneCount,
+  formatLauncherCompletionMatches,
+  launcherStageSignature,
+  renderEmptyState,
+  renderLayoutPicker,
+} from "./launcher.js";
+import { createRuntimeStore, createUiState } from "./store.js";
+import {
+  buildWorkspaceTabLabels,
+  renderWorkspaceStrip,
+} from "./workspace-strip.js";
 
-const STATE_EVENT = "crewdock://state-changed";
-const TERMINAL_DATA_EVENT = "crewdock://terminal-data";
 const MAX_PENDING_TERMINAL_BYTES = 4 * 1024 * 1024;
+const MAX_RUNTIME_ACTIVITY_ITEMS = 80;
+const MAX_WORKSPACE_ATTENTION_COUNT = 99;
 const LAUNCHER_CARD_TRANSITION_MS = 360;
+const GIT_REFRESH_INTERVAL_MS = 3000;
 const DEFAULT_THEME_ID = "one-dark";
+const COMPACT_PANE_HEIGHT = 420;
 const LAUNCHER_COMMANDS = Object.freeze(["help", "pwd", "ls", "cd", "open", "clear"]);
 const PATH_AWARE_LAUNCHER_COMMANDS = new Set(["ls", "cd", "open"]);
-const MAX_LAUNCHER_COMPLETION_MATCHES = 24;
 
 const THEME_REGISTRY = Object.freeze({
   "one-dark": {
@@ -538,41 +554,28 @@ const APP_THEME_VARIABLES = Object.freeze(
 );
 
 const app = document.querySelector("#app");
-const bridge = createBridge();
+const bridge = createBridge({
+  defaultThemeId: DEFAULT_THEME_ID,
+  themeRegistry: THEME_REGISTRY,
+  normalizeDialogPath,
+  deriveLayoutForPaneCount,
+  buildBalancedPaneLayout,
+  splitPaneLayout,
+  removePaneLayout,
+  relabelMockPanes,
+  completeMockLauncherInput,
+  resolveMockNavigationPath,
+  mockListDirectory,
+});
 
-const uiState = {
-  snapshot: null,
-  mountedWorkspaceId: null,
-  mountedLayoutSignature: null,
-  appliedThemeId: null,
-  launcherVisible: false,
-  settingsVisible: false,
-  pendingWorkspaceDraft: null,
-  launcherCommandValue: "",
-  launcherHistory: [],
-  launcherLatestCard: {
-    current: null,
-    previous: null,
-    phase: "idle",
-  },
-  launcherCommands: [],
-  launcherCommandCursor: null,
-  contextMenu: null,
-  maximizedPaneId: null,
-  workspaceRenameDraft: null,
-  workspaceRenameShouldFocus: false,
-  workspaceRenameSaving: false,
-  workspaceTabsScrollLeft: 0,
-  workspaceTabsLastActiveWorkspaceId: null,
-  workspaceTabsLastCount: 0,
-};
-
-const paneTerminals = new Map();
-const pendingTerminalData = new Map();
-const workspacePaneIds = new Map();
-const terminalViewportLines = new Map();
-let launcherCardTransitionTimer = 0;
-let launcherCardAnimationFrame = 0;
+const uiState = createUiState();
+const runtimeStore = createRuntimeStore();
+const {
+  paneTerminals,
+  pendingTerminalData,
+  workspacePaneIds,
+  terminalViewportLines,
+} = runtimeStore;
 
 void init();
 
@@ -595,6 +598,19 @@ async function init() {
     });
   }
 
+  if (bridge.listenRuntimeEvents) {
+    await bridge.listenRuntimeEvents((event) => {
+      recordRuntimeEvent(event);
+      render();
+    });
+  }
+
+  if (bridge.listenDragDrop) {
+    await bridge.listenDragDrop((payload) => {
+      void handleNativeDragDrop(payload).catch((error) => console.error(error));
+    });
+  }
+
   document.addEventListener("click", handleClick);
   document.addEventListener("contextmenu", handleContextMenu);
   document.addEventListener("mousedown", handleMouseDown, true);
@@ -606,9 +622,13 @@ async function init() {
   document.addEventListener("pointerdown", handlePointerDown, true);
   document.addEventListener("scroll", handleScroll, true);
   document.addEventListener("wheel", handleWheel, { passive: false });
+  window.addEventListener("focus", handleWindowFocus);
+  window.addEventListener("blur", handleWindowBlur);
   window.addEventListener("resize", handleWindowResize);
 
   render();
+  syncGitRefreshLoop();
+  void refreshActiveWorkspaceGitStatus();
 }
 
 function detectPlatform() {
@@ -625,390 +645,106 @@ function detectPlatform() {
   return "other";
 }
 
-function createBridge() {
-  const tauriApi = window.__TAURI__;
-
-  if (tauriApi?.core?.invoke) {
-    return {
-      getAppSnapshot: () => tauriApi.core.invoke("get_app_snapshot"),
-      setTheme: (themeId) => tauriApi.core.invoke("set_theme", { themeId }),
-      createWorkspace: (path, paneCount) =>
-        tauriApi.core.invoke("create_workspace", { path, paneCount }),
-      renameWorkspace: (workspaceId, name) =>
-        tauriApi.core.invoke("rename_workspace", { workspaceId, name }),
-      switchWorkspace: (workspaceId) =>
-        tauriApi.core.invoke("switch_workspace", { workspaceId }),
-      closeWorkspace: (workspaceId) =>
-        tauriApi.core.invoke("close_workspace", { workspaceId }),
-      splitPane: (paneId, direction) =>
-        tauriApi.core.invoke("split_pane", { paneId, direction }),
-      closePane: (paneId) =>
-        tauriApi.core.invoke("close_pane", { paneId }),
-      showInFinder: (path) =>
-        tauriApi.core.invoke("show_in_finder", { path }),
-      runLauncherCommand: (input) =>
-        tauriApi.core.invoke("run_launcher_command", { input }),
-      completeLauncherInput: (input) =>
-        tauriApi.core.invoke("complete_launcher_input", { input }),
-      resetToLauncher: () => tauriApi.core.invoke("reset_to_launcher"),
-      startDragging: () => tauriApi.core.invoke("plugin:window|start_dragging"),
-      writeToPane: (paneId, data) =>
-        tauriApi.core.invoke("write_to_pane", { paneId, data }),
-      resizePane: (paneId, cols, rows) =>
-        tauriApi.core.invoke("resize_pane", { paneId, cols, rows }),
-      openDirectory: async (defaultPath) => {
-        const options = {
-          title: "Open Workspace Folder",
-          directory: true,
-          multiple: false,
-        };
-        if (defaultPath) {
-          options.defaultPath = defaultPath;
-        }
-
-        const result = await tauriApi.core.invoke("plugin:dialog|open", { options });
-        return normalizeDialogPath(result);
-      },
-      listenState: (handler) =>
-        tauriApi.event.listen(STATE_EVENT, (event) => handler(event.payload)),
-      listenTerminalData: (handler) =>
-        tauriApi.event.listen(TERMINAL_DATA_EVENT, (event) => handler(event.payload)),
-    };
-  }
-
-  return createMockBridge();
+function getActiveWorkspace() {
+  return uiState.snapshot?.activeWorkspace || null;
 }
 
-function createMockBridge() {
-  const stateListeners = new Set();
-  const terminalListeners = new Set();
-  const launcher = {
-    basePath: "/Users/ashutoshbele/Desktop/ashlab/crewdock",
-    presets: [
-      { id: "count-1", label: "1 terminal", rows: 1, columns: 1, paneCount: 1 },
-      { id: "count-2", label: "2 terminals", rows: 1, columns: 2, paneCount: 2 },
-      { id: "count-4", label: "4 terminals", rows: 2, columns: 2, paneCount: 4 },
-      { id: "count-8", label: "8 terminals", rows: 3, columns: 3, paneCount: 8 },
-      { id: "count-12", label: "12 terminals", rows: 3, columns: 4, paneCount: 12 },
-      { id: "count-16", label: "16 terminals", rows: 4, columns: 4, paneCount: 16 },
-    ],
-  };
-  const settings = {
-    themeId: DEFAULT_THEME_ID,
-  };
-
-  let workspaceCounter = 0;
-  let workspaces = [];
-  let activeWorkspaceId = null;
-
-  function emitState() {
-    const activeWorkspace = workspaces.find((workspace) => workspace.id === activeWorkspaceId);
-    const snapshot = {
-      launcher,
-      settings,
-      workspaces: workspaces.map((workspace) => ({
-        id: workspace.id,
-        name: workspace.name,
-        path: workspace.path,
-        layout: workspace.layout,
-        isLive: workspace.started,
-      })),
-      activeWorkspaceId,
-      activeWorkspace: activeWorkspace
-        ? {
-            id: activeWorkspace.id,
-            name: activeWorkspace.name,
-            path: activeWorkspace.path,
-            layout: activeWorkspace.layout,
-            panes: activeWorkspace.panes.map((pane) => ({ ...pane })),
-            paneLayout: structuredClone(activeWorkspace.paneLayout),
-          }
-        : null,
-    };
-
-    for (const listener of stateListeners) {
-      listener(structuredClone(snapshot));
-    }
-
-    return snapshot;
+function resolveActivePaneId(workspace = getActiveWorkspace()) {
+  if (!workspace?.panes?.length) {
+    return null;
   }
 
-  function emitTerminal(payload) {
-    for (const listener of terminalListeners) {
-      listener(structuredClone(payload));
-    }
+  if (workspace.panes.some((pane) => pane.id === uiState.activePaneId)) {
+    return uiState.activePaneId;
   }
 
-  function startWorkspace(workspace) {
-    if (!workspace || workspace.started) {
-      return;
-    }
+  return workspace.panes[0].id;
+}
 
-    workspace.started = true;
-    workspace.panes.forEach((pane, index) => {
-      pane.status = "booting";
-      window.setTimeout(() => {
-        if (!workspaces.some((entry) => entry.id === workspace.id)) {
-          return;
-        }
+function syncActivePaneId(workspace = getActiveWorkspace()) {
+  uiState.activePaneId = resolveActivePaneId(workspace);
+  return uiState.activePaneId;
+}
 
-        const currentWorkspace = workspaces.find((entry) => entry.id === workspace.id);
-        const currentPane = currentWorkspace?.panes.find((entry) => entry.id === pane.id);
-        if (!currentPane) {
-          return;
-        }
-
-        currentPane.status = "ready";
-        emitState();
-        emitTerminal({
-          paneId: pane.id,
-          data:
-            `CrewDock shell session attached\r\n` +
-            `Session: ${currentPane.label}\r\n` +
-            `Layout: ${workspace.layout.label}\r\n` +
-            `Shell: /bin/zsh\r\n` +
-            `Directory: ${workspace.path}\r\n\r\n` +
-            `This is the mock fallback bridge. Type here and the session will echo.\r\n$ `,
-        });
-      }, 140 + index * 40);
-    });
-
-    emitState();
+function setActivePaneId(paneId, workspace = getActiveWorkspace()) {
+  if (!paneId || !workspace?.panes?.some((pane) => pane.id === paneId)) {
+    return syncActivePaneId(workspace);
   }
 
-  function workspaceName(path) {
-    const parts = path.split("/").filter(Boolean);
-    return parts[parts.length - 1] || path;
+  uiState.activePaneId = paneId;
+  return paneId;
+}
+
+function normalizeDropPosition(position) {
+  if (!position) {
+    return null;
   }
 
-  return {
-    getAppSnapshot: async () => emitState(),
-    listenState: async (handler) => {
-      stateListeners.add(handler);
-      return () => stateListeners.delete(handler);
-    },
-    listenTerminalData: async (handler) => {
-      terminalListeners.add(handler);
-      return () => terminalListeners.delete(handler);
-    },
-    startDragging: async () => {},
-    setTheme: async (themeId) => {
-      if (!THEME_REGISTRY[themeId]) {
-        throw new Error("theme not found");
-      }
+  const scaleFactor = window.devicePixelRatio || 1;
+  const logicalPosition = typeof position.toLogical === "function"
+    ? position.toLogical(scaleFactor)
+    : position;
+  const x = Number(logicalPosition?.x);
+  const y = Number(logicalPosition?.y);
 
-      settings.themeId = themeId;
-      return emitState();
-    },
-    openDirectory: async (defaultPath) => {
-      const value = window.prompt("Workspace folder", defaultPath || "/Users/ashutoshbele/Desktop/ashlab/crewdock");
-      return value?.trim() || null;
-    },
-    resetToLauncher: async () => {
-      workspaces = [];
-      activeWorkspaceId = null;
-      return emitState();
-    },
-    createWorkspace: async (path, paneCount) => {
-      const normalizedPath = path.trim();
-      const layout = deriveLayoutForPaneCount(paneCount);
-      if (!layout) {
-        return emitState();
-      }
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    return null;
+  }
 
-      workspaceCounter += 1;
-      const workspace = {
-        id: `workspace-${workspaceCounter}`,
-        name: workspaceName(normalizedPath),
-        path: normalizedPath,
-        layout,
-        started: false,
-        panes: Array.from({ length: layout.paneCount }, (_, index) => ({
-          id: `pane-${workspaceCounter}-${index + 1}`,
-          label: `Shell ${String(index + 1).padStart(2, "0")}`,
-          status: "closed",
-        })),
-      };
-      workspace.paneLayout = buildBalancedPaneLayout(
-        workspace.panes.map((pane) => pane.id),
-        layout.columns >= layout.rows,
-      );
+  return { x, y };
+}
 
-      workspaces.push(workspace);
-      activeWorkspaceId = workspace.id;
-      launcher.basePath = normalizedPath;
-      startWorkspace(workspace);
-      return emitState();
-    },
-    renameWorkspace: async (workspaceId, name) => {
-      const workspace = workspaces.find((entry) => entry.id === workspaceId);
-      const nextName = String(name || "").trim();
-      if (!workspace || !nextName) {
-        return emitState();
-      }
+function resolvePaneIdFromDropPosition(position) {
+  const logicalPosition = normalizeDropPosition(position);
+  if (!logicalPosition) {
+    return null;
+  }
 
-      workspace.name = nextName;
-      return emitState();
-    },
-    switchWorkspace: async (workspaceId) => {
-      const workspace = workspaces.find((entry) => entry.id === workspaceId);
-      if (!workspace) {
-        return emitState();
-      }
+  const element = document.elementFromPoint(logicalPosition.x, logicalPosition.y);
+  return element?.closest?.("[data-pane-id]")?.dataset?.paneId || null;
+}
 
-      activeWorkspaceId = workspace.id;
-      launcher.basePath = workspace.path;
-      startWorkspace(workspace);
-      return emitState();
-    },
-    closeWorkspace: async (workspaceId) => {
-      const index = workspaces.findIndex((workspace) => workspace.id === workspaceId);
-      if (index === -1) {
-        return emitState();
-      }
+function normalizeDroppedPaths(paths) {
+  return Array.from(
+    new Set(
+      (Array.isArray(paths) ? paths : []).filter(
+        (path) => typeof path === "string" && path.trim().length > 0,
+      ),
+    ),
+  );
+}
 
-      const isActive = activeWorkspaceId === workspaceId;
-      workspaces.splice(index, 1);
+function quoteShellPath(path) {
+  return `'${String(path).replaceAll("'", "'\\''")}'`;
+}
 
-      if (isActive) {
-        if (index > 0) {
-          activeWorkspaceId = workspaces[index - 1]?.id ?? null;
-        } else {
-          activeWorkspaceId = workspaces[0]?.id ?? null;
-        }
-      }
+function formatDroppedPathsForShell(paths) {
+  return `${paths.map(quoteShellPath).join(" ")} `;
+}
 
-      return emitState();
-    },
-    splitPane: async (paneId, direction) => {
-      const workspace = workspaces.find((entry) => entry.id === activeWorkspaceId);
-      const paneIndex = workspace?.panes.findIndex((pane) => pane.id === paneId) ?? -1;
-      if (!workspace || paneIndex === -1 || workspace.panes.length >= 16) {
-        return emitState();
-      }
+async function handleNativeDragDrop(payload) {
+  if (!payload || payload.type !== "drop") {
+    return;
+  }
 
-      const insertAt = direction === "left" || direction === "up" ? paneIndex : paneIndex + 1;
-      const nextCount = workspace.panes.length + 1;
-      const layout = deriveLayoutForPaneCount(nextCount);
-      const pane = {
-        id: `pane-${workspace.id}-${Date.now()}`,
-        label: "",
-        status: workspace.started ? "booting" : "closed",
-      };
+  const workspace = getActiveWorkspace();
+  const paths = normalizeDroppedPaths(payload.paths);
+  if (!workspace || paths.length === 0) {
+    return;
+  }
 
-      workspace.panes.splice(insertAt, 0, pane);
-      relabelMockPanes(workspace.panes);
-      workspace.layout = layout;
-      workspace.paneLayout = splitPaneLayout(
-        workspace.paneLayout,
-        paneId,
-        direction === "left" || direction === "right" ? "horizontal" : "vertical",
-        direction === "left" || direction === "up",
-        pane.id,
-      );
-      emitState();
+  const paneId = resolvePaneIdFromDropPosition(payload.position) || resolveActivePaneId(workspace);
+  if (!paneId) {
+    return;
+  }
 
-      if (workspace.started) {
-        window.setTimeout(() => {
-          pane.status = "ready";
-          emitState();
-          emitTerminal({
-            paneId: pane.id,
-            data:
-              `CrewDock shell session attached\r\n` +
-              `Session: ${pane.label}\r\n` +
-              `Layout: ${workspace.layout.label}\r\n` +
-              `Shell: /bin/zsh\r\n` +
-              `Directory: ${workspace.path}\r\n\r\n$ `,
-          });
-        }, 120);
-      }
+  setActivePaneId(paneId, workspace);
+  await bridge.writeToPane(paneId, formatDroppedPathsForShell(paths));
+  paneTerminals.get(paneId)?.terminal.focus();
+}
 
-      return emitState();
-    },
-    closePane: async (paneId) => {
-      const workspace = workspaces.find((entry) => entry.panes.some((pane) => pane.id === paneId));
-      if (!workspace || workspace.panes.length <= 1) {
-        return emitState();
-      }
-
-      workspace.panes = workspace.panes.filter((pane) => pane.id !== paneId);
-      relabelMockPanes(workspace.panes);
-      workspace.layout = deriveLayoutForPaneCount(workspace.panes.length);
-      workspace.paneLayout = removePaneLayout(workspace.paneLayout, paneId);
-      return emitState();
-    },
-    showInFinder: async () => {},
-    runLauncherCommand: async (input) => {
-      const command = String(input || "").trim();
-      if (!command) {
-        throw new Error("enter a command. Try help.");
-      }
-
-      if (command === "help") {
-        return {
-          basePath: launcher.basePath,
-          output: ["Commands: help, pwd, ls [path], cd <path>, open [path], clear"],
-          openPath: null,
-          clearOutput: false,
-        };
-      }
-
-      if (command === "pwd") {
-        return {
-          basePath: launcher.basePath,
-          output: [launcher.basePath],
-          openPath: null,
-          clearOutput: false,
-        };
-      }
-
-      if (command === "clear") {
-        return {
-          basePath: launcher.basePath,
-          output: [],
-          openPath: null,
-          clearOutput: true,
-        };
-      }
-
-      if (command === "ls" || command.startsWith("ls ")) {
-        const target = command === "ls" ? launcher.basePath : resolveMockNavigationPath(launcher.basePath, command.slice(3));
-        return {
-          basePath: launcher.basePath,
-          output: mockListDirectory(target),
-          openPath: null,
-          clearOutput: false,
-        };
-      }
-
-      if (command === "open" || command.startsWith("open ")) {
-        const target = command === "open" ? launcher.basePath : resolveMockNavigationPath(launcher.basePath, command.slice(5));
-        launcher.basePath = target;
-        return {
-          basePath: launcher.basePath,
-          output: [`Opening workspace at ${target}`],
-          openPath: target,
-          clearOutput: false,
-        };
-      }
-
-      const nextPath = resolveMockNavigationPath(launcher.basePath, command);
-      launcher.basePath = nextPath;
-      return {
-        basePath: launcher.basePath,
-        output: [`cwd -> ${nextPath}`],
-        openPath: null,
-        clearOutput: false,
-      };
-    },
-    completeLauncherInput: async (input) => completeMockLauncherInput(launcher.basePath, input),
-    writeToPane: async (paneId, data) => {
-      const output = data === "\r" ? "\r\n$ " : data;
-      emitTerminal({ paneId, data: output });
-    },
-    resizePane: async () => {},
-  };
+function normalizeSettingsSection(section) {
+  return section === "guide" ? "guide" : "workbench";
 }
 
 function normalizeThemeId(themeId) {
@@ -1056,8 +792,21 @@ function syncMountedTerminalThemes(theme = getCurrentThemeDefinition()) {
 }
 
 async function handleClick(event) {
-  const target = event.target.closest("[data-action]");
+  const clickedElement = event.target instanceof Element ? event.target : null;
+  const target = clickedElement?.closest("[data-action]");
   if (!target) {
+    return;
+  }
+
+  if (target.dataset.action === "close-settings" && clickedElement?.closest(".settings-sheet")) {
+    return;
+  }
+
+  if (target.dataset.action === "close-git-panel" && clickedElement?.closest(".workspace-git-panel")) {
+    return;
+  }
+
+  if (target.dataset.action === "close-quick-switcher" && clickedElement?.closest(".workspace-quick-switcher")) {
     return;
   }
 
@@ -1068,6 +817,9 @@ async function handleClick(event) {
 
   if (target.dataset.action === "show-settings") {
     uiState.settingsVisible = true;
+    uiState.settingsSection = "workbench";
+    uiState.gitPanelVisible = false;
+    closeQuickSwitcher();
     uiState.pendingWorkspaceDraft = null;
     uiState.contextMenu = null;
     render();
@@ -1080,13 +832,55 @@ async function handleClick(event) {
     return;
   }
 
+  if (target.dataset.action === "show-settings-section") {
+    const nextSection = normalizeSettingsSection(target.dataset.settingsSection);
+    if (uiState.settingsSection !== nextSection) {
+      uiState.settingsSection = nextSection;
+      render();
+    }
+    return;
+  }
+
   if (target.dataset.action === "show-launcher") {
     uiState.launcherVisible = true;
     uiState.settingsVisible = false;
+    uiState.gitPanelVisible = false;
+    closeQuickSwitcher();
     uiState.pendingWorkspaceDraft = null;
     uiState.contextMenu = null;
     uiState.maximizedPaneId = null;
     render();
+    return;
+  }
+
+  if (target.dataset.action === "show-git-panel") {
+    if (!uiState.snapshot?.activeWorkspace) {
+      return;
+    }
+
+    uiState.gitPanelVisible = true;
+    uiState.settingsVisible = false;
+    closeQuickSwitcher();
+    uiState.pendingWorkspaceDraft = null;
+    render();
+    void refreshActiveWorkspaceGitStatus();
+    return;
+  }
+
+  if (target.dataset.action === "close-git-panel") {
+    uiState.gitPanelVisible = false;
+    render();
+    return;
+  }
+
+  if (target.dataset.action === "close-quick-switcher") {
+    closeQuickSwitcher();
+    render();
+    return;
+  }
+
+  if (target.dataset.action === "refresh-git-status") {
+    await refreshActiveWorkspaceGitStatus({ force: true });
     return;
   }
 
@@ -1102,6 +896,8 @@ async function handleClick(event) {
 
   if (target.dataset.action === "open-workspace") {
     uiState.settingsVisible = false;
+    uiState.gitPanelVisible = false;
+    closeQuickSwitcher();
     await beginWorkspaceCreation();
     return;
   }
@@ -1112,6 +908,7 @@ async function handleClick(event) {
       return;
     }
 
+    closeQuickSwitcher();
     startWorkspaceRename(workspaceId);
     render();
     return;
@@ -1177,9 +974,12 @@ async function handleClick(event) {
     );
     uiState.launcherVisible = false;
     uiState.settingsVisible = false;
+    uiState.gitPanelVisible = false;
+    closeQuickSwitcher();
     uiState.pendingWorkspaceDraft = null;
     clearLauncherCommandState();
     render();
+    void refreshActiveWorkspaceGitStatus({ force: true });
     return;
   }
 
@@ -1188,14 +988,24 @@ async function handleClick(event) {
     if (!workspaceId || workspaceId === uiState.snapshot?.activeWorkspaceId) {
       uiState.launcherVisible = false;
       uiState.settingsVisible = false;
+      markWorkspaceAttentionSeen(workspaceId || null);
+      closeQuickSwitcher();
       render();
       return;
     }
 
-    uiState.snapshot = await bridge.switchWorkspace(workspaceId);
-    uiState.launcherVisible = false;
-    uiState.settingsVisible = false;
+    await activateWorkspace(workspaceId);
     render();
+    return;
+  }
+
+  if (target.dataset.action === "quick-switch-workspace") {
+    const workspaceId = target.dataset.workspaceId;
+    if (!workspaceId) {
+      return;
+    }
+
+    await activateWorkspace(workspaceId);
     return;
   }
 
@@ -1206,6 +1016,8 @@ async function handleClick(event) {
     }
 
     clearWorkspaceBuffers(workspaceId);
+    uiState.runtimeAttentionByWorkspace.delete(workspaceId);
+    uiState.runtimeActivity = uiState.runtimeActivity.filter((entry) => entry.workspaceId !== workspaceId);
     if (uiState.mountedWorkspaceId === workspaceId) {
       disposeAllTerminals();
       uiState.mountedWorkspaceId = null;
@@ -1213,6 +1025,7 @@ async function handleClick(event) {
 
     uiState.snapshot = await bridge.closeWorkspace(workspaceId);
     render();
+    void refreshActiveWorkspaceGitStatus({ force: true });
   }
 }
 
@@ -1230,6 +1043,7 @@ function handleContextMenu(event) {
     return;
   }
 
+  setActivePaneId(paneId);
   uiState.contextMenu = {
     paneId,
     x: event.clientX,
@@ -1258,6 +1072,13 @@ function handleMouseDown(event) {
 }
 
 function handlePointerDown(event) {
+  const paneId = event.target instanceof Element
+    ? event.target.closest("[data-pane-id]")?.dataset?.paneId || null
+    : null;
+  if (paneId) {
+    setActivePaneId(paneId);
+  }
+
   if (!uiState.contextMenu) {
     return;
   }
@@ -1317,6 +1138,20 @@ function handleWindowResize() {
   );
 }
 
+function handleWindowFocus() {
+  syncGitRefreshLoop();
+  const activeWorkspaceId = uiState.snapshot?.activeWorkspaceId || null;
+  const didClearAttention = markWorkspaceAttentionSeen(activeWorkspaceId);
+  if (didClearAttention && activeWorkspaceId) {
+    render();
+  }
+  void refreshActiveWorkspaceGitStatus({ force: true });
+}
+
+function handleWindowBlur() {
+  syncGitRefreshLoop();
+}
+
 function handleFocusOut(event) {
   const renameInput = event.target.closest("[data-workspace-rename-input]");
   if (!renameInput || uiState.workspaceRenameSaving) {
@@ -1352,6 +1187,15 @@ async function handleSubmit(event) {
 }
 
 function handleInput(event) {
+  const quickSwitcherInput = event.target.closest("[data-quick-switcher-input]");
+  if (quickSwitcherInput) {
+    uiState.quickSwitcherQuery = quickSwitcherInput.value;
+    syncQuickSwitcherCursor();
+    uiState.quickSwitcherShouldFocus = true;
+    render();
+    return;
+  }
+
   const renameInput = event.target.closest("[data-workspace-rename-input]");
   if (renameInput && uiState.workspaceRenameDraft) {
     uiState.workspaceRenameDraft = {
@@ -1389,6 +1233,44 @@ function handleChange(event) {
 }
 
 async function handleKeyDown(event) {
+  const quickSwitcherInput = event.target.closest("[data-quick-switcher-input]");
+  if (quickSwitcherInput) {
+    const items = getQuickSwitcherItems();
+
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeQuickSwitcher();
+      render();
+      return;
+    }
+
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      moveQuickSwitcherCursor(1, items.length);
+      uiState.quickSwitcherShouldFocus = true;
+      render();
+      return;
+    }
+
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      moveQuickSwitcherCursor(-1, items.length);
+      uiState.quickSwitcherShouldFocus = true;
+      render();
+      return;
+    }
+
+    if (event.key === "Enter") {
+      event.preventDefault();
+      const item = items[uiState.quickSwitcherCursor] || items[0] || null;
+      if (item) {
+        await activateWorkspace(item.id);
+        render();
+      }
+      return;
+    }
+  }
+
   const renameInput = event.target.closest("[data-workspace-rename-input]");
   if (renameInput) {
     if (event.key === "Escape") {
@@ -1402,8 +1284,42 @@ async function handleKeyDown(event) {
   if ((event.metaKey || event.ctrlKey) && event.key === ",") {
     event.preventDefault();
     uiState.settingsVisible = true;
+    uiState.settingsSection = "workbench";
+    uiState.gitPanelVisible = false;
+    closeQuickSwitcher();
     uiState.pendingWorkspaceDraft = null;
     uiState.contextMenu = null;
+    render();
+    return;
+  }
+
+  if ((event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === "k") {
+    event.preventDefault();
+    openQuickSwitcher();
+    render();
+    return;
+  }
+
+  if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "g") {
+    event.preventDefault();
+    if (!uiState.snapshot?.activeWorkspace) {
+      return;
+    }
+
+    uiState.gitPanelVisible = !uiState.gitPanelVisible;
+    if (uiState.gitPanelVisible) {
+      uiState.settingsVisible = false;
+      closeQuickSwitcher();
+      uiState.pendingWorkspaceDraft = null;
+      void refreshActiveWorkspaceGitStatus({ force: true });
+    }
+    render();
+    return;
+  }
+
+  if (uiState.quickSwitcherVisible && event.key === "Escape") {
+    event.preventDefault();
+    closeQuickSwitcher();
     render();
     return;
   }
@@ -1411,6 +1327,13 @@ async function handleKeyDown(event) {
   if (uiState.settingsVisible && event.key === "Escape") {
     event.preventDefault();
     uiState.settingsVisible = false;
+    render();
+    return;
+  }
+
+  if (uiState.gitPanelVisible && event.key === "Escape") {
+    event.preventDefault();
+    uiState.gitPanelVisible = false;
     render();
     return;
   }
@@ -1470,11 +1393,181 @@ async function beginWorkspaceCreation() {
     snapshot?.launcher?.presets,
   );
   uiState.launcherVisible = true;
+  closeQuickSwitcher();
   render();
+}
+
+async function activateWorkspace(workspaceId) {
+  if (!workspaceId) {
+    return;
+  }
+
+  if (workspaceId !== uiState.snapshot?.activeWorkspaceId) {
+    uiState.snapshot = await bridge.switchWorkspace(workspaceId);
+  }
+
+  uiState.launcherVisible = false;
+  uiState.settingsVisible = false;
+  uiState.gitPanelVisible = false;
+  uiState.pendingWorkspaceDraft = null;
+  uiState.contextMenu = null;
+  markWorkspaceAttentionSeen(workspaceId);
+  closeQuickSwitcher();
+  void refreshActiveWorkspaceGitStatus({ force: true });
+}
+
+function openQuickSwitcher() {
+  if (!uiState.snapshot?.workspaces?.length) {
+    return;
+  }
+
+  uiState.quickSwitcherVisible = true;
+  uiState.launcherVisible = false;
+  uiState.quickSwitcherQuery = "";
+  uiState.quickSwitcherCursor = Math.max(
+    0,
+    uiState.snapshot.workspaces.findIndex((workspace) => workspace.id === uiState.snapshot?.activeWorkspaceId),
+  );
+  uiState.quickSwitcherShouldFocus = true;
+  uiState.settingsVisible = false;
+  uiState.gitPanelVisible = false;
+  uiState.pendingWorkspaceDraft = null;
+  uiState.contextMenu = null;
+}
+
+function closeQuickSwitcher() {
+  uiState.quickSwitcherVisible = false;
+  uiState.quickSwitcherQuery = "";
+  uiState.quickSwitcherCursor = 0;
+  uiState.quickSwitcherShouldFocus = false;
 }
 
 function getWorkspaceById(workspaceId, snapshot = uiState.snapshot) {
   return snapshot?.workspaces?.find((workspace) => workspace.id === workspaceId) || null;
+}
+
+function syncRuntimeActivityState(snapshot = uiState.snapshot) {
+  const workspaceIds = new Set((snapshot?.workspaces || []).map((workspace) => workspace.id));
+
+  for (const workspaceId of uiState.runtimeAttentionByWorkspace.keys()) {
+    if (!workspaceIds.has(workspaceId)) {
+      uiState.runtimeAttentionByWorkspace.delete(workspaceId);
+    }
+  }
+
+  uiState.runtimeActivity = uiState.runtimeActivity.filter((entry) => workspaceIds.has(entry.workspaceId));
+
+  if (snapshot?.activeWorkspaceId && document.hasFocus()) {
+    markWorkspaceAttentionSeen(snapshot.activeWorkspaceId);
+  }
+}
+
+function markWorkspaceAttentionSeen(workspaceId) {
+  if (!workspaceId) {
+    return false;
+  }
+
+  const attention = uiState.runtimeAttentionByWorkspace.get(workspaceId);
+  if (!attention || attention.unreadCount <= 0) {
+    return false;
+  }
+
+  uiState.runtimeAttentionByWorkspace.set(workspaceId, {
+    ...attention,
+    unreadCount: 0,
+  });
+  return true;
+}
+
+function recordRuntimeEvent(event) {
+  const normalizedEvent = normalizeRuntimeEvent(event);
+  if (!normalizedEvent) {
+    return;
+  }
+
+  const workspace = getWorkspaceById(normalizedEvent.workspaceId);
+  if (!workspace) {
+    return;
+  }
+
+  const nextEvent = {
+    ...normalizedEvent,
+    at: Date.now(),
+    message: formatRuntimeEventMessage(normalizedEvent),
+  };
+  const currentAttention =
+    uiState.runtimeAttentionByWorkspace.get(normalizedEvent.workspaceId) || {
+      unreadCount: 0,
+      tone: runtimeEventTone(normalizedEvent.kind),
+      lastEvent: null,
+    };
+  const shouldMarkUnread =
+    normalizedEvent.workspaceId !== uiState.snapshot?.activeWorkspaceId || !document.hasFocus();
+
+  uiState.runtimeAttentionByWorkspace.set(normalizedEvent.workspaceId, {
+    unreadCount: shouldMarkUnread
+      ? Math.min(MAX_WORKSPACE_ATTENTION_COUNT, currentAttention.unreadCount + 1)
+      : 0,
+    tone: runtimeEventTone(normalizedEvent.kind),
+    lastEvent: nextEvent,
+  });
+
+  uiState.runtimeActivity.unshift(nextEvent);
+  if (uiState.runtimeActivity.length > MAX_RUNTIME_ACTIVITY_ITEMS) {
+    uiState.runtimeActivity.length = MAX_RUNTIME_ACTIVITY_ITEMS;
+  }
+}
+
+function normalizeRuntimeEvent(event) {
+  if (!event || typeof event !== "object") {
+    return null;
+  }
+
+  if (!event.workspaceId || !event.paneId || typeof event.kind !== "string") {
+    return null;
+  }
+
+  if (!["paneReady", "paneClosed", "paneFailed"].includes(event.kind)) {
+    return null;
+  }
+
+  return {
+    kind: event.kind,
+    workspaceId: event.workspaceId,
+    paneId: event.paneId,
+    label: String(event.label || "Terminal"),
+    error: event.error ? String(event.error) : "",
+  };
+}
+
+function runtimeEventTone(kind) {
+  switch (kind) {
+    case "paneFailed":
+      return "failed";
+    case "paneClosed":
+      return "closed";
+    case "paneReady":
+    default:
+      return "ready";
+  }
+}
+
+function formatRuntimeEventMessage(event) {
+  const label = event.label || "Terminal";
+
+  switch (event.kind) {
+    case "paneFailed":
+      return `${label} failed${event.error ? `: ${event.error}` : ""}`;
+    case "paneClosed":
+      return `${label} closed`;
+    case "paneReady":
+    default:
+      return `${label} is live`;
+  }
+}
+
+function getWorkspaceAttention(workspaceId) {
+  return uiState.runtimeAttentionByWorkspace.get(workspaceId) || null;
 }
 
 function startWorkspaceRename(workspaceId) {
@@ -1491,6 +1584,7 @@ function startWorkspaceRename(workspaceId) {
   uiState.workspaceRenameSaving = false;
   uiState.launcherVisible = false;
   uiState.settingsVisible = false;
+  uiState.gitPanelVisible = false;
   uiState.contextMenu = null;
 }
 
@@ -1543,6 +1637,7 @@ function ensureFrame() {
     <div class="app-shell">
       <header class="workspace-strip" data-region="strip"></header>
       <section class="workspace-stage" data-region="stage"></section>
+      <footer class="workspace-statusbar-region" data-region="status"></footer>
       <div class="workspace-context-layer" data-region="context"></div>
       <div class="workspace-modal-layer" data-region="modal"></div>
     </div>
@@ -1556,11 +1651,18 @@ function render() {
   }
 
   applyActiveTheme(getActiveThemeId(uiState.snapshot));
+  syncRuntimeActivityState(uiState.snapshot);
   ensureFrame();
 
   const snapshot = uiState.snapshot;
   const activeWorkspace = snapshot.activeWorkspace;
   const shouldShowLauncher = uiState.launcherVisible || !activeWorkspace;
+
+  if (activeWorkspace) {
+    syncActivePaneId(activeWorkspace);
+  } else {
+    uiState.activePaneId = null;
+  }
 
   if (
     uiState.workspaceRenameDraft &&
@@ -1583,29 +1685,56 @@ function render() {
     uiState.contextMenu = null;
   }
 
+  if (uiState.gitPanelVisible && !activeWorkspace) {
+    uiState.gitPanelVisible = false;
+  }
+
+  if (uiState.quickSwitcherVisible && snapshot.workspaces.length === 0) {
+    closeQuickSwitcher();
+  }
+
   const stripRegion = app.querySelector('[data-region="strip"]');
   const stageRegion = app.querySelector('[data-region="stage"]');
+  const statusRegion = app.querySelector('[data-region="status"]');
   const contextRegion = app.querySelector('[data-region="context"]');
   const modalRegion = app.querySelector('[data-region="modal"]');
 
-  stripRegion.innerHTML = renderWorkspaceStrip(
-    snapshot.workspaces,
-    snapshot.activeWorkspaceId,
-    activeWorkspace,
-  );
+  stripRegion.innerHTML = renderWorkspaceStrip({
+    workspaces: snapshot.workspaces,
+    activeWorkspaceId: snapshot.activeWorkspaceId,
+    workspaceRenameDraft: uiState.workspaceRenameDraft,
+    getWorkspaceAttention,
+    escapeHtml,
+    getGitTone,
+    formatGitBadgeTitle,
+  });
+  statusRegion.innerHTML = renderWorkspaceStatusBar(snapshot, activeWorkspace);
   syncWorkspaceTabRail(snapshot.activeWorkspaceId, snapshot.workspaces.length);
   if (uiState.workspaceRenameDraft && uiState.workspaceRenameShouldFocus) {
     focusWorkspaceRenameInput();
   }
-  modalRegion.innerHTML = uiState.settingsVisible
-    ? renderSettingsSheet(snapshot)
-    : uiState.pendingWorkspaceDraft
-      ? renderLayoutPicker(snapshot.launcher.presets, uiState.pendingWorkspaceDraft)
-      : "";
+  modalRegion.innerHTML = uiState.quickSwitcherVisible
+    ? renderQuickSwitcher(snapshot)
+    : uiState.settingsVisible
+      ? renderSettingsSheet(snapshot)
+      : uiState.pendingWorkspaceDraft
+        ? renderLayoutPicker({
+            presets: snapshot.launcher.presets,
+            draft: uiState.pendingWorkspaceDraft,
+            basename,
+            escapeHtml,
+          })
+        : uiState.gitPanelVisible && activeWorkspace
+          ? renderGitPanel(activeWorkspace)
+          : "";
   contextRegion.innerHTML =
     uiState.contextMenu && activeWorkspace
       ? renderContextMenu(uiState.contextMenu, activeWorkspace, snapshot)
       : "";
+  if (uiState.quickSwitcherVisible && uiState.quickSwitcherShouldFocus) {
+    focusQuickSwitcherInput();
+  }
+  syncGitRefreshLoop();
 
   if (shouldShowLauncher) {
     if (uiState.mountedWorkspaceId) {
@@ -1613,9 +1742,30 @@ function render() {
       uiState.mountedWorkspaceId = null;
       uiState.mountedLayoutSignature = null;
     }
-    stageRegion.innerHTML = renderEmptyState(snapshot.launcher.basePath);
+
+    const preservedLauncherInputState = captureLauncherInputState(stageRegion);
+    const nextLauncherSignature = launcherStageSignature(snapshot.launcher.basePath, uiState);
+    const shouldRemountLauncher =
+      stageRegion.dataset.stageMode !== "launcher"
+      || stageRegion.dataset.stageSignature !== nextLauncherSignature;
+
+    if (shouldRemountLauncher) {
+      stageRegion.innerHTML = renderEmptyState({
+        basePath: snapshot.launcher.basePath,
+        launcherCommandValue: uiState.launcherCommandValue,
+        launcherLatestCard: uiState.launcherLatestCard,
+        escapeHtml,
+      });
+      stageRegion.dataset.stageMode = "launcher";
+      stageRegion.dataset.stageSignature = nextLauncherSignature;
+    }
+
     if (!uiState.settingsVisible) {
-      focusLauncherInput();
+      if (shouldRemountLauncher && preservedLauncherInputState?.wasFocused) {
+        restoreLauncherInputState(preservedLauncherInputState);
+      } else {
+        focusLauncherInput();
+      }
     }
     return;
   }
@@ -1636,231 +1786,292 @@ function render() {
     stageRegion.innerHTML = renderWorkspace(activeWorkspace);
     uiState.mountedWorkspaceId = activeWorkspace.id;
     uiState.mountedLayoutSignature = nextLayoutSignature;
+    stageRegion.dataset.stageMode = "workspace";
+    stageRegion.dataset.stageSignature = nextLayoutSignature;
     mountWorkspaceTerminals(activeWorkspace);
   }
 
   syncWorkspace(activeWorkspace);
 }
 
-function renderWorkspaceStrip(workspaces, activeWorkspaceId, activeWorkspace) {
-  const tabLabels = buildWorkspaceTabLabels(workspaces);
+function renderBranchIcon() {
   return `
-    <div class="workspace-strip-track" data-tauri-drag-region>
-      <div class="workspace-strip-leading" data-tauri-drag-region aria-hidden="true"></div>
-      <div
-        class="workspace-strip-summary"
-        data-tauri-drag-region
-        title="${escapeHtml(activeWorkspace?.path || "CrewDock")}"
-      >
-        <span class="workspace-strip-summary-mark">CrewDock</span>
-        <div class="workspace-strip-summary-copy">
-          <strong>${escapeHtml(activeWorkspace?.name || "Launcher")}</strong>
-          <span>${escapeHtml(renderStripSummaryMeta(activeWorkspace, workspaces.length))}</span>
-        </div>
-      </div>
-      <div class="workspace-tabs-shell" data-workspace-tabs-shell data-tauri-drag-region>
-        <button
-          class="workspace-tabs-scroll workspace-tabs-scroll-left"
-          type="button"
-          data-tauri-drag-region="false"
-          data-action="scroll-workspaces-left"
-          aria-label="Scroll workspaces left"
-          title="Scroll workspaces left"
-          disabled
-        >
-          ${renderChevronIcon("left")}
-        </button>
-        <div class="workspace-tabs-viewport" data-workspace-tabs-viewport data-tauri-drag-region>
-          <div class="workspace-tabs" data-workspace-tabs data-tauri-drag-region>
-            ${workspaces
-              .map((workspace) =>
-                renderWorkspaceTab(
-                  workspace,
-                  activeWorkspaceId,
-                  tabLabels.get(workspace.id) || workspace.name,
-                ),
-              )
-              .join("")}
-          </div>
-        </div>
-        <button
-          class="workspace-tabs-scroll workspace-tabs-scroll-right"
-          type="button"
-          data-tauri-drag-region="false"
-          data-action="scroll-workspaces-right"
-          aria-label="Scroll workspaces right"
-          title="Scroll workspaces right"
-          disabled
-        >
-          ${renderChevronIcon("right")}
-        </button>
-      </div>
-      <div class="workspace-strip-actions">
-        <button
-          class="workspace-strip-button workspace-settings-button"
-          data-tauri-drag-region="false"
-          data-action="show-settings"
-          aria-label="Open settings"
-          title="Settings"
-        >
-          ${renderSettingsIcon()}
-        </button>
-        <button
-          class="workspace-add"
-          data-tauri-drag-region="false"
-          data-action="show-launcher"
-          aria-label="New workspace"
-          title="New workspace"
-        >
-          ${renderPlusIcon()}
-        </button>
-      </div>
-    </div>
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M7 3a3 3 0 1 1 0 6v7.2a3 3 0 1 1-2 0V9a3 3 0 0 1 2-6Zm0 2a1 1 0 1 0 0 2 1 1 0 0 0 0-2Zm10 4a3 3 0 1 1-2.9 3.8H9v2h5.1A3 3 0 1 1 17 9Zm0 2a1 1 0 1 0 0 2 1 1 0 0 0 0-2Zm0 7a1 1 0 1 0 0 2 1 1 0 0 0 0-2Z" fill="currentColor"></path>
+    </svg>
   `;
 }
 
-function renderStripSummaryMeta(activeWorkspace, workspaceCount) {
+function renderRefreshIcon() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M12 5a7 7 0 0 1 6.2 3.8V6.5h2v6h-6v-2h2.7A5 5 0 1 0 17 15h2a7 7 0 1 1-7-10Z" fill="currentColor"></path>
+    </svg>
+  `;
+}
+
+function renderFileIcon() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M7 3h6.8L19 8.2V19a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Zm6 1.8V9h4.2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></path>
+    </svg>
+  `;
+}
+
+function renderWorkspaceStatusBar(snapshot, activeWorkspace) {
+  const leftItems = [`<span class="workspace-statusbar-brand">CrewDock</span>`];
+  const rightItems = [];
+
   if (!activeWorkspace) {
-    if (workspaceCount <= 0) {
-      return "Open a folder to start";
+    leftItems.push(renderStatusBarItem("Launcher", "Source folders and workspace creation"));
+
+    if (snapshot.workspaces.length > 0) {
+      rightItems.push(
+        renderStatusBarItem(
+          `${snapshot.workspaces.length} ${snapshot.workspaces.length === 1 ? "workspace" : "workspaces"}`,
+        ),
+      );
     }
 
-    return `${workspaceCount} ${workspaceCount === 1 ? "workspace" : "workspaces"} ready`;
-  }
+    rightItems.push(
+      renderStatusBarItem(compactWorkspacePath(snapshot.launcher.basePath), snapshot.launcher.basePath, "is-path"),
+    );
+  } else {
+    const summary = activeWorkspace.gitDetail?.summary || null;
+    const paneCount = activeWorkspace.panes?.length || activeWorkspace.layout?.paneCount || 0;
+    const pathLabel = compactWorkspacePath(activeWorkspace.path);
 
-  const paneCount = activeWorkspace.panes?.length || activeWorkspace.layout?.paneCount || 0;
-  return `${paneCount} ${paneCount === 1 ? "pane" : "panes"} / ${compactWorkspacePath(activeWorkspace.path)}`;
-}
+    leftItems.push(renderStatusBarItem(pathLabel, activeWorkspace.path, "is-path is-primary"));
+    leftItems.push(renderStatusBarGitButton(summary));
 
-function renderSettingsIcon() {
-  return `
-    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <path d="M10.3 2.8h3.4l.5 2.2c.5.1.9.3 1.4.6l2-1.1 2.4 2.4-1.1 2c.3.4.5.9.6 1.4l2.2.5v3.4l-2.2.5c-.1.5-.3.9-.6 1.4l1.1 2-2.4 2.4-2-1.1c-.4.3-.9.5-1.4.6l-.5 2.2h-3.4l-.5-2.2c-.5-.1-.9-.3-1.4-.6l-2 1.1-2.4-2.4 1.1-2c-.3-.4-.5-.9-.6-1.4l-2.2-.5v-3.4l2.2-.5c.1-.5.3-.9.6-1.4l-1.1-2 2.4-2.4 2 1.1c.4-.3.9-.5 1.4-.6l.5-2.2Zm1.7 5.2a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z" fill="currentColor"></path>
-    </svg>
-  `;
-}
+    const stateLabel = formatStatusBarState(summary);
+    if (stateLabel) {
+      rightItems.push(renderStatusBarItem(stateLabel, null, `is-${getGitTone(summary)}`));
+    }
 
-function renderPlusIcon() {
-  return `
-    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6Z" fill="currentColor"></path>
-    </svg>
-  `;
-}
+    const syncLabel = formatStatusBarSync(summary);
+    if (syncLabel) {
+      rightItems.push(renderStatusBarItem(syncLabel, summary?.upstream || "Repository sync"));
+    }
 
-function renderChevronIcon(direction) {
-  const rotation = direction === "left" ? " style=\"transform: rotate(180deg)\"" : "";
-  return `
-    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"${rotation}>
-      <path d="m9.2 6.7 5.3 5.3-5.3 5.3-1.4-1.4 3.9-3.9-3.9-3.9Z" fill="currentColor"></path>
-    </svg>
-  `;
-}
-
-function renderTabRenameIcon() {
-  return `
-    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <path d="m15.1 5.2 3.7 3.7-9.9 9.9-4.4.7.7-4.4 9.9-9.9Zm1.4-1.4 1.1-1.1a1.8 1.8 0 0 1 2.6 0l1.1 1.1a1.8 1.8 0 0 1 0 2.6l-1.1 1.1-3.7-3.7Z" fill="currentColor"></path>
-    </svg>
-  `;
-}
-
-function renderTabCloseIcon() {
-  return `
-    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <path d="m7.4 6 4.6 4.6L16.6 6 18 7.4 13.4 12 18 16.6 16.6 18 12 13.4 7.4 18 6 16.6 10.6 12 6 7.4Z" fill="currentColor"></path>
-    </svg>
-  `;
-}
-
-function renderWorkspaceTab(workspace, activeWorkspaceId, label) {
-  const activeClass = workspace.id === activeWorkspaceId ? "is-active" : "";
-  const liveClass = workspace.isLive ? "is-live" : "is-idle";
-  const renameDraft = uiState.workspaceRenameDraft;
-  const isRenaming = renameDraft?.workspaceId === workspace.id;
-  return `
-    <div class="workspace-tab-shell ${activeClass} ${isRenaming ? "is-renaming" : ""}">
-      ${
-        isRenaming
-          ? `
-      <form
-        class="workspace-tab-main workspace-tab-rename-form"
-        data-tauri-drag-region="false"
-        data-action="rename-workspace"
-        data-workspace-rename-form
-        data-workspace-id="${escapeHtml(workspace.id)}"
-      >
-        <span class="workspace-tab-status ${liveClass}" aria-hidden="true"></span>
-        <input
-          class="workspace-tab-rename-input"
-          data-workspace-rename-input
-          data-workspace-id="${escapeHtml(workspace.id)}"
-          type="text"
-          value="${escapeHtml(renameDraft.value)}"
-          aria-label="Rename ${escapeHtml(workspace.name)}"
-          title="${escapeHtml(workspace.path)}"
-          autocomplete="off"
-          autocapitalize="off"
-          spellcheck="false"
-        />
-      </form>
-      `
-          : `
-      <button
-        class="workspace-tab-main"
-        data-tauri-drag-region="false"
-        data-action="switch-workspace"
-        data-workspace-id="${escapeHtml(workspace.id)}"
-        title="${escapeHtml(workspace.path)}"
-      >
-        <span class="workspace-tab-status ${liveClass}" aria-hidden="true"></span>
-        <span class="workspace-tab-name">${escapeHtml(label)}</span>
-      </button>
-      <button
-        class="workspace-tab-action workspace-tab-rename"
-        data-tauri-drag-region="false"
-        data-action="start-rename-workspace"
-        data-workspace-id="${escapeHtml(workspace.id)}"
-        aria-label="Rename ${escapeHtml(workspace.name)}"
-        title="Rename ${escapeHtml(workspace.name)}"
-      >
-        ${renderTabRenameIcon()}
-      </button>
-      <button
-        class="workspace-tab-action workspace-tab-close"
-        data-tauri-drag-region="false"
-        data-action="close-workspace"
-        data-workspace-id="${escapeHtml(workspace.id)}"
-        aria-label="Close ${escapeHtml(workspace.name)}"
-        title="Close ${escapeHtml(workspace.name)}"
-      >
-        ${renderTabCloseIcon()}
-      </button>
-      `
-      }
-    </div>
-  `;
-}
-
-function buildWorkspaceTabLabels(workspaces) {
-  const labelCounts = new Map();
-  for (const workspace of workspaces) {
-    labelCounts.set(workspace.name, (labelCounts.get(workspace.name) || 0) + 1);
-  }
-
-  const seenLabels = new Map();
-  const labels = new Map();
-  for (const workspace of workspaces) {
-    const total = labelCounts.get(workspace.name) || 1;
-    const nextIndex = (seenLabels.get(workspace.name) || 0) + 1;
-    seenLabels.set(workspace.name, nextIndex);
-    labels.set(
-      workspace.id,
-      total > 1 ? `${workspace.name} ${nextIndex}` : workspace.name,
+    rightItems.push(
+      renderStatusBarItem(
+        `${paneCount} ${paneCount === 1 ? "pane" : "panes"}`,
+        `${paneCount} ${paneCount === 1 ? "pane" : "panes"} active`,
+      ),
     );
   }
 
-  return labels;
+  return `
+    <div class="workspace-statusbar" role="status" aria-live="polite">
+      <div class="workspace-statusbar-group">
+        ${leftItems.join("")}
+      </div>
+      <div class="workspace-statusbar-group is-right">
+        ${rightItems.join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderStatusBarItem(label, title = null, className = "") {
+  return `
+    <span class="workspace-statusbar-item ${className}"${title ? ` title="${escapeHtml(title)}"` : ""}>
+      ${escapeHtml(label)}
+    </span>
+  `;
+}
+
+function renderStatusBarGitButton(summary) {
+  const tone = getGitTone(summary);
+  const label = summary ? formatGitBranchLabel(summary) : "Checking repo";
+  return `
+    <button
+      class="workspace-statusbar-item workspace-statusbar-button is-${tone}"
+      type="button"
+      data-action="show-git-panel"
+      title="${escapeHtml(formatGitBadgeTitle(summary))}"
+      aria-label="${escapeHtml(formatGitBadgeTitle(summary))}"
+    >
+      <span class="workspace-statusbar-icon" aria-hidden="true">${renderBranchIcon()}</span>
+      <span>${escapeHtml(label)}</span>
+    </button>
+  `;
+}
+
+function formatStatusBarState(summary) {
+  if (!summary) {
+    return "Checking";
+  }
+
+  if (summary.state === "error") {
+    return "Git unavailable";
+  }
+
+  if (summary.state === "not-repo") {
+    return "No repo";
+  }
+
+  if (summary.hasConflicts) {
+    return "Conflicted";
+  }
+
+  if (summary.isDirty) {
+    return "Dirty";
+  }
+
+  return null;
+}
+
+function formatStatusBarSync(summary) {
+  if (!summary || !summary.upstream) {
+    return null;
+  }
+
+  const ahead = Number(summary.ahead || 0);
+  const behind = Number(summary.behind || 0);
+  if (ahead <= 0 && behind <= 0) {
+    return null;
+  }
+
+  return `+${ahead} / -${behind}`;
+}
+
+function renderQuickSwitcher(snapshot) {
+  const items = getQuickSwitcherItems(snapshot);
+  const activeItem = items[uiState.quickSwitcherCursor] || items[0] || null;
+
+  return `
+    <div class="workspace-quick-switcher-backdrop" data-action="close-quick-switcher">
+      <section class="workspace-quick-switcher" role="dialog" aria-modal="true" aria-labelledby="quick-switcher-title">
+        <header class="workspace-quick-switcher-header">
+          <div>
+            <p class="workspace-quick-switcher-mark">Quick Switch</p>
+            <h2 id="quick-switcher-title">Jump to workspace</h2>
+          </div>
+          <button
+            class="workspace-quick-switcher-close"
+            type="button"
+            data-action="close-quick-switcher"
+            aria-label="Close quick switcher"
+            title="Close quick switcher"
+          >
+            ${renderCloseIcon()}
+          </button>
+        </header>
+        <div class="workspace-quick-switcher-search">
+          <span class="workspace-quick-switcher-search-mark">K</span>
+          <input
+            class="workspace-quick-switcher-input"
+            data-quick-switcher-input
+            type="text"
+            value="${escapeHtml(uiState.quickSwitcherQuery)}"
+            placeholder="Search workspaces"
+            autocomplete="off"
+            autocapitalize="off"
+            spellcheck="false"
+          />
+        </div>
+        <div class="workspace-quick-switcher-list" role="listbox" aria-activedescendant="${activeItem ? `quick-switcher-${escapeHtml(activeItem.id)}` : ""}">
+          ${
+            items.length
+              ? items
+                  .map((item, index) => renderQuickSwitcherItem(item, index === uiState.quickSwitcherCursor))
+                  .join("")
+              : `
+                <div class="workspace-quick-switcher-empty">
+                  <strong>No matching workspaces</strong>
+                  <span>Try a different name or path.</span>
+                </div>
+              `
+          }
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function renderQuickSwitcherItem(item, isActive) {
+  return `
+    <button
+      id="quick-switcher-${escapeHtml(item.id)}"
+      class="workspace-quick-switcher-item ${isActive ? "is-active" : ""}"
+      type="button"
+      role="option"
+      aria-selected="${isActive ? "true" : "false"}"
+      data-action="quick-switch-workspace"
+      data-workspace-id="${escapeHtml(item.id)}"
+      title="${escapeHtml(item.path)}"
+    >
+      <span class="workspace-quick-switcher-item-dot is-${getGitTone(item.gitSummary || null)}" aria-hidden="true"></span>
+      <span class="workspace-quick-switcher-item-copy">
+        <strong>${escapeHtml(item.label)}</strong>
+        <span>${escapeHtml(item.meta)}</span>
+      </span>
+      ${
+        item.isActive
+          ? '<span class="workspace-quick-switcher-item-badge">Current</span>'
+          : ""
+      }
+    </button>
+  `;
+}
+
+function getQuickSwitcherItems(snapshot = uiState.snapshot) {
+  const workspaces = snapshot?.workspaces || [];
+  const labels = buildWorkspaceTabLabels(workspaces);
+  const query = uiState.quickSwitcherQuery.trim().toLowerCase();
+
+  return workspaces
+    .map((workspace) => {
+      const label = labels.get(workspace.id) || workspace.name;
+      const paneCount = workspace.layout?.paneCount || 0;
+      return {
+        id: workspace.id,
+        path: workspace.path,
+        label,
+        gitSummary: workspace.gitSummary || null,
+        isActive: workspace.id === snapshot?.activeWorkspaceId,
+        meta: `${paneCount} ${paneCount === 1 ? "pane" : "panes"} • ${compactWorkspacePath(workspace.path)}`,
+      };
+    })
+    .filter((workspace) => {
+      if (!query) {
+        return true;
+      }
+
+      return `${workspace.label} ${workspace.path}`.toLowerCase().includes(query);
+    });
+}
+
+function syncQuickSwitcherCursor() {
+  const items = getQuickSwitcherItems();
+  if (!items.length) {
+    uiState.quickSwitcherCursor = 0;
+    return;
+  }
+
+  uiState.quickSwitcherCursor = clampQuickSwitcherCursor(uiState.quickSwitcherCursor, items.length);
+}
+
+function moveQuickSwitcherCursor(delta, itemCount) {
+  if (itemCount <= 0) {
+    uiState.quickSwitcherCursor = 0;
+    return;
+  }
+
+  uiState.quickSwitcherCursor = clampQuickSwitcherCursor(
+    uiState.quickSwitcherCursor + delta,
+    itemCount,
+  );
+}
+
+function clampQuickSwitcherCursor(index, itemCount) {
+  if (itemCount <= 0) {
+    return 0;
+  }
+
+  return Math.max(0, Math.min(itemCount - 1, index));
 }
 
 function syncWorkspaceTabRail(activeWorkspaceId, workspaceCount) {
@@ -1980,100 +2191,16 @@ function normalizeWheelDelta(event, tabs) {
   return dominantDelta;
 }
 
-function renderEmptyState(basePath) {
-  return `
-    <div class="workspace-empty">
-      <div class="workspace-empty-panel">
-        <p class="workspace-empty-mark">CrewDock</p>
-        <h1>Open a folder to start a workspace.</h1>
-        <p class="workspace-empty-copy">Each workspace becomes a live tab with its own terminal grid.</p>
-        <button class="workspace-empty-action" data-action="open-workspace">Open workspace</button>
-        <div class="workspace-launch-shell" title="${escapeHtml(basePath)}">
-          ${renderLauncherLatestStage()}
-          <form class="workspace-launch-form" data-action="run-launcher-command" title="${escapeHtml(basePath)}">
-            <span class="workspace-launch-prefix">$</span>
-            <input
-              class="workspace-launch-input"
-              data-launcher-path-input
-              type="text"
-              value="${escapeHtml(uiState.launcherCommandValue)}"
-              placeholder="Type a command"
-              aria-label="Run launcher command"
-              autocomplete="off"
-              autocapitalize="off"
-              spellcheck="false"
-            />
-          </form>
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-function renderLayoutPicker(presets, draft) {
-  const layout = deriveLayoutForPaneCount(draft.paneCount);
-  const previewCells = renderPreviewCells(layout);
-  return `
-    <div class="workspace-modal-backdrop">
-      <div class="workspace-modal">
-        <div class="workspace-modal-header">
-          <div>
-            <p class="workspace-modal-mark">New workspace</p>
-            <h2>${escapeHtml(basename(draft.path))}</h2>
-            <p class="workspace-modal-path">${escapeHtml(draft.path)}</p>
-          </div>
-          <button class="workspace-modal-cancel" data-action="cancel-layout-picker">Cancel</button>
-        </div>
-        <div class="workspace-layout-builder">
-          <section class="workspace-layout-controls">
-            <p class="workspace-layout-kicker">Terminal count</p>
-            <div class="workspace-count-stepper">
-              <button class="workspace-count-button" data-action="adjust-terminal-count" data-delta="-1" aria-label="Decrease terminal count">-</button>
-              <label class="workspace-count-input-shell">
-                <input
-                  class="workspace-count-input"
-                  data-terminal-count-input
-                  type="number"
-                  min="1"
-                  max="16"
-                  value="${escapeHtml(draft.paneCount)}"
-                  aria-label="Terminal count"
-                />
-                <span>terminals</span>
-              </label>
-              <button class="workspace-count-button" data-action="adjust-terminal-count" data-delta="1" aria-label="Increase terminal count">+</button>
-            </div>
-            <div class="workspace-count-presets">
-              ${presets.map((preset) => renderCountPreset(preset, draft.paneCount)).join("")}
-            </div>
-            <p class="workspace-layout-note">CrewDock balances the grid automatically so you can choose the count first and worry about layout later.</p>
-          </section>
-          <section class="workspace-layout-preview-card">
-            <div class="workspace-layout-preview-head">
-              <p class="workspace-layout-kicker">Preview</p>
-              <div class="workspace-layout-meta">
-                <span>${layout.rows} rows</span>
-                <span>${layout.columns} columns</span>
-              </div>
-            </div>
-            <div class="workspace-layout-preview" style="--rows:${layout.rows}; --columns:${layout.columns};">
-              ${previewCells}
-            </div>
-            <div class="workspace-layout-summary">
-              <strong>${draft.paneCount}</strong>
-              <span>${draft.paneCount === 1 ? "terminal" : "terminals"} in a ${layout.rows} x ${layout.columns} grid</span>
-            </div>
-            <button class="workspace-create-button" data-action="create-workspace">Create workspace</button>
-          </section>
-        </div>
-      </div>
-    </div>
-  `;
-}
-
 function renderSettingsSheet(snapshot) {
   const activeThemeId = getActiveThemeId(snapshot);
   const themes = Object.values(THEME_REGISTRY);
+  const primaryModifier = getPrimaryModifierLabel();
+  const activeSection = normalizeSettingsSection(uiState.settingsSection);
+  const isWorkbenchSection = activeSection === "workbench";
+  const sectionTitle = isWorkbenchSection ? "Workbench" : "How to use";
+  const sectionCopy = isWorkbenchSection
+    ? "Tune the workbench theme and keep CrewDock's interface aligned with how you like to work."
+    : "Keep the core shortcuts close and move through workspaces faster without breaking terminal flow.";
 
   return `
     <div class="settings-sheet-backdrop" data-action="close-settings">
@@ -2081,8 +2208,8 @@ function renderSettingsSheet(snapshot) {
         <header class="settings-sheet-header">
           <div>
             <p class="settings-sheet-mark">Settings</p>
-            <h2 id="settings-title">Appearance</h2>
-            <p class="settings-sheet-copy">Theme the whole workbench and every live terminal without restarting sessions.</p>
+            <h2 id="settings-title">${sectionTitle}</h2>
+            <p class="settings-sheet-copy">${sectionCopy}</p>
           </div>
           <button class="settings-sheet-close" data-action="close-settings" aria-label="Close settings">
             ${renderCloseIcon()}
@@ -2090,27 +2217,171 @@ function renderSettingsSheet(snapshot) {
         </header>
         <div class="settings-sheet-body">
           <aside class="settings-nav" aria-label="Settings sections">
-            <button class="settings-nav-item is-active" type="button" aria-current="page">
-              <span class="settings-nav-item-label">Appearance</span>
+            <button
+              class="settings-nav-item ${isWorkbenchSection ? "is-active" : ""}"
+              type="button"
+              data-action="show-settings-section"
+              data-settings-section="workbench"
+              aria-current="${isWorkbenchSection ? "page" : "false"}"
+            >
+              <span class="settings-nav-item-label">Workbench</span>
               <span class="settings-nav-item-value">${themes.length} themes</span>
             </button>
+            <button
+              class="settings-nav-item ${!isWorkbenchSection ? "is-active" : ""}"
+              type="button"
+              data-action="show-settings-section"
+              data-settings-section="guide"
+              aria-current="${!isWorkbenchSection ? "page" : "false"}"
+            >
+              <span class="settings-nav-item-label">How to use</span>
+              <span class="settings-nav-item-value">Shortcuts + flow</span>
+            </button>
           </aside>
-          <section class="settings-panel">
-            <div class="settings-panel-intro">
-              <div>
-                <p class="settings-panel-kicker">Theme library</p>
-                <h3>${escapeHtml(getThemeDefinition(activeThemeId).label)}</h3>
-              </div>
-              <p class="settings-panel-copy">Pick a palette and CrewDock updates the launcher, chrome, menus, panes, and xterm colors in place.</p>
-            </div>
-            <div class="settings-theme-grid">
-              ${themes.map((theme) => renderThemeCard(theme, activeThemeId)).join("")}
-            </div>
-          </section>
+          ${isWorkbenchSection
+            ? `
+              <section class="settings-panel">
+                <div class="settings-panel-intro">
+                  <div>
+                    <p class="settings-panel-kicker">Theme library</p>
+                    <h3>${escapeHtml(getThemeDefinition(activeThemeId).label)}</h3>
+                  </div>
+                  <p class="settings-panel-copy">Pick a palette and CrewDock updates the launcher, chrome, menus, panes, and xterm colors in place.</p>
+                </div>
+                <div class="settings-theme-grid">
+                  ${themes.map((theme) => renderThemeCard(theme, activeThemeId)).join("")}
+                </div>
+              </section>
+            `
+            : `
+              <section class="settings-panel settings-panel-guide">
+                ${renderSettingsGuide(primaryModifier)}
+              </section>
+            `}
         </div>
       </section>
     </div>
   `;
+}
+
+function renderSettingsGuide(primaryModifier) {
+  const shortcuts = [
+    {
+      label: "Open settings",
+      copy: "Jump back to this panel without leaving the keyboard.",
+      keys: [primaryModifier, ","],
+    },
+    {
+      label: "Quick switch workspaces",
+      copy: "Search workspaces by name or path and jump instantly.",
+      keys: [primaryModifier, "K"],
+    },
+    {
+      label: "Open source control",
+      copy: "Bring up the Git drawer for the active workspace.",
+      keys: [primaryModifier, "Shift", "G"],
+    },
+    {
+      label: "Complete launcher paths",
+      copy: "Autocomplete folders while using the launcher command bar.",
+      keys: ["Tab"],
+    },
+    {
+      label: "Split or close panes",
+      copy: "Use the pane context menu shortcuts for the common pane actions.",
+      keys: [primaryModifier, "D"],
+    },
+    {
+      label: "Dismiss overlays",
+      copy: "Close the switcher, settings, Git drawer, or rename mode.",
+      keys: ["Esc"],
+    },
+  ];
+
+  const tips = [
+    {
+      title: "Start from the launcher",
+      copy: "Open a folder, choose the pane count first, then use manual splits only when the layout needs to become asymmetric.",
+    },
+    {
+      title: "Switch from the keyboard",
+      copy: "Use quick switch for workspace changes, then keep your eyes on the terminals instead of hunting through tabs.",
+    },
+    {
+      title: "Let the footer carry context",
+      copy: "Use the bottom status bar for branch, sync, and pane state so the top strip can stay focused on navigation.",
+    },
+  ];
+
+  return `
+    <section class="settings-guide-shell">
+      <div class="settings-guide-header">
+        <div>
+          <p class="settings-guide-kicker">How to use</p>
+          <h4 class="settings-guide-title">Shortcuts and workflow</h4>
+        </div>
+        <p class="settings-guide-summary">CrewDock works best when the keyboard handles movement and the terminals stay visually front and center.</p>
+      </div>
+      <div class="settings-guide-grid">
+        <article class="settings-guide-card">
+          <div class="settings-guide-card-head">
+            <strong>Key bindings</strong>
+            <span>Core</span>
+          </div>
+          <div class="settings-guide-list">
+            ${shortcuts.map((shortcut) => renderSettingsShortcutRow(shortcut)).join("")}
+          </div>
+        </article>
+        <article class="settings-guide-card">
+          <div class="settings-guide-card-head">
+            <strong>Recommended flow</strong>
+            <span>Practical</span>
+          </div>
+          <div class="settings-guide-tips">
+            ${tips
+              .map(
+                (tip) => `
+                  <div class="settings-guide-tip">
+                    <strong>${escapeHtml(tip.title)}</strong>
+                    <p>${escapeHtml(tip.copy)}</p>
+                  </div>
+                `,
+              )
+              .join("")}
+          </div>
+        </article>
+      </div>
+    </section>
+  `;
+}
+
+function renderSettingsShortcutRow(shortcut) {
+  return `
+    <div class="settings-guide-item">
+      <div class="settings-guide-copy">
+        <strong>${escapeHtml(shortcut.label)}</strong>
+        <span>${escapeHtml(shortcut.copy)}</span>
+      </div>
+      <div class="settings-guide-keys">
+        ${renderSettingsShortcutKeys(shortcut.keys)}
+      </div>
+    </div>
+  `;
+}
+
+function renderSettingsShortcutKeys(keys) {
+  return keys
+    .map(
+      (key, index) => `
+        ${index > 0 ? '<span class="settings-guide-key-separator">+</span>' : ""}
+        <span class="settings-guide-key">${escapeHtml(key)}</span>
+      `,
+    )
+    .join("");
+}
+
+function getPrimaryModifierLabel() {
+  return document.body.dataset.platform === "macos" ? "Cmd" : "Ctrl";
 }
 
 function renderCloseIcon() {
@@ -2167,30 +2438,555 @@ function renderThemeCard(theme, activeThemeId) {
   `;
 }
 
-function renderCountPreset(preset, selectedCount) {
-  const isActive = preset.paneCount === selectedCount ? "is-active" : "";
+function renderGitPanel(workspace) {
+  const detail = workspace.gitDetail || null;
+  const summary = detail?.summary || null;
   return `
-    <button
-      class="workspace-count-preset ${isActive}"
-      data-action="set-terminal-count"
-      data-pane-count="${preset.paneCount}"
-    >
-      ${preset.paneCount}
-    </button>
+    <div class="workspace-git-backdrop" data-action="close-git-panel">
+      <section class="workspace-git-panel" role="dialog" aria-modal="true" aria-labelledby="git-panel-title">
+        <header class="workspace-git-panel-header">
+          <div class="workspace-git-panel-heading">
+            <p class="workspace-git-panel-mark">Source Control</p>
+            <div class="workspace-git-panel-title-row">
+              <h2 id="git-panel-title">${escapeHtml(workspace.name)}</h2>
+              ${
+                summary
+                  ? `
+                    <span class="workspace-git-panel-state is-${getGitTone(summary)}">
+                      ${escapeHtml(formatGitStateText(summary))}
+                    </span>
+                  `
+                  : ""
+              }
+            </div>
+            <p class="workspace-git-panel-copy">${escapeHtml(workspace.path)}</p>
+          </div>
+          <div class="workspace-git-panel-actions">
+            <button
+              class="workspace-git-panel-button"
+              type="button"
+              data-action="refresh-git-status"
+              aria-label="Refresh git status"
+              title="Refresh git status"
+            >
+              ${renderRefreshIcon()}
+            </button>
+            <button
+              class="workspace-git-panel-button"
+              type="button"
+              data-action="close-git-panel"
+              aria-label="Close git panel"
+              title="Close git panel"
+            >
+              ${renderCloseIcon()}
+            </button>
+          </div>
+        </header>
+        ${
+          detail
+            ? renderGitPanelBody(detail)
+            : renderGitPanelEmpty(
+                "Checking repository",
+                "CrewDock is collecting Git metadata for this workspace.",
+              )
+        }
+      </section>
+    </div>
   `;
 }
 
-function createPendingWorkspaceDraft(path, presets) {
-  const defaultCount = presets?.[0]?.paneCount || 1;
+function renderGitPanelBody(detail) {
+  const summary = detail.summary;
+  if (summary.state === "not-repo") {
+    return renderGitPanelEmpty(
+      "No repository detected",
+      summary.message || "This workspace is not inside a Git repository.",
+    );
+  }
+
+  if (summary.state === "error") {
+    return renderGitPanelEmpty(
+      "Git unavailable",
+      summary.message || "CrewDock could not load Git status for this workspace.",
+    );
+  }
+
+  const fileCount = detail.files?.length || 0;
+
+  return `
+    <div class="workspace-git-panel-body">
+      <section class="workspace-git-summary-shell">
+        <div class="workspace-git-summary-line">
+          <span class="workspace-git-summary-branch">
+            <span class="workspace-git-summary-branch-icon" aria-hidden="true">${renderBranchIcon()}</span>
+            <strong>${escapeHtml(formatGitBranchLabel(summary))}</strong>
+          </span>
+          <span class="workspace-git-summary-meta">${escapeHtml(summary.upstream || "Local only")}</span>
+          <span class="workspace-git-summary-meta">${escapeHtml(summary.upstream ? `+${summary.ahead} / -${summary.behind}` : "No remote")}</span>
+          <span class="workspace-git-summary-meta is-${getGitTone(summary)}">${escapeHtml(formatGitStateText(summary))}</span>
+        </div>
+        <div class="workspace-git-summary-paths">
+          ${
+            detail.repoRoot
+              ? `
+                <div class="workspace-git-summary-path">
+                  <span>Repository</span>
+                  <strong title="${escapeHtml(detail.repoRoot)}">${escapeHtml(detail.repoRoot)}</strong>
+                </div>
+              `
+              : ""
+          }
+          ${
+            detail.workspaceRelativePath
+              ? `
+                <div class="workspace-git-summary-path">
+                  <span>Workspace path</span>
+                  <strong title="${escapeHtml(detail.workspaceRelativePath)}">${escapeHtml(detail.workspaceRelativePath)}</strong>
+                </div>
+              `
+              : ""
+          }
+        </div>
+        <div class="workspace-git-chip-row">
+          ${renderGitSummaryChips(summary)}
+        </div>
+      </section>
+      <section class="workspace-git-change-shell">
+        <header class="workspace-git-section-head">
+          <div>
+            <p class="workspace-git-section-mark">Changes</p>
+            <strong>${fileCount === 0 ? "Working tree clean" : `${fileCount} ${fileCount === 1 ? "file" : "files"}`}</strong>
+          </div>
+          <span class="workspace-git-section-total">${fileCount}</span>
+        </header>
+        ${
+          fileCount
+            ? `
+              <div class="workspace-git-file-sections">
+                ${renderGitFileSections(detail.files)}
+              </div>
+            `
+            : renderGitPanelEmpty(
+                "No pending changes",
+                "Staged, modified, and untracked files will appear here.",
+              )
+        }
+      </section>
+    </div>
+  `;
+}
+
+function renderGitPanelEmpty(title, copy) {
+  return `
+    <div class="workspace-git-empty">
+      <strong>${escapeHtml(title)}</strong>
+      <p>${escapeHtml(copy)}</p>
+    </div>
+  `;
+}
+
+function renderGitSummaryChips(summary) {
+  const chips = [];
+  const counts = summary.counts || {};
+  const definitions = [
+    ["staged", "Staged"],
+    ["modified", "Modified"],
+    ["deleted", "Deleted"],
+    ["renamed", "Renamed"],
+    ["untracked", "Untracked"],
+    ["conflicted", "Conflicted"],
+  ];
+
+  for (const [key, label] of definitions) {
+    const value = Number(counts[key] || 0);
+    if (value > 0) {
+      chips.push(`
+        <span class="workspace-git-chip is-${key}">
+          <span>${escapeHtml(label)}</span>
+          <strong>${value}</strong>
+        </span>
+      `);
+    }
+  }
+
+  if (chips.length === 0) {
+    chips.push(`
+      <span class="workspace-git-chip is-clean">
+        <span>Changes</span>
+        <strong>0</strong>
+      </span>
+    `);
+  }
+
+  return chips.join("");
+}
+
+function renderGitFileSections(files) {
+  const groups = new Map();
+  const order = ["conflicted", "staged", "changes", "untracked"];
+
+  for (const file of files) {
+    const key = getGitFileSectionKey(file);
+    const bucket = groups.get(key) || [];
+    bucket.push(file);
+    groups.set(key, bucket);
+  }
+
+  return order
+    .filter((key) => groups.has(key))
+    .map((key) => {
+      const bucket = groups.get(key) || [];
+      return `
+        <section class="workspace-git-file-section">
+          <header class="workspace-git-file-section-head">
+            <strong>${escapeHtml(formatGitFileSectionLabel(key))}</strong>
+            <span>${bucket.length}</span>
+          </header>
+          <div class="workspace-git-file-list">
+            ${bucket.map((file) => renderGitFileRow(file)).join("")}
+          </div>
+        </section>
+      `;
+    })
+    .join("");
+}
+
+function renderGitFileRow(file) {
+  const pathParts = splitGitFilePath(file.path);
+  const presentation = getGitFilePresentation(file);
+  const secondaryParts = [];
+
+  if (pathParts.directory) {
+    secondaryParts.push(pathParts.directory);
+  }
+
+  if (file.originalPath) {
+    secondaryParts.push(`from ${file.originalPath}`);
+  }
+
+  return `
+    <article class="workspace-git-file-row">
+      <span class="workspace-git-file-icon" aria-hidden="true">${renderFileIcon()}</span>
+      <div class="workspace-git-file-copy">
+        <strong title="${escapeHtml(file.path)}">${escapeHtml(pathParts.name)}</strong>
+        <span title="${escapeHtml(file.path)}">${escapeHtml(secondaryParts.join(" • ") || ".")}</span>
+      </div>
+      <span
+        class="workspace-git-file-status is-${presentation.tone}"
+        title="${escapeHtml(presentation.label)}"
+        aria-label="${escapeHtml(presentation.label)}"
+      >
+        ${escapeHtml(presentation.code)}
+      </span>
+    </article>
+  `;
+}
+
+function getGitFileSectionKey(file) {
+  switch (file.kind) {
+    case "conflicted":
+      return "conflicted";
+    case "staged":
+      return "staged";
+    case "untracked":
+      return "untracked";
+    default:
+      return "changes";
+  }
+}
+
+function formatGitFileSectionLabel(key) {
+  switch (key) {
+    case "conflicted":
+      return "Conflicts";
+    case "staged":
+      return "Staged Changes";
+    case "untracked":
+      return "Untracked";
+    default:
+      return "Changes";
+  }
+}
+
+function splitGitFilePath(path) {
+  const normalized = String(path || "").replaceAll("\\", "/");
+  const segments = normalized.split("/").filter(Boolean);
+  const name = segments.pop() || normalized || "file";
   return {
-    path,
-    paneCount: clampPaneCount(defaultCount),
+    name,
+    directory: segments.join("/"),
   };
 }
 
-function clampPaneCount(value) {
-  const nextValue = Number.isFinite(value) ? Math.round(value) : 1;
-  return Math.min(16, Math.max(1, nextValue));
+function getGitFilePresentation(file) {
+  let status = file.indexStatus || file.worktreeStatus || "modified";
+
+  switch (file.kind) {
+    case "conflicted":
+      status = "unmerged";
+      break;
+    case "untracked":
+      status = "untracked";
+      break;
+    case "deleted":
+      status = "deleted";
+      break;
+    case "renamed":
+      status = "renamed";
+      break;
+    default:
+      break;
+  }
+
+  let tone = "modified";
+  if (status === "unmerged") {
+    tone = "conflicted";
+  } else if (status === "untracked") {
+    tone = "untracked";
+  } else if (status === "added") {
+    tone = "staged";
+  } else if (status === "deleted") {
+    tone = "deleted";
+  } else if (status === "renamed" || status === "copied") {
+    tone = "renamed";
+  }
+
+  return {
+    code: formatGitFileStatusCode(status),
+    label: formatGitFileStatusLabel(status),
+    tone,
+  };
+}
+
+function formatGitFileStatusCode(status) {
+  switch (status) {
+    case "added":
+      return "A";
+    case "deleted":
+      return "D";
+    case "renamed":
+      return "R";
+    case "copied":
+      return "C";
+    case "untracked":
+      return "U";
+    case "unmerged":
+      return "!";
+    default:
+      return "M";
+  }
+}
+
+function getGitTone(summary) {
+  if (!summary) {
+    return "pending";
+  }
+
+  if (summary.state === "conflicted") {
+    return "conflicted";
+  }
+
+  if (summary.state === "error") {
+    return "error";
+  }
+
+  if (summary.state === "not-repo") {
+    return "neutral";
+  }
+
+  if (summary.state === "dirty" || summary.isDirty) {
+    return "dirty";
+  }
+
+  return "clean";
+}
+
+function formatGitBranchLabel(summary) {
+  if (!summary) {
+    return "Checking repo";
+  }
+
+  if (summary.state === "not-repo") {
+    return "No repo";
+  }
+
+  if (summary.state === "error") {
+    return "Git error";
+  }
+
+  if (summary.state === "detached") {
+    return summary.branch ? `Detached @ ${summary.branch}` : "Detached HEAD";
+  }
+
+  return summary.branch || "Repository";
+}
+
+function formatGitBadgeMeta(summary) {
+  if (!summary) {
+    return "Loading";
+  }
+
+  if (summary.state === "not-repo") {
+    return "No repository";
+  }
+
+  if (summary.state === "error") {
+    return "Unavailable";
+  }
+
+  if (summary.hasConflicts) {
+    return `${summary.counts?.conflicted || 0} conflict${summary.counts?.conflicted === 1 ? "" : "s"}`;
+  }
+
+  if (summary.isDirty) {
+    return "Dirty";
+  }
+
+  if ((summary.ahead || 0) > 0 || (summary.behind || 0) > 0) {
+    return `+${summary.ahead || 0} / -${summary.behind || 0}`;
+  }
+
+  return "Clean";
+}
+
+function formatGitBadgeTitle(summary) {
+  if (!summary) {
+    return "Open git panel";
+  }
+
+  const pieces = [formatGitBranchLabel(summary), formatGitBadgeMeta(summary)];
+  if (summary.message) {
+    pieces.push(summary.message);
+  }
+  return pieces.filter(Boolean).join(" • ");
+}
+
+function formatGitStateText(summary) {
+  if (!summary) {
+    return "Checking";
+  }
+
+  if (summary.state === "not-repo") {
+    return "No repository";
+  }
+
+  if (summary.state === "error") {
+    return "Unavailable";
+  }
+
+  if (summary.state === "detached") {
+    return summary.isDirty ? "Detached / Dirty" : "Detached";
+  }
+
+  if (summary.state === "conflicted") {
+    return "Conflicted";
+  }
+
+  if (summary.state === "dirty") {
+    return "Dirty";
+  }
+
+  return "Clean";
+}
+
+function formatGitFileKindLabel(kind) {
+  switch (kind) {
+    case "conflicted":
+      return "Conflicted";
+    case "renamed":
+      return "Renamed";
+    case "deleted":
+      return "Deleted";
+    case "staged":
+      return "Staged";
+    case "untracked":
+      return "Untracked";
+    default:
+      return "Modified";
+  }
+}
+
+function formatGitFileStatusLabel(status) {
+  switch (status) {
+    case "added":
+      return "Added";
+    case "deleted":
+      return "Deleted";
+    case "renamed":
+      return "Renamed";
+    case "copied":
+      return "Copied";
+    case "type-changed":
+      return "Type changed";
+    case "untracked":
+      return "Untracked";
+    case "unmerged":
+      return "Unmerged";
+    default:
+      return "Modified";
+  }
+}
+
+function syncGitRefreshLoop() {
+  const shouldRefresh = Boolean(
+    uiState.snapshot?.activeWorkspaceId
+      && document.hasFocus()
+      && bridge.refreshWorkspaceGitStatus,
+  );
+
+  if (!shouldRefresh) {
+    if (runtimeStore.gitRefreshIntervalTimer) {
+      window.clearInterval(runtimeStore.gitRefreshIntervalTimer);
+      runtimeStore.gitRefreshIntervalTimer = 0;
+    }
+    return;
+  }
+
+  if (runtimeStore.gitRefreshIntervalTimer) {
+    return;
+  }
+
+  runtimeStore.gitRefreshIntervalTimer = window.setInterval(() => {
+    void refreshActiveWorkspaceGitStatus();
+  }, GIT_REFRESH_INTERVAL_MS);
+}
+
+async function refreshActiveWorkspaceGitStatus({ force = false } = {}) {
+  const workspaceId = uiState.snapshot?.activeWorkspaceId;
+  if (!workspaceId || !bridge.refreshWorkspaceGitStatus) {
+    return uiState.snapshot;
+  }
+
+  if (runtimeStore.gitRefreshInFlight) {
+    runtimeStore.gitRefreshQueuedWorkspaceId = workspaceId;
+    return runtimeStore.gitRefreshInFlight;
+  }
+
+  runtimeStore.gitRefreshInFlight = (async () => {
+    try {
+      const snapshot = await bridge.refreshWorkspaceGitStatus(workspaceId);
+      uiState.snapshot = snapshot;
+      render();
+      return snapshot;
+    } catch (error) {
+      if (force) {
+        console.error(error);
+      }
+      return uiState.snapshot;
+    } finally {
+      const queuedWorkspaceId = runtimeStore.gitRefreshQueuedWorkspaceId;
+      runtimeStore.gitRefreshInFlight = null;
+      runtimeStore.gitRefreshQueuedWorkspaceId = null;
+      if (
+        queuedWorkspaceId
+        && queuedWorkspaceId === uiState.snapshot?.activeWorkspaceId
+      ) {
+        void refreshActiveWorkspaceGitStatus({ force: true });
+      }
+    }
+  })();
+
+  return runtimeStore.gitRefreshInFlight;
 }
 
 function escapeSelectorValue(value) {
@@ -2199,31 +2995,6 @@ function escapeSelectorValue(value) {
   }
 
   return String(value).replace(/["\\]/g, "\\$&");
-}
-
-function deriveLayoutForPaneCount(paneCount) {
-  const count = clampPaneCount(paneCount);
-  const columns = Math.min(4, Math.max(1, Math.ceil(Math.sqrt(count))));
-  const rows = Math.min(4, Math.max(1, Math.ceil(count / columns)));
-  return {
-    id: `count-${count}`,
-    label: `${count} terminals`,
-    rows,
-    columns,
-    paneCount: count,
-  };
-}
-
-function renderPreviewCells(layout) {
-  const totalSlots = layout.rows * layout.columns;
-  const cells = [];
-
-  for (let index = 0; index < totalSlots; index += 1) {
-    const ghostClass = index >= layout.paneCount ? " is-ghost" : "";
-    cells.push(`<span class="preset-cell${ghostClass}"></span>`);
-  }
-
-  return cells.join("");
 }
 
 function buildBalancedPaneLayout(paneIds, preferHorizontal = true) {
@@ -2313,20 +3084,21 @@ function renderWorkspace(workspace) {
   const maximizedPane = uiState.maximizedPaneId
     ? workspace.panes.find((pane) => pane.id === uiState.maximizedPaneId) || null
     : null;
+  const paneIndexById = new Map(workspace.panes.map((pane, index) => [pane.id, index]));
   return `
     <main class="workspace-screen ${maximizedPane ? "is-maximized" : ""}">
       <section class="terminal-layout">
         ${
           maximizedPane
-            ? renderPaneShell(maximizedPane)
-            : renderPaneLayout(paneLayout, workspace)
+            ? renderPaneShell(maximizedPane, paneIndexById.get(maximizedPane.id) || 0)
+            : renderPaneLayout(paneLayout, workspace, paneIndexById)
         }
       </section>
     </main>
   `;
 }
 
-function renderPaneLayout(node, workspace) {
+function renderPaneLayout(node, workspace, paneIndexById) {
   const layoutNode = normalizePaneLayoutNode(node);
   if (!layoutNode) {
     return "";
@@ -2335,14 +3107,14 @@ function renderPaneLayout(node, workspace) {
   if (layoutNode.kind === "leaf") {
     const pane = workspace.panes.find((entry) => entry.id === layoutNode.paneId);
     return pane
-      ? `<div class="pane-branch is-leaf">${renderPaneShell(pane)}</div>`
+      ? `<div class="pane-branch is-leaf">${renderPaneShell(pane, paneIndexById.get(pane.id) || 0)}</div>`
       : "";
   }
 
   return `
     <div class="pane-split" data-axis="${escapeHtml(layoutNode.axis)}">
-      <div class="pane-branch">${renderPaneLayout(layoutNode.first, workspace)}</div>
-      <div class="pane-branch">${renderPaneLayout(layoutNode.second, workspace)}</div>
+      <div class="pane-branch">${renderPaneLayout(layoutNode.first, workspace, paneIndexById)}</div>
+      <div class="pane-branch">${renderPaneLayout(layoutNode.second, workspace, paneIndexById)}</div>
     </div>
   `;
 }
@@ -2400,9 +3172,19 @@ function workspaceLayoutSignature(workspace) {
   return JSON.stringify(resolveWorkspacePaneLayout(workspace));
 }
 
-function renderPaneShell(pane) {
+function renderPaneShell(pane, paneIndex) {
   return `
-    <article class="terminal-pane" data-pane-id="${escapeHtml(pane.id)}" data-status="${escapeHtml(pane.status)}">
+    <article
+      class="terminal-pane"
+      data-pane-id="${escapeHtml(pane.id)}"
+      data-status="${escapeHtml(pane.status)}"
+      data-density="default"
+    >
+      <header class="terminal-pane-header">
+        <div class="terminal-pane-title">
+          <strong>Terminal ${paneIndex + 1}</strong>
+        </div>
+      </header>
       <div class="terminal-host" data-terminal-host="${escapeHtml(pane.id)}"></div>
     </article>
   `;
@@ -2510,9 +3292,16 @@ function mountWorkspaceTerminals(workspace) {
       observer: new ResizeObserver(() => fitTerminal(pane.id)),
       size: { cols: 0, rows: 0 },
       themeId: theme.id,
+      element: host.closest(".terminal-pane"),
     };
 
     state.observer.observe(host);
+    host.addEventListener("focusin", () => {
+      setActivePaneId(pane.id, workspace);
+    });
+    host.addEventListener("pointerdown", () => {
+      setActivePaneId(pane.id, workspace);
+    });
     terminal.onData((data) => {
       bridge.writeToPane(pane.id, data).catch((error) => console.error(error));
     });
@@ -2530,6 +3319,7 @@ function mountWorkspaceTerminals(workspace) {
 
   const firstPane = workspace.panes[0];
   if (firstPane) {
+    setActivePaneId(firstPane.id, workspace);
     requestAnimationFrame(() => {
       paneTerminals.get(firstPane.id)?.terminal.focus();
     });
@@ -2626,6 +3416,7 @@ function fitTerminal(paneId) {
     return;
   }
 
+  syncPaneDensity(pane);
   pane.fitAddon.fit();
   const nextCols = pane.terminal.cols;
   const nextRows = pane.terminal.rows;
@@ -2636,6 +3427,18 @@ function fitTerminal(paneId) {
 
   pane.size = { cols: nextCols, rows: nextRows };
   bridge.resizePane(paneId, nextCols, nextRows).catch((error) => console.error(error));
+}
+
+function syncPaneDensity(pane) {
+  const paneElement = pane?.element;
+  if (!(paneElement instanceof HTMLElement)) {
+    return;
+  }
+
+  const nextDensity = paneElement.clientHeight <= COMPACT_PANE_HEIGHT ? "compact" : "default";
+  if (paneElement.dataset.density !== nextDensity) {
+    paneElement.dataset.density = nextDensity;
+  }
 }
 
 function disposeTerminal(paneId) {
@@ -2769,17 +3572,6 @@ function pushLauncherHistory(entry) {
   animateLauncherLatestCard(entry);
 }
 
-function formatLauncherCompletionMatches(matches) {
-  const lines = [];
-  const limited = matches.slice(0, MAX_LAUNCHER_COMPLETION_MATCHES);
-
-  for (let index = 0; index < limited.length; index += 3) {
-    lines.push(limited.slice(index, index + 3).join("    "));
-  }
-
-  return lines;
-}
-
 function clearLauncherCommandState() {
   uiState.launcherCommandValue = "";
   uiState.launcherCommandCursor = null;
@@ -2829,10 +3621,65 @@ function focusLauncherInput({ select = false } = {}) {
   }
 
   requestAnimationFrame(() => {
+    if (document.activeElement === input && !select) {
+      return;
+    }
     input.focus();
     if (select) {
       input.select();
     }
+  });
+}
+
+function captureLauncherInputState(root = app) {
+  const input = root.querySelector("[data-launcher-path-input]");
+  if (!(input instanceof HTMLInputElement)) {
+    return null;
+  }
+
+  return {
+    wasFocused: document.activeElement === input,
+    selectionStart: input.selectionStart,
+    selectionEnd: input.selectionEnd,
+  };
+}
+
+function restoreLauncherInputState(state) {
+  if (!state?.wasFocused) {
+    return;
+  }
+
+  const input = app.querySelector("[data-launcher-path-input]");
+  if (!(input instanceof HTMLInputElement)) {
+    return;
+  }
+
+  requestAnimationFrame(() => {
+    input.focus();
+    const maxIndex = input.value.length;
+    const selectionStart = Number.isFinite(state.selectionStart)
+      ? Math.max(0, Math.min(maxIndex, state.selectionStart))
+      : maxIndex;
+    const selectionEnd = Number.isFinite(state.selectionEnd)
+      ? Math.max(selectionStart, Math.min(maxIndex, state.selectionEnd))
+      : selectionStart;
+    input.setSelectionRange(selectionStart, selectionEnd);
+  });
+}
+
+function focusQuickSwitcherInput({ select = false } = {}) {
+  const input = app.querySelector("[data-quick-switcher-input]");
+  if (!input) {
+    uiState.quickSwitcherShouldFocus = false;
+    return;
+  }
+
+  requestAnimationFrame(() => {
+    input.focus();
+    if (select) {
+      input.select();
+    }
+    uiState.quickSwitcherShouldFocus = false;
   });
 }
 
@@ -2879,14 +3726,14 @@ function animateLauncherLatestCard(entry) {
     phase: "prepare",
   };
 
-  launcherCardAnimationFrame = window.requestAnimationFrame(() => {
+  runtimeStore.launcherCardAnimationFrame = window.requestAnimationFrame(() => {
     uiState.launcherLatestCard = {
       ...uiState.launcherLatestCard,
       phase: "run",
     };
     render();
 
-    launcherCardTransitionTimer = window.setTimeout(() => {
+    runtimeStore.launcherCardTransitionTimer = window.setTimeout(() => {
       uiState.launcherLatestCard = {
         current: nextEntry,
         previous: null,
@@ -2898,48 +3745,15 @@ function animateLauncherLatestCard(entry) {
 }
 
 function clearLauncherLatestCardTimers() {
-  if (launcherCardAnimationFrame) {
-    window.cancelAnimationFrame(launcherCardAnimationFrame);
-    launcherCardAnimationFrame = 0;
+  if (runtimeStore.launcherCardAnimationFrame) {
+    window.cancelAnimationFrame(runtimeStore.launcherCardAnimationFrame);
+    runtimeStore.launcherCardAnimationFrame = 0;
   }
 
-  if (launcherCardTransitionTimer) {
-    window.clearTimeout(launcherCardTransitionTimer);
-    launcherCardTransitionTimer = 0;
+  if (runtimeStore.launcherCardTransitionTimer) {
+    window.clearTimeout(runtimeStore.launcherCardTransitionTimer);
+    runtimeStore.launcherCardTransitionTimer = 0;
   }
-}
-
-function renderLauncherLatestStage() {
-  const { current, previous, phase } = uiState.launcherLatestCard;
-  if (!current && !previous) {
-    return "";
-  }
-
-  return `
-    <div class="workspace-launch-history-stage ${previous ? `is-transitioning is-${phase}` : "is-settled"}">
-      ${
-        previous
-          ? `<div class="workspace-launch-latest-card is-previous is-${phase}">${renderLauncherHistoryEntry(previous)}</div>`
-          : ""
-      }
-      ${
-        current
-          ? `<div class="workspace-launch-latest-card is-current is-${phase}">${renderLauncherHistoryEntry(current)}</div>`
-          : ""
-      }
-    </div>
-  `;
-}
-
-function renderLauncherHistoryEntry(entry) {
-  const tone = entry.tone === "error" ? "is-error" : "";
-  const output = (entry.output || []).map((line) => `<div>${escapeHtml(line)}</div>`).join("");
-  return `
-    <div class="workspace-launch-entry ${tone}">
-      ${entry.input ? `<div class="workspace-launch-command">$ ${escapeHtml(entry.input)}</div>` : ""}
-      <div class="workspace-launch-output">${output}</div>
-    </div>
-  `;
 }
 
 function normalizeDialogPath(result) {

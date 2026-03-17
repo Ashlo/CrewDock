@@ -1,21 +1,26 @@
+mod events;
+mod session_manager;
+
 use std::{
     collections::HashMap,
     env, fs,
-    io::{Read, Write},
+    io::Write,
     path::{Path, PathBuf},
+    process::Command as ProcessCommand,
     sync::{Arc, Mutex},
 };
 
-use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{ChildKiller, PtySize};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Manager, State};
 
-const STATE_EVENT: &str = "crewdock://state-changed";
-const TERMINAL_DATA_EVENT: &str = "crewdock://terminal-data";
 const PERSISTENCE_FILE: &str = "workspaces.json";
 const MAX_LAUNCHER_COMPLETION_MATCHES: usize = 24;
 const LAUNCHER_COMMANDS: [&str; 6] = ["help", "pwd", "ls", "cd", "open", "clear"];
 const PATH_AWARE_LAUNCHER_COMMANDS: [&str; 3] = ["ls", "cd", "open"];
+
+use events::emit_snapshot;
+use session_manager::{prepare_workspace_launch, spawn_pane_jobs, LiveSession, PaneJob};
 
 #[derive(Clone)]
 struct AppState {
@@ -41,13 +46,6 @@ struct RuntimeState {
     persistence_path: Option<PathBuf>,
 }
 
-struct LiveSession {
-    workspace_id: String,
-    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
-    killer: Box<dyn ChildKiller + Send + Sync>,
-}
-
 #[derive(Debug, Clone)]
 struct WorkspaceRecord {
     id: String,
@@ -57,15 +55,7 @@ struct WorkspaceRecord {
     panes: Vec<PaneRecord>,
     pane_layout: PaneLayout,
     started: bool,
-}
-
-#[derive(Debug, Clone)]
-struct PaneJob {
-    workspace_id: String,
-    pane_id: String,
-    label: String,
-    layout_label: String,
-    cwd: String,
+    git: Option<GitDetailSnapshot>,
 }
 
 #[derive(Debug, Clone)]
@@ -119,6 +109,7 @@ impl RuntimeState {
                 layout: workspace.layout.clone(),
                 panes: workspace.panes.clone(),
                 pane_layout: workspace.pane_layout.clone(),
+                git_detail: workspace.git.clone(),
             });
 
         AppSnapshot {
@@ -135,6 +126,7 @@ impl RuntimeState {
                     path: workspace.path.clone(),
                     layout: workspace.layout.clone(),
                     is_live: workspace.started,
+                    git_summary: workspace.git.as_ref().map(|git| git.summary.clone()),
                 })
                 .collect(),
             active_workspace_id: self.active_workspace_id.clone(),
@@ -174,7 +166,17 @@ impl RuntimeState {
             panes,
             pane_layout,
             started: false,
+            git: None,
         })
+    }
+
+    fn refresh_workspace_git(&mut self, workspace_id: &str) -> Result<(), String> {
+        let workspace_index = self
+            .find_workspace_index_by_id(workspace_id)
+            .ok_or_else(|| "workspace not found".to_string())?;
+        let workspace_path = PathBuf::from(self.workspaces[workspace_index].path.clone());
+        self.workspaces[workspace_index].git = Some(collect_git_detail(&workspace_path));
+        Ok(())
     }
 
     fn find_workspace_index_by_id(&self, workspace_id: &str) -> Option<usize> {
@@ -400,6 +402,7 @@ struct WorkspaceTabSnapshot {
     path: String,
     layout: LayoutPreset,
     is_live: bool,
+    git_summary: Option<GitSummarySnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -411,6 +414,85 @@ struct WorkspaceSnapshot {
     layout: LayoutPreset,
     panes: Vec<PaneRecord>,
     pane_layout: PaneLayout,
+    git_detail: Option<GitDetailSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitSummarySnapshot {
+    state: GitState,
+    branch: Option<String>,
+    upstream: Option<String>,
+    ahead: u32,
+    behind: u32,
+    counts: GitCountsSnapshot,
+    is_dirty: bool,
+    has_conflicts: bool,
+    message: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitCountsSnapshot {
+    staged: u32,
+    modified: u32,
+    deleted: u32,
+    renamed: u32,
+    untracked: u32,
+    conflicted: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitDetailSnapshot {
+    summary: GitSummarySnapshot,
+    repo_root: Option<String>,
+    workspace_relative_path: Option<String>,
+    files: Vec<GitFileSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GitFileSnapshot {
+    path: String,
+    original_path: Option<String>,
+    kind: GitFileKind,
+    index_status: Option<GitFileStatus>,
+    worktree_status: Option<GitFileStatus>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum GitState {
+    Clean,
+    Dirty,
+    Conflicted,
+    Detached,
+    NotRepo,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum GitFileKind {
+    Staged,
+    Modified,
+    Deleted,
+    Renamed,
+    Untracked,
+    Conflicted,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum GitFileStatus {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Copied,
+    TypeChanged,
+    Unmerged,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -470,13 +552,6 @@ enum PaneStatus {
     Ready,
     Closed,
     Failed,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TerminalDataPayload {
-    pane_id: String,
-    data: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -973,6 +1048,26 @@ fn set_theme(
 }
 
 #[tauri::command]
+fn refresh_workspace_git_status(
+    workspace_id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let snapshot = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        runtime.refresh_workspace_git(&workspace_id)?;
+        runtime.build_snapshot()
+    };
+
+    emit_snapshot(&app, &snapshot)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
 fn write_to_pane(pane_id: String, data: String, state: State<'_, AppState>) -> Result<(), String> {
     let writer = {
         let runtime = state
@@ -1026,292 +1121,6 @@ fn resize_pane(
         })
         .map_err(|error| format!("failed to resize pane: {error}"))?;
     Ok(())
-}
-
-fn prepare_workspace_launch(
-    runtime: &mut RuntimeState,
-    workspace_id: &str,
-) -> Option<Vec<PaneJob>> {
-    let workspace = runtime
-        .workspaces
-        .iter_mut()
-        .find(|workspace| workspace.id == workspace_id)?;
-
-    if workspace.started {
-        return None;
-    }
-
-    workspace.started = true;
-    let workspace_id = workspace.id.clone();
-    let layout_label = workspace.layout.label.clone();
-    let cwd = workspace.path.clone();
-    let jobs = workspace
-        .panes
-        .iter_mut()
-        .map(|pane| {
-            pane.status = PaneStatus::Booting;
-            PaneJob {
-                workspace_id: workspace_id.clone(),
-                pane_id: pane.id.clone(),
-                label: pane.label.clone(),
-                layout_label: layout_label.clone(),
-                cwd: cwd.clone(),
-            }
-        })
-        .collect();
-
-    Some(jobs)
-}
-
-fn spawn_pane_jobs(
-    shared: Arc<Mutex<RuntimeState>>,
-    app: AppHandle,
-    shell: String,
-    jobs: Vec<PaneJob>,
-) {
-    for job in jobs {
-        let shared = shared.clone();
-        let app_handle = app.clone();
-        let shell = shell.clone();
-
-        std::thread::spawn(move || {
-            if let Err(error) = spawn_terminal_session(
-                &shared,
-                &app_handle,
-                job.workspace_id,
-                job.pane_id,
-                job.label,
-                job.layout_label,
-                shell,
-                job.cwd,
-            ) {
-                eprintln!("failed to spawn terminal session: {error}");
-            }
-        });
-    }
-}
-
-fn spawn_terminal_session(
-    shared: &Arc<Mutex<RuntimeState>>,
-    app: &AppHandle,
-    workspace_id: String,
-    pane_id: String,
-    label: String,
-    layout_label: String,
-    shell: String,
-    cwd: String,
-) -> Result<(), String> {
-    let pty_system = native_pty_system();
-    let pair = pty_system
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|error| format!("failed to open PTY: {error}"))?;
-
-    let mut command = CommandBuilder::new(&shell);
-    command.arg("-l");
-    command.cwd(&cwd);
-    strip_tooling_env(&mut command);
-    command.env("TERM", "xterm-256color");
-    command.env("COLORTERM", "truecolor");
-    command.env("CREWDOCK_LAYOUT", &layout_label);
-    command.env("CREWDOCK_PANE_LABEL", &label);
-
-    let mut child = pair
-        .slave
-        .spawn_command(command)
-        .map_err(|error| format!("failed to spawn shell: {error}"))?;
-
-    let reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|error| format!("failed to clone PTY reader: {error}"))?;
-    let writer = pair
-        .master
-        .take_writer()
-        .map_err(|error| format!("failed to open PTY writer: {error}"))?;
-    let killer = child.clone_killer();
-    let master = Arc::new(Mutex::new(pair.master));
-    let writer = Arc::new(Mutex::new(writer));
-
-    let snapshot = {
-        let mut runtime = shared
-            .lock()
-            .map_err(|_| "failed to acquire application state".to_string())?;
-
-        let Some(workspace) = runtime
-            .workspaces
-            .iter_mut()
-            .find(|workspace| workspace.id == workspace_id)
-        else {
-            let _ = killer.clone_killer().kill();
-            return Ok(());
-        };
-
-        let Some(pane) = workspace.panes.iter_mut().find(|pane| pane.id == pane_id) else {
-            let _ = killer.clone_killer().kill();
-            return Ok(());
-        };
-
-        pane.status = PaneStatus::Ready;
-        runtime.sessions.insert(
-            pane_id.clone(),
-            LiveSession {
-                workspace_id,
-                master: master.clone(),
-                writer: writer.clone(),
-                killer,
-            },
-        );
-        runtime.build_snapshot()
-    };
-
-    emit_snapshot(app, &snapshot)?;
-
-    let app_handle = app.clone();
-    let shared = shared.clone();
-    std::thread::spawn(move || {
-        stream_terminal_output(shared, app_handle, pane_id, reader, &mut child);
-    });
-
-    Ok(())
-}
-
-fn strip_tooling_env(command: &mut CommandBuilder) {
-    for (key, _) in env::vars_os() {
-        let key = key.to_string_lossy();
-        if key.starts_with("npm_") || key.starts_with("NPM_") {
-            command.env_remove(key.as_ref());
-        }
-    }
-}
-
-fn stream_terminal_output(
-    shared: Arc<Mutex<RuntimeState>>,
-    app: AppHandle,
-    pane_id: String,
-    mut reader: Box<dyn Read + Send>,
-    child: &mut Box<dyn Child + Send + Sync>,
-) {
-    let mut buffer = [0u8; 8192];
-
-    loop {
-        match reader.read(&mut buffer) {
-            Ok(0) => break,
-            Ok(read) => {
-                let payload = TerminalDataPayload {
-                    pane_id: pane_id.clone(),
-                    data: String::from_utf8_lossy(&buffer[..read]).into_owned(),
-                };
-                if let Err(error) = emit_terminal_data(&app, &payload) {
-                    eprintln!("failed to emit terminal data: {error}");
-                    break;
-                }
-            }
-            Err(error) => {
-                if let Err(inner_error) = fail_pane(&shared, &app, &pane_id, error.to_string()) {
-                    eprintln!("failed to mark pane error: {inner_error}");
-                }
-                return;
-            }
-        }
-    }
-
-    match child.wait() {
-        Ok(status) => {
-            let message = format!("\r\n[session closed: {status}]\r\n");
-            let _ = emit_terminal_data(
-                &app,
-                &TerminalDataPayload {
-                    pane_id: pane_id.clone(),
-                    data: message,
-                },
-            );
-            if let Err(error) = mark_pane_closed(&shared, &app, &pane_id) {
-                eprintln!("failed to mark pane closed: {error}");
-            }
-        }
-        Err(error) => {
-            if let Err(inner_error) = fail_pane(&shared, &app, &pane_id, error.to_string()) {
-                eprintln!("failed to mark pane failure: {inner_error}");
-            }
-        }
-    }
-}
-
-fn mark_pane_closed(
-    shared: &Arc<Mutex<RuntimeState>>,
-    app: &AppHandle,
-    pane_id: &str,
-) -> Result<(), String> {
-    let snapshot = {
-        let mut runtime = shared
-            .lock()
-            .map_err(|_| "failed to acquire application state".to_string())?;
-
-        runtime.sessions.remove(pane_id);
-        if let Some(workspace) = runtime
-            .workspaces
-            .iter_mut()
-            .find(|workspace| workspace.panes.iter().any(|pane| pane.id == pane_id))
-        {
-            if let Some(pane) = workspace.panes.iter_mut().find(|pane| pane.id == pane_id) {
-                pane.status = PaneStatus::Closed;
-            }
-        }
-
-        runtime.build_snapshot()
-    };
-
-    emit_snapshot(app, &snapshot)
-}
-
-fn fail_pane(
-    shared: &Arc<Mutex<RuntimeState>>,
-    app: &AppHandle,
-    pane_id: &str,
-    error: String,
-) -> Result<(), String> {
-    let snapshot = {
-        let mut runtime = shared
-            .lock()
-            .map_err(|_| "failed to acquire application state".to_string())?;
-
-        runtime.sessions.remove(pane_id);
-        if let Some(workspace) = runtime
-            .workspaces
-            .iter_mut()
-            .find(|workspace| workspace.panes.iter().any(|pane| pane.id == pane_id))
-        {
-            if let Some(pane) = workspace.panes.iter_mut().find(|pane| pane.id == pane_id) {
-                pane.status = PaneStatus::Failed;
-            }
-        }
-
-        runtime.build_snapshot()
-    };
-
-    emit_snapshot(app, &snapshot)?;
-    emit_terminal_data(
-        app,
-        &TerminalDataPayload {
-            pane_id: pane_id.to_string(),
-            data: format!("\r\n[session error: {error}]\r\n"),
-        },
-    )
-}
-
-fn emit_snapshot(app: &AppHandle, snapshot: &AppSnapshot) -> Result<(), String> {
-    app.emit(STATE_EVENT, snapshot)
-        .map_err(|error| error.to_string())
-}
-
-fn emit_terminal_data(app: &AppHandle, payload: &TerminalDataPayload) -> Result<(), String> {
-    app.emit(TERMINAL_DATA_EVENT, payload)
-        .map_err(|error| error.to_string())
 }
 
 fn resolve_persistence_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -1734,6 +1543,492 @@ fn strip_wrapping_quotes(raw: &str) -> &str {
     raw
 }
 
+#[derive(Debug)]
+enum GitCommandErrorKind {
+    NotRepo,
+    MissingBinary,
+    Failed,
+}
+
+#[derive(Debug)]
+struct GitCommandError {
+    kind: GitCommandErrorKind,
+    message: String,
+}
+
+#[derive(Debug, Default)]
+struct ParsedGitStatus {
+    head: Option<String>,
+    oid: Option<String>,
+    upstream: Option<String>,
+    ahead: u32,
+    behind: u32,
+    files: Vec<GitFileSnapshot>,
+}
+
+fn collect_git_detail(workspace_path: &Path) -> GitDetailSnapshot {
+    collect_git_detail_with_binary("git", workspace_path)
+}
+
+fn collect_git_detail_with_binary(git_binary: &str, workspace_path: &Path) -> GitDetailSnapshot {
+    let repo_root = match run_git_command(
+        git_binary,
+        workspace_path,
+        &["rev-parse", "--show-toplevel"],
+    ) {
+        Ok(output) => PathBuf::from(output.trim()),
+        Err(error) => {
+            return match error.kind {
+                GitCommandErrorKind::NotRepo => GitDetailSnapshot {
+                    summary: GitSummarySnapshot {
+                        state: GitState::NotRepo,
+                        branch: None,
+                        upstream: None,
+                        ahead: 0,
+                        behind: 0,
+                        counts: GitCountsSnapshot::default(),
+                        is_dirty: false,
+                        has_conflicts: false,
+                        message: Some("This workspace is not inside a Git repository.".to_string()),
+                    },
+                    repo_root: None,
+                    workspace_relative_path: None,
+                    files: Vec::new(),
+                },
+                GitCommandErrorKind::MissingBinary | GitCommandErrorKind::Failed => {
+                    GitDetailSnapshot {
+                        summary: GitSummarySnapshot {
+                            state: GitState::Error,
+                            branch: None,
+                            upstream: None,
+                            ahead: 0,
+                            behind: 0,
+                            counts: GitCountsSnapshot::default(),
+                            is_dirty: false,
+                            has_conflicts: false,
+                            message: Some(error.message),
+                        },
+                        repo_root: None,
+                        workspace_relative_path: None,
+                        files: Vec::new(),
+                    }
+                }
+            };
+        }
+    };
+
+    let status_output = match run_git_command(
+        git_binary,
+        workspace_path,
+        &["status", "--porcelain=v2", "--branch"],
+    ) {
+        Ok(output) => output,
+        Err(error) => {
+            return GitDetailSnapshot {
+                summary: GitSummarySnapshot {
+                    state: GitState::Error,
+                    branch: None,
+                    upstream: None,
+                    ahead: 0,
+                    behind: 0,
+                    counts: GitCountsSnapshot::default(),
+                    is_dirty: false,
+                    has_conflicts: false,
+                    message: Some(error.message),
+                },
+                repo_root: Some(repo_root.display().to_string()),
+                workspace_relative_path: workspace_relative_repo_path(&repo_root, workspace_path),
+                files: Vec::new(),
+            };
+        }
+    };
+
+    let parsed = match parse_git_status_porcelain(&status_output) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return GitDetailSnapshot {
+                summary: GitSummarySnapshot {
+                    state: GitState::Error,
+                    branch: None,
+                    upstream: None,
+                    ahead: 0,
+                    behind: 0,
+                    counts: GitCountsSnapshot::default(),
+                    is_dirty: false,
+                    has_conflicts: false,
+                    message: Some(error),
+                },
+                repo_root: Some(repo_root.display().to_string()),
+                workspace_relative_path: workspace_relative_repo_path(&repo_root, workspace_path),
+                files: Vec::new(),
+            };
+        }
+    };
+
+    let counts = build_git_counts(&parsed.files);
+    let has_conflicts = counts.conflicted > 0;
+    let is_dirty = counts.staged > 0
+        || counts.modified > 0
+        || counts.deleted > 0
+        || counts.renamed > 0
+        || counts.untracked > 0
+        || has_conflicts;
+    let detached = parsed
+        .head
+        .as_deref()
+        .map(|head| head.starts_with("(detached"))
+        .unwrap_or(false);
+    let branch = if detached {
+        parsed.oid.as_deref().map(short_git_oid).map(str::to_string)
+    } else {
+        parsed.head.clone()
+    };
+
+    GitDetailSnapshot {
+        summary: GitSummarySnapshot {
+            state: if has_conflicts {
+                GitState::Conflicted
+            } else if detached {
+                GitState::Detached
+            } else if is_dirty {
+                GitState::Dirty
+            } else {
+                GitState::Clean
+            },
+            branch,
+            upstream: parsed.upstream,
+            ahead: parsed.ahead,
+            behind: parsed.behind,
+            counts,
+            is_dirty,
+            has_conflicts,
+            message: None,
+        },
+        repo_root: Some(repo_root.display().to_string()),
+        workspace_relative_path: workspace_relative_repo_path(&repo_root, workspace_path),
+        files: parsed.files,
+    }
+}
+
+fn run_git_command(git_binary: &str, cwd: &Path, args: &[&str]) -> Result<String, GitCommandError> {
+    let output = ProcessCommand::new(git_binary)
+        .args(args)
+        .current_dir(cwd)
+        .output()
+        .map_err(|error| {
+            let kind = if error.kind() == std::io::ErrorKind::NotFound {
+                GitCommandErrorKind::MissingBinary
+            } else {
+                GitCommandErrorKind::Failed
+            };
+            let message = if matches!(kind, GitCommandErrorKind::MissingBinary) {
+                "Git is not installed or not available in PATH.".to_string()
+            } else {
+                format!("failed to run git {}: {error}", args.join(" "))
+            };
+            GitCommandError { kind, message }
+        })?;
+
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout)
+            .trim_end()
+            .to_string());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if stderr.contains("not a git repository") {
+        return Err(GitCommandError {
+            kind: GitCommandErrorKind::NotRepo,
+            message: "This workspace is not inside a Git repository.".to_string(),
+        });
+    }
+
+    let message = if stderr.is_empty() {
+        format!(
+            "git {} failed with status {}",
+            args.join(" "),
+            output.status
+        )
+    } else {
+        stderr
+    };
+    Err(GitCommandError {
+        kind: GitCommandErrorKind::Failed,
+        message,
+    })
+}
+
+fn parse_git_status_porcelain(raw: &str) -> Result<ParsedGitStatus, String> {
+    let mut parsed = ParsedGitStatus::default();
+
+    for line in raw.lines().filter(|line| !line.is_empty()) {
+        if let Some(head) = line.strip_prefix("# branch.head ") {
+            parsed.head = Some(head.to_string());
+            continue;
+        }
+
+        if let Some(oid) = line.strip_prefix("# branch.oid ") {
+            if oid != "(initial)" {
+                parsed.oid = Some(oid.to_string());
+            }
+            continue;
+        }
+
+        if let Some(upstream) = line.strip_prefix("# branch.upstream ") {
+            parsed.upstream = Some(upstream.to_string());
+            continue;
+        }
+
+        if let Some(ab) = line.strip_prefix("# branch.ab ") {
+            for value in ab.split_whitespace() {
+                if let Some(ahead) = value.strip_prefix('+') {
+                    parsed.ahead = ahead.parse::<u32>().unwrap_or(0);
+                } else if let Some(behind) = value.strip_prefix('-') {
+                    parsed.behind = behind.parse::<u32>().unwrap_or(0);
+                }
+            }
+            continue;
+        }
+
+        match line.as_bytes().first().copied() {
+            Some(b'1') => parsed.files.push(parse_git_changed_file(line)?),
+            Some(b'2') => parsed.files.push(parse_git_renamed_file(line)?),
+            Some(b'u') => parsed.files.push(parse_git_conflicted_file(line)?),
+            Some(b'?') => parsed.files.push(parse_git_untracked_file(line)?),
+            Some(b'!') => {}
+            _ => return Err(format!("unsupported git status line: {line}")),
+        }
+    }
+
+    Ok(parsed)
+}
+
+fn parse_git_changed_file(line: &str) -> Result<GitFileSnapshot, String> {
+    let remainder = line
+        .strip_prefix("1 ")
+        .ok_or_else(|| format!("invalid git changed-file line: {line}"))?;
+    let mut parts = remainder.splitn(9, ' ');
+    let xy = parts
+        .next()
+        .ok_or_else(|| format!("missing XY status in git line: {line}"))?;
+    for _ in 0..6 {
+        parts.next();
+    }
+    let path = parts
+        .next()
+        .ok_or_else(|| format!("missing file path in git line: {line}"))?;
+    let (index_status, worktree_status) = parse_xy_statuses(xy)?;
+
+    Ok(GitFileSnapshot {
+        path: path.to_string(),
+        original_path: None,
+        kind: classify_git_file_kind(index_status, worktree_status),
+        index_status,
+        worktree_status,
+    })
+}
+
+fn parse_git_renamed_file(line: &str) -> Result<GitFileSnapshot, String> {
+    let remainder = line
+        .strip_prefix("2 ")
+        .ok_or_else(|| format!("invalid git renamed-file line: {line}"))?;
+    let mut parts = remainder.splitn(10, ' ');
+    let xy = parts
+        .next()
+        .ok_or_else(|| format!("missing XY status in git line: {line}"))?;
+    for _ in 0..7 {
+        parts.next();
+    }
+    let paths = parts
+        .next()
+        .ok_or_else(|| format!("missing rename paths in git line: {line}"))?;
+    let (path, original_path) = paths
+        .split_once('\t')
+        .ok_or_else(|| format!("missing original path in rename line: {line}"))?;
+    let (index_status, worktree_status) = parse_xy_statuses(xy)?;
+
+    Ok(GitFileSnapshot {
+        path: path.to_string(),
+        original_path: Some(original_path.to_string()),
+        kind: GitFileKind::Renamed,
+        index_status,
+        worktree_status,
+    })
+}
+
+fn parse_git_conflicted_file(line: &str) -> Result<GitFileSnapshot, String> {
+    let remainder = line
+        .strip_prefix("u ")
+        .ok_or_else(|| format!("invalid git conflicted-file line: {line}"))?;
+    let mut parts = remainder.splitn(10, ' ');
+    let xy = parts
+        .next()
+        .ok_or_else(|| format!("missing XY status in git line: {line}"))?;
+    for _ in 0..8 {
+        parts.next();
+    }
+    let path = parts
+        .next()
+        .ok_or_else(|| format!("missing conflicted path in git line: {line}"))?;
+    let (index_status, worktree_status) = parse_xy_statuses(xy)?;
+
+    Ok(GitFileSnapshot {
+        path: path.to_string(),
+        original_path: None,
+        kind: GitFileKind::Conflicted,
+        index_status: index_status.or(Some(GitFileStatus::Unmerged)),
+        worktree_status: worktree_status.or(Some(GitFileStatus::Unmerged)),
+    })
+}
+
+fn parse_git_untracked_file(line: &str) -> Result<GitFileSnapshot, String> {
+    let path = line
+        .strip_prefix("? ")
+        .ok_or_else(|| format!("invalid git untracked-file line: {line}"))?;
+    Ok(GitFileSnapshot {
+        path: path.to_string(),
+        original_path: None,
+        kind: GitFileKind::Untracked,
+        index_status: None,
+        worktree_status: None,
+    })
+}
+
+fn parse_xy_statuses(xy: &str) -> Result<(Option<GitFileStatus>, Option<GitFileStatus>), String> {
+    let mut chars = xy.chars();
+    let index = chars
+        .next()
+        .ok_or_else(|| format!("missing index status in git XY marker: {xy}"))?;
+    let worktree = chars
+        .next()
+        .ok_or_else(|| format!("missing worktree status in git XY marker: {xy}"))?;
+    Ok((
+        parse_git_file_status(index),
+        parse_git_file_status(worktree),
+    ))
+}
+
+fn parse_git_file_status(character: char) -> Option<GitFileStatus> {
+    match character {
+        '.' => None,
+        'A' => Some(GitFileStatus::Added),
+        'M' => Some(GitFileStatus::Modified),
+        'D' => Some(GitFileStatus::Deleted),
+        'R' => Some(GitFileStatus::Renamed),
+        'C' => Some(GitFileStatus::Copied),
+        'T' => Some(GitFileStatus::TypeChanged),
+        'U' => Some(GitFileStatus::Unmerged),
+        _ => Some(GitFileStatus::Modified),
+    }
+}
+
+fn classify_git_file_kind(
+    index_status: Option<GitFileStatus>,
+    worktree_status: Option<GitFileStatus>,
+) -> GitFileKind {
+    if matches!(index_status, Some(GitFileStatus::Unmerged))
+        || matches!(worktree_status, Some(GitFileStatus::Unmerged))
+    {
+        GitFileKind::Conflicted
+    } else if matches!(
+        index_status,
+        Some(GitFileStatus::Renamed | GitFileStatus::Copied)
+    ) || matches!(
+        worktree_status,
+        Some(GitFileStatus::Renamed | GitFileStatus::Copied)
+    ) {
+        GitFileKind::Renamed
+    } else if matches!(index_status, Some(GitFileStatus::Deleted))
+        || matches!(worktree_status, Some(GitFileStatus::Deleted))
+    {
+        GitFileKind::Deleted
+    } else if index_status.is_some() {
+        GitFileKind::Staged
+    } else {
+        GitFileKind::Modified
+    }
+}
+
+fn build_git_counts(files: &[GitFileSnapshot]) -> GitCountsSnapshot {
+    let mut counts = GitCountsSnapshot::default();
+
+    for file in files {
+        if matches!(file.kind, GitFileKind::Untracked) {
+            counts.untracked += 1;
+            continue;
+        }
+
+        if matches!(file.kind, GitFileKind::Conflicted) {
+            counts.conflicted += 1;
+            continue;
+        }
+
+        if matches!(
+            file.index_status,
+            Some(
+                GitFileStatus::Added
+                    | GitFileStatus::Modified
+                    | GitFileStatus::Deleted
+                    | GitFileStatus::Renamed
+                    | GitFileStatus::Copied
+                    | GitFileStatus::TypeChanged
+            )
+        ) {
+            counts.staged += 1;
+        }
+
+        if matches!(
+            file.worktree_status,
+            Some(GitFileStatus::Modified | GitFileStatus::TypeChanged)
+        ) {
+            counts.modified += 1;
+        }
+
+        if matches!(file.index_status, Some(GitFileStatus::Deleted))
+            || matches!(file.worktree_status, Some(GitFileStatus::Deleted))
+        {
+            counts.deleted += 1;
+        }
+
+        if matches!(
+            file.index_status,
+            Some(GitFileStatus::Renamed | GitFileStatus::Copied)
+        ) || matches!(
+            file.worktree_status,
+            Some(GitFileStatus::Renamed | GitFileStatus::Copied)
+        ) {
+            counts.renamed += 1;
+        }
+    }
+
+    counts
+}
+
+fn workspace_relative_repo_path(repo_root: &Path, workspace_path: &Path) -> Option<String> {
+    let canonical_repo_root = fs::canonicalize(repo_root)
+        .ok()
+        .unwrap_or_else(|| repo_root.to_path_buf());
+    let canonical_workspace_path = fs::canonicalize(workspace_path)
+        .ok()
+        .unwrap_or_else(|| workspace_path.to_path_buf());
+
+    canonical_workspace_path
+        .strip_prefix(&canonical_repo_root)
+        .ok()
+        .and_then(|relative| {
+            if relative.as_os_str().is_empty() {
+                None
+            } else {
+                Some(relative.display().to_string())
+            }
+        })
+}
+
+fn short_git_oid(oid: &str) -> &str {
+    let end = oid.len().min(7);
+    &oid[..end]
+}
+
 fn home_dir() -> Result<PathBuf, String> {
     env::var("HOME")
         .map(PathBuf::from)
@@ -2037,6 +2332,7 @@ pub fn run() {
             rename_workspace,
             complete_launcher_input,
             set_theme,
+            refresh_workspace_git_status,
             switch_workspace,
             close_workspace,
             split_pane,
@@ -2055,13 +2351,16 @@ mod tests {
     use std::{
         env, fs,
         path::{Path, PathBuf},
+        process::Command,
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use super::{
-        complete_launcher_input_for_base, default_launcher_path, execute_launcher_command,
-        extract_navigation_target, layout_for_pane_count, layout_presets, normalize_workspace_path,
-        prepare_workspace_launch, resolve_navigation_path, RuntimeState, ThemeId,
+        collect_git_detail, collect_git_detail_with_binary, complete_launcher_input_for_base,
+        default_launcher_path, execute_launcher_command, extract_navigation_target,
+        layout_for_pane_count, layout_presets, normalize_workspace_path,
+        parse_git_status_porcelain, prepare_workspace_launch, resolve_navigation_path, GitFileKind,
+        GitState, RuntimeState, ThemeId,
     };
 
     #[test]
@@ -2301,6 +2600,85 @@ mod tests {
         assert_eq!(path.matches, vec!["backend/".to_string()]);
     }
 
+    #[test]
+    fn parse_git_status_handles_clean_branch_headers() {
+        let parsed = parse_git_status_porcelain(
+            "\
+# branch.oid 1c39cf9988972dbe28a656018d3fb0c270742433\n\
+# branch.head main\n\
+# branch.upstream origin/main\n\
+# branch.ab +2 -1\n",
+        )
+        .expect("git status should parse");
+
+        assert_eq!(parsed.head.as_deref(), Some("main"));
+        assert_eq!(parsed.upstream.as_deref(), Some("origin/main"));
+        assert_eq!(parsed.ahead, 2);
+        assert_eq!(parsed.behind, 1);
+        assert!(parsed.files.is_empty());
+    }
+
+    #[test]
+    fn parse_git_status_tracks_changed_files() {
+        let parsed = parse_git_status_porcelain(
+            "\
+# branch.oid 1c39cf9988972dbe28a656018d3fb0c270742433\n\
+# branch.head feature/git\n\
+1 M. N... 100644 100644 100644 1111111111111111111111111111111111111111 1111111111111111111111111111111111111111 src/app.js\n\
+2 R. N... 100644 100644 100644 2222222222222222222222222222222222222222 2222222222222222222222222222222222222222 R100 src/new-name.rs\tsrc/old-name.rs\n\
+u UU N... 100644 100644 100644 100644 3333333333333333333333333333333333333333 3333333333333333333333333333333333333333 3333333333333333333333333333333333333333 src/conflicted.rs\n\
+? src/new-file.ts\n",
+        )
+        .expect("git status should parse");
+
+        assert_eq!(parsed.files.len(), 4);
+        assert_eq!(parsed.files[0].kind, GitFileKind::Staged);
+        assert_eq!(parsed.files[1].kind, GitFileKind::Renamed);
+        assert_eq!(
+            parsed.files[1].original_path.as_deref(),
+            Some("src/old-name.rs")
+        );
+        assert_eq!(parsed.files[2].kind, GitFileKind::Conflicted);
+        assert_eq!(parsed.files[3].kind, GitFileKind::Untracked);
+    }
+
+    #[test]
+    fn collect_git_detail_reports_non_repo_workspaces() {
+        let fixture = TestWorkspace::new();
+        let detail = collect_git_detail(fixture.project_dir());
+
+        assert_eq!(detail.summary.state, GitState::NotRepo);
+        assert!(detail.repo_root.is_none());
+        assert!(detail.files.is_empty());
+    }
+
+    #[test]
+    fn collect_git_detail_reports_missing_git_binary() {
+        let fixture = TestWorkspace::new();
+        let detail = collect_git_detail_with_binary(
+            "git-command-that-does-not-exist",
+            fixture.project_dir(),
+        );
+
+        assert_eq!(detail.summary.state, GitState::Error);
+        assert!(detail.summary.message.is_some());
+    }
+
+    #[test]
+    fn collect_git_detail_detects_detached_head_and_nested_workspace() {
+        let repo = TestGitRepo::new();
+        let detail = collect_git_detail(repo.nested_workspace_dir());
+        let repo_root = canonical_path(repo.repo_dir()).display().to_string();
+
+        assert_eq!(detail.summary.state, GitState::Detached);
+        assert_eq!(detail.summary.branch.as_ref().map(String::len), Some(7));
+        assert_eq!(
+            detail.workspace_relative_path.as_deref(),
+            Some("apps/client")
+        );
+        assert_eq!(detail.repo_root.as_deref(), Some(repo_root.as_str()));
+    }
+
     struct TestWorkspace {
         root: PathBuf,
         project: PathBuf,
@@ -2353,7 +2731,68 @@ mod tests {
         }
     }
 
+    struct TestGitRepo {
+        root: PathBuf,
+        repo: PathBuf,
+        nested_workspace: PathBuf,
+    }
+
+    impl TestGitRepo {
+        fn new() -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be monotonic")
+                .as_nanos();
+            let root = env::temp_dir().join(format!("crewdock-git-{unique}"));
+            let repo = root.join("repo");
+            let nested_workspace = repo.join("apps").join("client");
+
+            fs::create_dir_all(&nested_workspace).unwrap();
+            run_git(&repo, &["init", "--initial-branch=main"]);
+            run_git(&repo, &["config", "user.name", "CrewDock Test"]);
+            run_git(&repo, &["config", "user.email", "test@crewdock.dev"]);
+            fs::write(repo.join("README.md"), "hello\n").unwrap();
+            run_git(&repo, &["add", "README.md"]);
+            run_git(&repo, &["commit", "-m", "initial"]);
+            run_git(&repo, &["checkout", "--detach"]);
+
+            Self {
+                root,
+                repo,
+                nested_workspace,
+            }
+        }
+
+        fn repo_dir(&self) -> &Path {
+            &self.repo
+        }
+
+        fn nested_workspace_dir(&self) -> &Path {
+            &self.nested_workspace
+        }
+    }
+
+    impl Drop for TestGitRepo {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
     fn canonical_path(path: &Path) -> PathBuf {
         fs::canonicalize(path).expect("fixture path should be canonicalizable")
+    }
+
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git command should start");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }

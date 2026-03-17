@@ -139,6 +139,16 @@ src-web/    Frontend UI, layout rendering, workspace strip, themes, xterm mounti
 src-tauri/  Rust backend, PTY lifecycle, persistence, Tauri commands
 ```
 
+## Developer Docs
+
+If you are new to the codebase, start here:
+
+- [`docs/developer-guide.md`](./docs/developer-guide.md) for architecture, state
+  flow, persistence, PTY lifecycle, and the main places to edit when adding
+  features
+- [`docs/codex-plan.md`](./docs/codex-plan.md) for the current refactor and
+  product direction notes
+
 ## Status
 
 CrewDock is still early-stage, but the core interaction model is already in
