@@ -1,0 +1,2359 @@
+use std::{
+    collections::HashMap,
+    env, fs,
+    io::{Read, Write},
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
+
+use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, MasterPty, PtySize};
+use serde::{Deserialize, Serialize};
+use tauri::{AppHandle, Emitter, Manager, State};
+
+const STATE_EVENT: &str = "crewdock://state-changed";
+const TERMINAL_DATA_EVENT: &str = "crewdock://terminal-data";
+const PERSISTENCE_FILE: &str = "workspaces.json";
+const MAX_LAUNCHER_COMPLETION_MATCHES: usize = 24;
+const LAUNCHER_COMMANDS: [&str; 6] = ["help", "pwd", "ls", "cd", "open", "clear"];
+const PATH_AWARE_LAUNCHER_COMMANDS: [&str; 3] = ["ls", "cd", "open"];
+
+#[derive(Clone)]
+struct AppState {
+    inner: Arc<Mutex<RuntimeState>>,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(RuntimeState::seeded())),
+        }
+    }
+}
+
+struct RuntimeState {
+    next_id: u64,
+    shell: String,
+    launcher: LauncherSnapshot,
+    settings: SettingsRecord,
+    workspaces: Vec<WorkspaceRecord>,
+    active_workspace_id: Option<String>,
+    sessions: HashMap<String, LiveSession>,
+    persistence_path: Option<PathBuf>,
+}
+
+struct LiveSession {
+    workspace_id: String,
+    master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    killer: Box<dyn ChildKiller + Send + Sync>,
+}
+
+#[derive(Debug, Clone)]
+struct WorkspaceRecord {
+    id: String,
+    name: String,
+    path: String,
+    layout: LayoutPreset,
+    panes: Vec<PaneRecord>,
+    pane_layout: PaneLayout,
+    started: bool,
+}
+
+#[derive(Debug, Clone)]
+struct PaneJob {
+    workspace_id: String,
+    pane_id: String,
+    label: String,
+    layout_label: String,
+    cwd: String,
+}
+
+#[derive(Debug, Clone)]
+struct SettingsRecord {
+    theme_id: ThemeId,
+}
+
+impl Default for SettingsRecord {
+    fn default() -> Self {
+        Self {
+            theme_id: ThemeId::default(),
+        }
+    }
+}
+
+impl RuntimeState {
+    fn seeded() -> Self {
+        Self {
+            next_id: 0,
+            shell: env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into()),
+            launcher: LauncherSnapshot {
+                presets: layout_presets(),
+                base_path: default_launcher_path(),
+            },
+            settings: SettingsRecord::default(),
+            workspaces: Vec::new(),
+            active_workspace_id: None,
+            sessions: HashMap::new(),
+            persistence_path: None,
+        }
+    }
+
+    fn next_id(&mut self, prefix: &str) -> String {
+        self.next_id += 1;
+        format!("{prefix}-{}", self.next_id)
+    }
+
+    fn build_snapshot(&self) -> AppSnapshot {
+        let active_workspace = self
+            .active_workspace_id
+            .as_ref()
+            .and_then(|workspace_id| {
+                self.workspaces
+                    .iter()
+                    .find(|workspace| workspace.id == *workspace_id)
+            })
+            .map(|workspace| WorkspaceSnapshot {
+                id: workspace.id.clone(),
+                name: workspace.name.clone(),
+                path: workspace.path.clone(),
+                layout: workspace.layout.clone(),
+                panes: workspace.panes.clone(),
+                pane_layout: workspace.pane_layout.clone(),
+            });
+
+        AppSnapshot {
+            launcher: self.launcher.clone(),
+            settings: SettingsSnapshot {
+                theme_id: self.settings.theme_id,
+            },
+            workspaces: self
+                .workspaces
+                .iter()
+                .map(|workspace| WorkspaceTabSnapshot {
+                    id: workspace.id.clone(),
+                    name: workspace.name.clone(),
+                    path: workspace.path.clone(),
+                    layout: workspace.layout.clone(),
+                    is_live: workspace.started,
+                })
+                .collect(),
+            active_workspace_id: self.active_workspace_id.clone(),
+            active_workspace,
+        }
+    }
+
+    fn build_workspace_record(
+        &mut self,
+        path: &Path,
+        pane_count: u8,
+        persisted_layout: Option<&PersistedPaneLayout>,
+    ) -> Result<WorkspaceRecord, String> {
+        let workspace_id = self.next_id("workspace");
+        let path_string = path.display().to_string();
+        let name = workspace_name(path);
+        let layout = layout_for_pane_count(pane_count)?;
+        let panes = (0..layout.pane_count)
+            .map(|index| PaneRecord {
+                id: self.next_id("pane"),
+                label: format!("Shell {:02}", index + 1),
+                status: PaneStatus::Closed,
+            })
+            .collect::<Vec<_>>();
+        let pane_ids = panes.iter().map(|pane| pane.id.clone()).collect::<Vec<_>>();
+        let pane_layout = persisted_layout
+            .and_then(|layout| restore_pane_layout(layout, &pane_ids))
+            .unwrap_or_else(|| {
+                build_balanced_pane_layout(&pane_ids, layout.columns >= layout.rows)
+            });
+
+        Ok(WorkspaceRecord {
+            id: workspace_id,
+            name,
+            path: path_string,
+            layout,
+            panes,
+            pane_layout,
+            started: false,
+        })
+    }
+
+    fn find_workspace_index_by_id(&self, workspace_id: &str) -> Option<usize> {
+        self.workspaces
+            .iter()
+            .position(|workspace| workspace.id == workspace_id)
+    }
+
+    fn active_workspace_path(&self) -> Option<String> {
+        let active_id = self.active_workspace_id.as_ref()?;
+        self.workspaces
+            .iter()
+            .find(|workspace| workspace.id == *active_id)
+            .map(|workspace| workspace.path.clone())
+    }
+
+    fn active_workspace_index(&self) -> Option<usize> {
+        let active_id = self.active_workspace_id.as_ref()?;
+        self.workspaces
+            .iter()
+            .position(|workspace| workspace.id == *active_id)
+    }
+
+    fn persisted_state(&self) -> PersistedWorkspaceState {
+        PersistedWorkspaceState {
+            settings: PersistedSettings {
+                theme_id: Some(self.settings.theme_id.as_str().to_string()),
+            },
+            workspaces: self
+                .workspaces
+                .iter()
+                .map(|workspace| PersistedWorkspace {
+                    path: workspace.path.clone(),
+                    name: Some(workspace.name.clone()),
+                    pane_count: Some(workspace.layout.pane_count),
+                    layout_id: None,
+                    pane_layout: persist_pane_layout(workspace),
+                })
+                .collect(),
+            active_workspace_index: self.active_workspace_index(),
+            active_workspace_path: self.active_workspace_path(),
+        }
+    }
+
+    fn persist_to_disk(&self) -> Result<(), String> {
+        let Some(path) = self.persistence_path.as_ref() else {
+            return Ok(());
+        };
+
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("failed to create app data directory: {error}"))?;
+        }
+
+        let payload = serde_json::to_vec_pretty(&self.persisted_state())
+            .map_err(|error| format!("failed to serialize workspace state: {error}"))?;
+        fs::write(path, payload)
+            .map_err(|error| format!("failed to persist workspace state: {error}"))
+    }
+
+    fn load_persisted_from_disk(&mut self, path: PathBuf) -> Result<(), String> {
+        self.persistence_path = Some(path.clone());
+
+        let contents = match fs::read_to_string(&path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(format!("failed to read persisted workspaces: {error}"));
+            }
+        };
+
+        let persisted: PersistedWorkspaceState = serde_json::from_str(&contents)
+            .map_err(|error| format!("failed to parse persisted workspaces: {error}"))?;
+
+        self.workspaces.clear();
+        self.active_workspace_id = None;
+        self.settings = SettingsRecord::default();
+        self.sessions.clear();
+
+        if let Some(theme_id) = persisted
+            .settings
+            .theme_id
+            .as_deref()
+            .and_then(ThemeId::parse)
+        {
+            self.settings.theme_id = theme_id;
+        }
+
+        let active_index = persisted.active_workspace_index;
+        let active_path = persisted.active_workspace_path;
+        for (index, persisted_workspace) in persisted.workspaces.into_iter().enumerate() {
+            let Ok(path) = normalize_workspace_path(&persisted_workspace.path) else {
+                continue;
+            };
+
+            let Some(pane_count) = persisted_workspace.pane_count.or_else(|| {
+                persisted_workspace
+                    .layout_id
+                    .as_deref()
+                    .and_then(pane_count_from_legacy_layout_id)
+            }) else {
+                continue;
+            };
+
+            let workspace = match self.build_workspace_record(
+                &path,
+                pane_count,
+                persisted_workspace.pane_layout.as_ref(),
+            ) {
+                Ok(mut workspace) => {
+                    if let Some(name) = persisted_workspace
+                        .name
+                        .as_deref()
+                        .and_then(|raw| normalize_workspace_name(raw).ok())
+                    {
+                        workspace.name = name;
+                    }
+                    workspace
+                }
+                Err(_) => continue,
+            };
+            if active_index == Some(index)
+                || (active_index.is_none()
+                    && active_path.as_deref() == Some(workspace.path.as_str()))
+            {
+                self.active_workspace_id = Some(workspace.id.clone());
+            }
+            self.workspaces.push(workspace);
+        }
+
+        if self.active_workspace_id.is_none() {
+            self.active_workspace_id = self
+                .workspaces
+                .first()
+                .map(|workspace| workspace.id.clone());
+        }
+
+        if let Some(path) = self.active_workspace_path().or_else(|| {
+            self.workspaces
+                .first()
+                .map(|workspace| workspace.path.clone())
+        }) {
+            self.launcher.base_path = path;
+        }
+
+        Ok(())
+    }
+
+    fn drain_all_killers(&mut self) -> Vec<Box<dyn ChildKiller + Send + Sync>> {
+        self.sessions
+            .drain()
+            .map(|(_, session)| session.killer)
+            .collect()
+    }
+
+    fn drain_workspace_killers(
+        &mut self,
+        workspace_id: &str,
+    ) -> Vec<Box<dyn ChildKiller + Send + Sync>> {
+        let pane_ids: Vec<String> = self
+            .sessions
+            .iter()
+            .filter_map(|(pane_id, session)| {
+                if session.workspace_id == workspace_id {
+                    Some(pane_id.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        pane_ids
+            .into_iter()
+            .filter_map(|pane_id| self.sessions.remove(&pane_id).map(|session| session.killer))
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppSnapshot {
+    launcher: LauncherSnapshot,
+    settings: SettingsSnapshot,
+    workspaces: Vec<WorkspaceTabSnapshot>,
+    active_workspace_id: Option<String>,
+    active_workspace: Option<WorkspaceSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LauncherSnapshot {
+    presets: Vec<LayoutPreset>,
+    base_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SettingsSnapshot {
+    theme_id: ThemeId,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LauncherCommandResult {
+    base_path: String,
+    output: Vec<String>,
+    open_path: Option<String>,
+    clear_output: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LauncherCompletionResult {
+    completed_input: String,
+    matches: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceTabSnapshot {
+    id: String,
+    name: String,
+    path: String,
+    layout: LayoutPreset,
+    is_live: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceSnapshot {
+    id: String,
+    name: String,
+    path: String,
+    layout: LayoutPreset,
+    panes: Vec<PaneRecord>,
+    pane_layout: PaneLayout,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct LayoutPreset {
+    id: String,
+    label: String,
+    rows: u8,
+    columns: u8,
+    pane_count: u8,
+}
+
+impl LayoutPreset {
+    fn new(id: &str, label: String, rows: u8, columns: u8, pane_count: u8) -> Self {
+        Self {
+            id: id.into(),
+            label,
+            rows,
+            columns,
+            pane_count,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PaneRecord {
+    id: String,
+    label: String,
+    status: PaneStatus,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum PaneLayout {
+    Leaf {
+        pane_id: String,
+    },
+    Split {
+        axis: SplitAxis,
+        first: Box<PaneLayout>,
+        second: Box<PaneLayout>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum SplitAxis {
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum PaneStatus {
+    Booting,
+    Ready,
+    Closed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TerminalDataPayload {
+    pane_id: String,
+    data: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum ThemeId {
+    OneDark,
+    TokyoNight,
+    GruvboxMaterialDark,
+    Dracula,
+    CatppuccinMocha,
+    CatppuccinLatte,
+}
+
+impl Default for ThemeId {
+    fn default() -> Self {
+        Self::OneDark
+    }
+}
+
+impl ThemeId {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::OneDark => "one-dark",
+            Self::TokyoNight => "tokyo-night",
+            Self::GruvboxMaterialDark => "gruvbox-material-dark",
+            Self::Dracula => "dracula",
+            Self::CatppuccinMocha => "catppuccin-mocha",
+            Self::CatppuccinLatte => "catppuccin-latte",
+        }
+    }
+
+    fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "one-dark" => Some(Self::OneDark),
+            "tokyo-night" => Some(Self::TokyoNight),
+            "gruvbox-material-dark" => Some(Self::GruvboxMaterialDark),
+            "dracula" => Some(Self::Dracula),
+            "catppuccin-mocha" => Some(Self::CatppuccinMocha),
+            "catppuccin-latte" => Some(Self::CatppuccinLatte),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedWorkspaceState {
+    #[serde(default)]
+    settings: PersistedSettings,
+    #[serde(default)]
+    workspaces: Vec<PersistedWorkspace>,
+    #[serde(default)]
+    active_workspace_index: Option<usize>,
+    #[serde(default)]
+    active_workspace_path: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedSettings {
+    #[serde(default)]
+    theme_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PersistedWorkspace {
+    path: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    pane_count: Option<u8>,
+    #[serde(default)]
+    layout_id: Option<String>,
+    #[serde(default)]
+    pane_layout: Option<PersistedPaneLayout>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+enum PersistedPaneLayout {
+    Leaf {
+        index: usize,
+    },
+    Split {
+        axis: SplitAxis,
+        first: Box<PersistedPaneLayout>,
+        second: Box<PersistedPaneLayout>,
+    },
+}
+
+#[tauri::command]
+fn get_app_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
+    let runtime = state
+        .inner
+        .lock()
+        .map_err(|_| "failed to acquire application state".to_string())?;
+    Ok(runtime.build_snapshot())
+}
+
+#[tauri::command]
+fn reset_to_launcher(state: State<'_, AppState>, app: AppHandle) -> Result<AppSnapshot, String> {
+    let (snapshot, killers) = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+        let killers = runtime.drain_all_killers();
+        runtime.workspaces.clear();
+        runtime.active_workspace_id = None;
+        runtime.persist_to_disk()?;
+        (runtime.build_snapshot(), killers)
+    };
+
+    terminate_sessions(killers);
+    emit_snapshot(&app, &snapshot)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn create_workspace(
+    pane_count: u8,
+    path: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let workspace_path = normalize_workspace_path(&path)?;
+    let workspace_path = workspace_path.display().to_string();
+    let shared = state.inner.clone();
+
+    let (snapshot, shell, pane_jobs) = {
+        let mut runtime = shared
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        layout_for_pane_count(pane_count)?;
+
+        let workspace =
+            runtime.build_workspace_record(Path::new(&workspace_path), pane_count, None)?;
+        let workspace_id = workspace.id.clone();
+        runtime.workspaces.push(workspace);
+
+        runtime.active_workspace_id = Some(workspace_id.clone());
+        runtime.launcher.base_path = workspace_path.clone();
+        let pane_jobs = prepare_workspace_launch(&mut runtime, &workspace_id).unwrap_or_default();
+        runtime.persist_to_disk()?;
+
+        (runtime.build_snapshot(), runtime.shell.clone(), pane_jobs)
+    };
+
+    emit_snapshot(&app, &snapshot)?;
+    spawn_pane_jobs(shared, app.clone(), shell, pane_jobs);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn rename_workspace(
+    workspace_id: String,
+    name: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let snapshot = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        let workspace_index = runtime
+            .find_workspace_index_by_id(&workspace_id)
+            .ok_or_else(|| "workspace not found".to_string())?;
+        let next_name = normalize_workspace_name(&name)?;
+        runtime.workspaces[workspace_index].name = next_name;
+        runtime.persist_to_disk()?;
+        runtime.build_snapshot()
+    };
+
+    emit_snapshot(&app, &snapshot)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn switch_workspace(
+    workspace_id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let shared = state.inner.clone();
+    let (snapshot, shell, pane_jobs) = {
+        let mut runtime = shared
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        if runtime.find_workspace_index_by_id(&workspace_id).is_none() {
+            return Err("workspace not found".to_string());
+        }
+
+        runtime.active_workspace_id = Some(workspace_id.clone());
+        if let Some(path) = runtime.active_workspace_path() {
+            runtime.launcher.base_path = path;
+        }
+        let pane_jobs = prepare_workspace_launch(&mut runtime, &workspace_id).unwrap_or_default();
+        runtime.persist_to_disk()?;
+
+        (runtime.build_snapshot(), runtime.shell.clone(), pane_jobs)
+    };
+
+    emit_snapshot(&app, &snapshot)?;
+    spawn_pane_jobs(shared, app.clone(), shell, pane_jobs);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn close_workspace(
+    workspace_id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let shared = state.inner.clone();
+    let (snapshot, shell, pane_jobs, killers) = {
+        let mut runtime = shared
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        let Some(index) = runtime.find_workspace_index_by_id(&workspace_id) else {
+            return Err("workspace not found".to_string());
+        };
+
+        let removed_was_active =
+            runtime.active_workspace_id.as_deref() == Some(workspace_id.as_str());
+        let fallback_active_id = if removed_was_active {
+            if index > 0 {
+                runtime
+                    .workspaces
+                    .get(index - 1)
+                    .map(|workspace| workspace.id.clone())
+            } else {
+                runtime
+                    .workspaces
+                    .get(index + 1)
+                    .map(|workspace| workspace.id.clone())
+            }
+        } else {
+            runtime.active_workspace_id.clone()
+        };
+
+        let killers = runtime.drain_workspace_killers(&workspace_id);
+        runtime.workspaces.remove(index);
+        runtime.active_workspace_id = fallback_active_id.filter(|active_id| {
+            runtime
+                .workspaces
+                .iter()
+                .any(|workspace| workspace.id == *active_id)
+        });
+        if let Some(path) = runtime.active_workspace_path() {
+            runtime.launcher.base_path = path;
+        }
+
+        let pane_jobs = runtime
+            .active_workspace_id
+            .clone()
+            .and_then(|active_id| prepare_workspace_launch(&mut runtime, &active_id))
+            .unwrap_or_default();
+
+        runtime.persist_to_disk()?;
+
+        (
+            runtime.build_snapshot(),
+            runtime.shell.clone(),
+            pane_jobs,
+            killers,
+        )
+    };
+
+    terminate_sessions(killers);
+    emit_snapshot(&app, &snapshot)?;
+    spawn_pane_jobs(shared, app.clone(), shell, pane_jobs);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn split_pane(
+    pane_id: String,
+    direction: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let shared = state.inner.clone();
+
+    let (snapshot, shell, pane_jobs) = {
+        let mut runtime = shared
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        let Some(workspace_index) = runtime
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.panes.iter().any(|pane| pane.id == pane_id))
+        else {
+            return Err("pane not found".to_string());
+        };
+
+        let new_pane_id = runtime.next_id("pane");
+        let should_spawn = runtime.workspaces[workspace_index].started;
+        let pane_total = runtime.workspaces[workspace_index].panes.len() + 1;
+        if pane_total > 16 {
+            return Err("workspace cannot exceed 16 panes".to_string());
+        }
+
+        let layout = layout_for_pane_count(pane_total as u8)?;
+        let split_axis = if matches!(direction.as_str(), "left" | "right") {
+            SplitAxis::Horizontal
+        } else {
+            SplitAxis::Vertical
+        };
+        let new_pane_first = matches!(direction.as_str(), "left" | "up");
+        let new_pane = PaneRecord {
+            id: new_pane_id.clone(),
+            label: String::new(),
+            status: if should_spawn {
+                PaneStatus::Booting
+            } else {
+                PaneStatus::Closed
+            },
+        };
+
+        let workspace_id = runtime.workspaces[workspace_index].id.clone();
+        let cwd = runtime.workspaces[workspace_index].path.clone();
+        let insertion_index = runtime.workspaces[workspace_index]
+            .panes
+            .iter()
+            .position(|pane| pane.id == pane_id)
+            .map(|index| if new_pane_first { index } else { index + 1 })
+            .ok_or_else(|| "pane not found".to_string())?;
+        runtime.workspaces[workspace_index]
+            .panes
+            .insert(insertion_index, new_pane);
+        relabel_panes(&mut runtime.workspaces[workspace_index].panes);
+        if !split_pane_layout(
+            &mut runtime.workspaces[workspace_index].pane_layout,
+            &pane_id,
+            split_axis,
+            new_pane_first,
+            &new_pane_id,
+        ) {
+            return Err("pane not found".to_string());
+        }
+        runtime.workspaces[workspace_index].layout = layout.clone();
+        runtime.persist_to_disk()?;
+
+        let pane_jobs = if should_spawn {
+            vec![PaneJob {
+                workspace_id,
+                pane_id: new_pane_id.clone(),
+                label: runtime.workspaces[workspace_index]
+                    .panes
+                    .iter()
+                    .find(|pane| pane.id == new_pane_id)
+                    .map(|pane| pane.label.clone())
+                    .unwrap_or_else(|| format!("Shell {:02}", pane_total)),
+                layout_label: layout.label.clone(),
+                cwd,
+            }]
+        } else {
+            Vec::new()
+        };
+
+        (runtime.build_snapshot(), runtime.shell.clone(), pane_jobs)
+    };
+
+    emit_snapshot(&app, &snapshot)?;
+    spawn_pane_jobs(shared, app.clone(), shell, pane_jobs);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn close_pane(
+    pane_id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let (snapshot, killers) = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        let Some(workspace_index) = runtime
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.panes.iter().any(|pane| pane.id == pane_id))
+        else {
+            return Err("pane not found".to_string());
+        };
+
+        if runtime.workspaces[workspace_index].panes.len() <= 1 {
+            return Err("workspace must keep at least one pane".to_string());
+        }
+
+        let pane_index = runtime.workspaces[workspace_index]
+            .panes
+            .iter()
+            .position(|pane| pane.id == pane_id)
+            .ok_or_else(|| "pane not found".to_string())?;
+
+        runtime.workspaces[workspace_index].panes.remove(pane_index);
+        runtime.workspaces[workspace_index].pane_layout = remove_pane_from_layout(
+            runtime.workspaces[workspace_index].pane_layout.clone(),
+            &pane_id,
+        )
+        .ok_or_else(|| "workspace must keep at least one pane".to_string())?;
+        relabel_panes(&mut runtime.workspaces[workspace_index].panes);
+        runtime.workspaces[workspace_index].layout =
+            layout_for_pane_count(runtime.workspaces[workspace_index].panes.len() as u8)?;
+
+        let killers = runtime
+            .sessions
+            .remove(&pane_id)
+            .map(|session| vec![session.killer])
+            .unwrap_or_default();
+
+        runtime.persist_to_disk()?;
+        (runtime.build_snapshot(), killers)
+    };
+
+    terminate_sessions(killers);
+    emit_snapshot(&app, &snapshot)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn show_in_finder(path: String) -> Result<(), String> {
+    let target = normalize_workspace_path(&path)?;
+    std::process::Command::new("open")
+        .arg(target)
+        .spawn()
+        .map_err(|error| format!("failed to open Finder: {error}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn run_launcher_command(
+    input: String,
+    state: State<'_, AppState>,
+) -> Result<LauncherCommandResult, String> {
+    let result = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        let current_path = PathBuf::from(runtime.launcher.base_path.clone());
+        let result = execute_launcher_command(&current_path, &input)?;
+        runtime.launcher.base_path = result.base_path.clone();
+        result
+    };
+
+    Ok(result)
+}
+
+#[tauri::command]
+fn complete_launcher_input(
+    input: String,
+    state: State<'_, AppState>,
+) -> Result<LauncherCompletionResult, String> {
+    let runtime = state
+        .inner
+        .lock()
+        .map_err(|_| "failed to acquire application state".to_string())?;
+    let current_path = PathBuf::from(runtime.launcher.base_path.clone());
+    complete_launcher_input_for_base(&current_path, &input)
+}
+
+#[tauri::command]
+fn set_theme(
+    theme_id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let snapshot = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        let theme_id = ThemeId::parse(&theme_id).ok_or_else(|| "theme not found".to_string())?;
+        runtime.settings.theme_id = theme_id;
+        runtime.persist_to_disk()?;
+        runtime.build_snapshot()
+    };
+
+    emit_snapshot(&app, &snapshot)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn write_to_pane(pane_id: String, data: String, state: State<'_, AppState>) -> Result<(), String> {
+    let writer = {
+        let runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        runtime
+            .sessions
+            .get(&pane_id)
+            .map(|session| session.writer.clone())
+            .ok_or_else(|| "pane session not found".to_string())?
+    };
+
+    write_shell_command(&writer, &data)
+}
+
+#[tauri::command]
+fn resize_pane(
+    pane_id: String,
+    cols: u16,
+    rows: u16,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    if cols == 0 || rows == 0 {
+        return Ok(());
+    }
+
+    let master = {
+        let runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        runtime
+            .sessions
+            .get(&pane_id)
+            .map(|session| session.master.clone())
+            .ok_or_else(|| "pane session not found".to_string())?
+    };
+
+    let master = master
+        .lock()
+        .map_err(|_| "failed to acquire pane master".to_string())?;
+    master
+        .resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|error| format!("failed to resize pane: {error}"))?;
+    Ok(())
+}
+
+fn prepare_workspace_launch(
+    runtime: &mut RuntimeState,
+    workspace_id: &str,
+) -> Option<Vec<PaneJob>> {
+    let workspace = runtime
+        .workspaces
+        .iter_mut()
+        .find(|workspace| workspace.id == workspace_id)?;
+
+    if workspace.started {
+        return None;
+    }
+
+    workspace.started = true;
+    let workspace_id = workspace.id.clone();
+    let layout_label = workspace.layout.label.clone();
+    let cwd = workspace.path.clone();
+    let jobs = workspace
+        .panes
+        .iter_mut()
+        .map(|pane| {
+            pane.status = PaneStatus::Booting;
+            PaneJob {
+                workspace_id: workspace_id.clone(),
+                pane_id: pane.id.clone(),
+                label: pane.label.clone(),
+                layout_label: layout_label.clone(),
+                cwd: cwd.clone(),
+            }
+        })
+        .collect();
+
+    Some(jobs)
+}
+
+fn spawn_pane_jobs(
+    shared: Arc<Mutex<RuntimeState>>,
+    app: AppHandle,
+    shell: String,
+    jobs: Vec<PaneJob>,
+) {
+    for job in jobs {
+        let shared = shared.clone();
+        let app_handle = app.clone();
+        let shell = shell.clone();
+
+        std::thread::spawn(move || {
+            if let Err(error) = spawn_terminal_session(
+                &shared,
+                &app_handle,
+                job.workspace_id,
+                job.pane_id,
+                job.label,
+                job.layout_label,
+                shell,
+                job.cwd,
+            ) {
+                eprintln!("failed to spawn terminal session: {error}");
+            }
+        });
+    }
+}
+
+fn spawn_terminal_session(
+    shared: &Arc<Mutex<RuntimeState>>,
+    app: &AppHandle,
+    workspace_id: String,
+    pane_id: String,
+    label: String,
+    layout_label: String,
+    shell: String,
+    cwd: String,
+) -> Result<(), String> {
+    let pty_system = native_pty_system();
+    let pair = pty_system
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|error| format!("failed to open PTY: {error}"))?;
+
+    let mut command = CommandBuilder::new(&shell);
+    command.arg("-l");
+    command.cwd(&cwd);
+    strip_tooling_env(&mut command);
+    command.env("TERM", "xterm-256color");
+    command.env("COLORTERM", "truecolor");
+    command.env("CREWDOCK_LAYOUT", &layout_label);
+    command.env("CREWDOCK_PANE_LABEL", &label);
+
+    let mut child = pair
+        .slave
+        .spawn_command(command)
+        .map_err(|error| format!("failed to spawn shell: {error}"))?;
+
+    let reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|error| format!("failed to clone PTY reader: {error}"))?;
+    let writer = pair
+        .master
+        .take_writer()
+        .map_err(|error| format!("failed to open PTY writer: {error}"))?;
+    let killer = child.clone_killer();
+    let master = Arc::new(Mutex::new(pair.master));
+    let writer = Arc::new(Mutex::new(writer));
+
+    let snapshot = {
+        let mut runtime = shared
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        let Some(workspace) = runtime
+            .workspaces
+            .iter_mut()
+            .find(|workspace| workspace.id == workspace_id)
+        else {
+            let _ = killer.clone_killer().kill();
+            return Ok(());
+        };
+
+        let Some(pane) = workspace.panes.iter_mut().find(|pane| pane.id == pane_id) else {
+            let _ = killer.clone_killer().kill();
+            return Ok(());
+        };
+
+        pane.status = PaneStatus::Ready;
+        runtime.sessions.insert(
+            pane_id.clone(),
+            LiveSession {
+                workspace_id,
+                master: master.clone(),
+                writer: writer.clone(),
+                killer,
+            },
+        );
+        runtime.build_snapshot()
+    };
+
+    emit_snapshot(app, &snapshot)?;
+
+    let app_handle = app.clone();
+    let shared = shared.clone();
+    std::thread::spawn(move || {
+        stream_terminal_output(shared, app_handle, pane_id, reader, &mut child);
+    });
+
+    Ok(())
+}
+
+fn strip_tooling_env(command: &mut CommandBuilder) {
+    for (key, _) in env::vars_os() {
+        let key = key.to_string_lossy();
+        if key.starts_with("npm_") || key.starts_with("NPM_") {
+            command.env_remove(key.as_ref());
+        }
+    }
+}
+
+fn stream_terminal_output(
+    shared: Arc<Mutex<RuntimeState>>,
+    app: AppHandle,
+    pane_id: String,
+    mut reader: Box<dyn Read + Send>,
+    child: &mut Box<dyn Child + Send + Sync>,
+) {
+    let mut buffer = [0u8; 8192];
+
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(read) => {
+                let payload = TerminalDataPayload {
+                    pane_id: pane_id.clone(),
+                    data: String::from_utf8_lossy(&buffer[..read]).into_owned(),
+                };
+                if let Err(error) = emit_terminal_data(&app, &payload) {
+                    eprintln!("failed to emit terminal data: {error}");
+                    break;
+                }
+            }
+            Err(error) => {
+                if let Err(inner_error) = fail_pane(&shared, &app, &pane_id, error.to_string()) {
+                    eprintln!("failed to mark pane error: {inner_error}");
+                }
+                return;
+            }
+        }
+    }
+
+    match child.wait() {
+        Ok(status) => {
+            let message = format!("\r\n[session closed: {status}]\r\n");
+            let _ = emit_terminal_data(
+                &app,
+                &TerminalDataPayload {
+                    pane_id: pane_id.clone(),
+                    data: message,
+                },
+            );
+            if let Err(error) = mark_pane_closed(&shared, &app, &pane_id) {
+                eprintln!("failed to mark pane closed: {error}");
+            }
+        }
+        Err(error) => {
+            if let Err(inner_error) = fail_pane(&shared, &app, &pane_id, error.to_string()) {
+                eprintln!("failed to mark pane failure: {inner_error}");
+            }
+        }
+    }
+}
+
+fn mark_pane_closed(
+    shared: &Arc<Mutex<RuntimeState>>,
+    app: &AppHandle,
+    pane_id: &str,
+) -> Result<(), String> {
+    let snapshot = {
+        let mut runtime = shared
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        runtime.sessions.remove(pane_id);
+        if let Some(workspace) = runtime
+            .workspaces
+            .iter_mut()
+            .find(|workspace| workspace.panes.iter().any(|pane| pane.id == pane_id))
+        {
+            if let Some(pane) = workspace.panes.iter_mut().find(|pane| pane.id == pane_id) {
+                pane.status = PaneStatus::Closed;
+            }
+        }
+
+        runtime.build_snapshot()
+    };
+
+    emit_snapshot(app, &snapshot)
+}
+
+fn fail_pane(
+    shared: &Arc<Mutex<RuntimeState>>,
+    app: &AppHandle,
+    pane_id: &str,
+    error: String,
+) -> Result<(), String> {
+    let snapshot = {
+        let mut runtime = shared
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        runtime.sessions.remove(pane_id);
+        if let Some(workspace) = runtime
+            .workspaces
+            .iter_mut()
+            .find(|workspace| workspace.panes.iter().any(|pane| pane.id == pane_id))
+        {
+            if let Some(pane) = workspace.panes.iter_mut().find(|pane| pane.id == pane_id) {
+                pane.status = PaneStatus::Failed;
+            }
+        }
+
+        runtime.build_snapshot()
+    };
+
+    emit_snapshot(app, &snapshot)?;
+    emit_terminal_data(
+        app,
+        &TerminalDataPayload {
+            pane_id: pane_id.to_string(),
+            data: format!("\r\n[session error: {error}]\r\n"),
+        },
+    )
+}
+
+fn emit_snapshot(app: &AppHandle, snapshot: &AppSnapshot) -> Result<(), String> {
+    app.emit(STATE_EVENT, snapshot)
+        .map_err(|error| error.to_string())
+}
+
+fn emit_terminal_data(app: &AppHandle, payload: &TerminalDataPayload) -> Result<(), String> {
+    app.emit(TERMINAL_DATA_EVENT, payload)
+        .map_err(|error| error.to_string())
+}
+
+fn resolve_persistence_path(app: &AppHandle) -> Result<PathBuf, String> {
+    let base_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("failed to resolve app data directory: {error}"))?;
+    Ok(base_dir.join(PERSISTENCE_FILE))
+}
+
+fn default_launcher_path() -> String {
+    env::current_dir()
+        .ok()
+        .and_then(|path| fs::canonicalize(&path).ok().or(Some(path)))
+        .or_else(|| {
+            env::var("HOME")
+                .ok()
+                .and_then(|home| fs::canonicalize(&home).ok().or(Some(PathBuf::from(home))))
+        })
+        .unwrap_or_else(|| PathBuf::from("/"))
+        .display()
+        .to_string()
+}
+
+fn normalize_workspace_path(raw: &str) -> Result<PathBuf, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("workspace path is empty".to_string());
+    }
+
+    let resolved = fs::canonicalize(trimmed)
+        .map_err(|error| format!("failed to access workspace folder: {error}"))?;
+    if !resolved.is_dir() {
+        return Err("workspace path must be a directory".to_string());
+    }
+
+    Ok(resolved)
+}
+
+fn execute_launcher_command(
+    base_path: &Path,
+    raw_input: &str,
+) -> Result<LauncherCommandResult, String> {
+    let trimmed = raw_input.trim();
+    if trimmed.is_empty() {
+        return Err("enter a command. Try help.".to_string());
+    }
+
+    if trimmed.eq_ignore_ascii_case("help") {
+        return Ok(LauncherCommandResult {
+            base_path: base_path.display().to_string(),
+            output: vec![
+                "Commands: help, pwd, ls [path], cd <path>, open [path], clear".to_string(),
+            ],
+            open_path: None,
+            clear_output: false,
+        });
+    }
+
+    if trimmed.eq_ignore_ascii_case("pwd") {
+        return Ok(LauncherCommandResult {
+            base_path: base_path.display().to_string(),
+            output: vec![base_path.display().to_string()],
+            open_path: None,
+            clear_output: false,
+        });
+    }
+
+    if trimmed.eq_ignore_ascii_case("clear") {
+        return Ok(LauncherCommandResult {
+            base_path: base_path.display().to_string(),
+            output: Vec::new(),
+            open_path: None,
+            clear_output: true,
+        });
+    }
+
+    if trimmed.eq_ignore_ascii_case("ls") || trimmed.starts_with("ls ") {
+        let target_path = if trimmed.eq_ignore_ascii_case("ls") {
+            base_path.to_path_buf()
+        } else {
+            resolve_navigation_path(base_path, trimmed[3..].trim())?
+        };
+        let target_display = target_path.display().to_string();
+        let mut output = vec![target_display.clone()];
+        output.push(list_directory_entries(&target_path)?.join("  "));
+        return Ok(LauncherCommandResult {
+            base_path: base_path.display().to_string(),
+            output,
+            open_path: None,
+            clear_output: false,
+        });
+    }
+
+    if trimmed.eq_ignore_ascii_case("open") || trimmed.starts_with("open ") {
+        let target_path = if trimmed.eq_ignore_ascii_case("open") {
+            base_path.to_path_buf()
+        } else {
+            resolve_navigation_path(base_path, trimmed[5..].trim())?
+        };
+        let target_display = target_path.display().to_string();
+        return Ok(LauncherCommandResult {
+            base_path: target_display.clone(),
+            output: vec![format!("Opening workspace at {target_display}")],
+            open_path: Some(target_display),
+            clear_output: false,
+        });
+    }
+
+    let target_path = resolve_navigation_path(base_path, trimmed)?;
+    let target_display = target_path.display().to_string();
+    Ok(LauncherCommandResult {
+        base_path: target_display.clone(),
+        output: vec![format!("cwd -> {target_display}")],
+        open_path: None,
+        clear_output: false,
+    })
+}
+
+fn complete_launcher_input_for_base(
+    base_path: &Path,
+    raw_input: &str,
+) -> Result<LauncherCompletionResult, String> {
+    if raw_input.trim().is_empty() {
+        return Ok(empty_launcher_completion(raw_input));
+    }
+
+    if contains_forbidden_navigation_tokens(raw_input) {
+        return Err("only directory navigation is supported".to_string());
+    }
+
+    if let Some(result) = complete_launcher_command_name(raw_input) {
+        return Ok(result);
+    }
+
+    if starts_with_non_path_launcher_command(raw_input) {
+        return Ok(empty_launcher_completion(raw_input));
+    }
+
+    complete_launcher_path_input(base_path, raw_input)
+}
+
+fn empty_launcher_completion(raw_input: &str) -> LauncherCompletionResult {
+    LauncherCompletionResult {
+        completed_input: raw_input.to_string(),
+        matches: Vec::new(),
+    }
+}
+
+fn complete_launcher_command_name(raw_input: &str) -> Option<LauncherCompletionResult> {
+    let trimmed = raw_input.trim();
+    if trimmed.is_empty()
+        || trimmed.contains(char::is_whitespace)
+        || trimmed.starts_with('/')
+        || trimmed.starts_with('.')
+        || trimmed.starts_with('~')
+        || trimmed.contains('/')
+    {
+        return None;
+    }
+
+    let matches = LAUNCHER_COMMANDS
+        .into_iter()
+        .filter(|command| command.starts_with(trimmed))
+        .collect::<Vec<_>>();
+    if matches.is_empty() {
+        return None;
+    }
+
+    let completed_input = if matches.len() == 1 {
+        let command = matches[0];
+        if PATH_AWARE_LAUNCHER_COMMANDS.contains(&command) {
+            format!("{command} ")
+        } else {
+            command.to_string()
+        }
+    } else {
+        longest_common_prefix(&matches)
+    };
+
+    Some(LauncherCompletionResult {
+        completed_input,
+        matches: matches.into_iter().map(str::to_string).collect(),
+    })
+}
+
+fn starts_with_non_path_launcher_command(raw_input: &str) -> bool {
+    let trimmed = raw_input.trim_start();
+    ["help", "pwd", "clear"].into_iter().any(|command| {
+        trimmed
+            .strip_prefix(command)
+            .and_then(|rest| rest.chars().next())
+            .map(|character| character.is_whitespace())
+            .unwrap_or(false)
+    })
+}
+
+fn complete_launcher_path_input(
+    base_path: &Path,
+    raw_input: &str,
+) -> Result<LauncherCompletionResult, String> {
+    let (command_prefix, raw_target) = split_launcher_completion_input(raw_input);
+    let target = raw_target.trim_start();
+    let (quote_prefix, unquoted_target) = match target.as_bytes().first().copied() {
+        Some(b'"') => ("\"", &target[1..]),
+        Some(b'\'') => ("'", &target[1..]),
+        _ => ("", target),
+    };
+
+    let (container_raw, typed_path_prefix, fragment) =
+        split_launcher_completion_target(unquoted_target);
+    let scan_dir = match resolve_completion_scan_dir(base_path, container_raw) {
+        Ok(path) => path,
+        Err(_) => return Ok(empty_launcher_completion(raw_input)),
+    };
+
+    let fragment_lower = fragment.to_lowercase();
+    let mut matches = fs::read_dir(&scan_dir)
+        .map_err(|error| format!("failed to read directory: {error}"))?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let is_dir = entry.file_type().ok()?.is_dir();
+            if !is_dir {
+                return None;
+            }
+
+            let name = entry.file_name().to_string_lossy().to_string();
+            if !fragment_lower.is_empty() && !name.to_lowercase().starts_with(&fragment_lower) {
+                return None;
+            }
+
+            Some(name)
+        })
+        .collect::<Vec<_>>();
+
+    matches.sort_unstable();
+    if matches.is_empty() {
+        return Ok(empty_launcher_completion(raw_input));
+    }
+
+    let completed_fragment = if matches.len() == 1 {
+        format!("{}/", matches[0])
+    } else {
+        let shared_prefix = longest_common_prefix(&matches);
+        if shared_prefix.len() > fragment.len() {
+            shared_prefix
+        } else {
+            fragment.to_string()
+        }
+    };
+
+    let completed_input =
+        format!("{command_prefix}{quote_prefix}{typed_path_prefix}{completed_fragment}");
+    let match_display = summarize_completion_matches(
+        matches
+            .into_iter()
+            .map(|name| format!("{quote_prefix}{typed_path_prefix}{name}/"))
+            .collect(),
+    );
+
+    Ok(LauncherCompletionResult {
+        completed_input,
+        matches: match_display,
+    })
+}
+
+fn split_launcher_completion_input(raw_input: &str) -> (String, &str) {
+    let trimmed = raw_input.trim_start();
+
+    for command in PATH_AWARE_LAUNCHER_COMMANDS {
+        if let Some(rest) = trimmed.strip_prefix(command) {
+            if rest
+                .chars()
+                .next()
+                .map(|character| character.is_whitespace())
+                .unwrap_or(false)
+            {
+                return (format!("{command} "), rest.trim_start());
+            }
+        }
+    }
+
+    (String::new(), trimmed)
+}
+
+fn split_launcher_completion_target(value: &str) -> (&str, &str, &str) {
+    match value.rfind('/') {
+        Some(index) => (&value[..index], &value[..index + 1], &value[index + 1..]),
+        None => ("", "", value),
+    }
+}
+
+fn resolve_completion_scan_dir(base_path: &Path, container_raw: &str) -> Result<PathBuf, String> {
+    if container_raw.is_empty() {
+        return Ok(base_path.to_path_buf());
+    }
+
+    let target = expand_navigation_target(container_raw)?;
+    let target = if target.is_absolute() {
+        target
+    } else {
+        base_path.join(target)
+    };
+
+    let resolved = fs::canonicalize(&target)
+        .map_err(|error| format!("failed to access workspace folder: {error}"))?;
+    if !resolved.is_dir() {
+        return Err("workspace path must be a directory".to_string());
+    }
+
+    Ok(resolved)
+}
+
+fn summarize_completion_matches(mut matches: Vec<String>) -> Vec<String> {
+    if matches.len() > MAX_LAUNCHER_COMPLETION_MATCHES {
+        let remaining = matches.len() - MAX_LAUNCHER_COMPLETION_MATCHES;
+        matches.truncate(MAX_LAUNCHER_COMPLETION_MATCHES);
+        matches.push(format!("... {remaining} more"));
+    }
+
+    matches
+}
+
+fn longest_common_prefix<T: AsRef<str>>(values: &[T]) -> String {
+    let Some(first) = values.first() else {
+        return String::new();
+    };
+
+    let mut prefix = first.as_ref().to_string();
+    for value in values.iter().skip(1) {
+        let mut matched_bytes = 0;
+        for (left, right) in prefix.chars().zip(value.as_ref().chars()) {
+            if left != right {
+                break;
+            }
+
+            matched_bytes += left.len_utf8();
+        }
+        prefix.truncate(matched_bytes);
+        if prefix.is_empty() {
+            break;
+        }
+    }
+
+    prefix
+}
+
+fn resolve_navigation_path(base_path: &Path, raw: &str) -> Result<PathBuf, String> {
+    let target = extract_navigation_target(raw)?;
+    let target = expand_navigation_target(target)?;
+    let target = if target.is_absolute() {
+        target
+    } else {
+        base_path.join(target)
+    };
+
+    let resolved = fs::canonicalize(&target)
+        .map_err(|error| format!("failed to access workspace folder: {error}"))?;
+    if !resolved.is_dir() {
+        return Err("workspace path must be a directory".to_string());
+    }
+
+    Ok(resolved)
+}
+
+fn extract_navigation_target(raw: &str) -> Result<&str, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("enter a folder path".to_string());
+    }
+
+    if contains_forbidden_navigation_tokens(trimmed) {
+        return Err("only directory navigation is supported".to_string());
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("cd") {
+        let Some(first) = rest.chars().next() else {
+            return Ok("~");
+        };
+
+        if first.is_whitespace() {
+            let target = rest.trim();
+            return if target.is_empty() {
+                Ok("~")
+            } else {
+                Ok(target)
+            };
+        }
+    }
+
+    Ok(trimmed)
+}
+
+fn expand_navigation_target(raw: &str) -> Result<PathBuf, String> {
+    let value = strip_wrapping_quotes(raw.trim());
+    if value == "~" {
+        return home_dir();
+    }
+
+    if let Some(rest) = value.strip_prefix("~/") {
+        return Ok(home_dir()?.join(rest));
+    }
+
+    if value.starts_with('~') {
+        return Err("only the current home directory shortcut (~) is supported".to_string());
+    }
+
+    Ok(PathBuf::from(value))
+}
+
+fn strip_wrapping_quotes(raw: &str) -> &str {
+    if raw.len() >= 2 {
+        let first = raw.as_bytes()[0];
+        let last = raw.as_bytes()[raw.len() - 1];
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            return &raw[1..raw.len() - 1];
+        }
+    }
+
+    raw
+}
+
+fn home_dir() -> Result<PathBuf, String> {
+    env::var("HOME")
+        .map(PathBuf::from)
+        .map_err(|_| "home directory is not available".to_string())
+}
+
+fn contains_forbidden_navigation_tokens(value: &str) -> bool {
+    ["&&", "||", ";", "|", "`", "$(", "\n", "\r"]
+        .iter()
+        .any(|token| value.contains(token))
+}
+
+fn workspace_name(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .map(|name| name.to_string())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn normalize_workspace_name(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("workspace name cannot be empty".to_string());
+    }
+
+    Ok(trimmed.to_string())
+}
+
+fn relabel_panes(panes: &mut [PaneRecord]) {
+    for (index, pane) in panes.iter_mut().enumerate() {
+        pane.label = format!("Shell {:02}", index + 1);
+    }
+}
+
+fn build_balanced_pane_layout(pane_ids: &[String], prefer_horizontal: bool) -> PaneLayout {
+    if pane_ids.len() == 1 {
+        return PaneLayout::Leaf {
+            pane_id: pane_ids[0].clone(),
+        };
+    }
+
+    let midpoint = pane_ids.len().div_ceil(2);
+    let axis = if prefer_horizontal {
+        SplitAxis::Horizontal
+    } else {
+        SplitAxis::Vertical
+    };
+
+    PaneLayout::Split {
+        axis,
+        first: Box::new(build_balanced_pane_layout(
+            &pane_ids[..midpoint],
+            !prefer_horizontal,
+        )),
+        second: Box::new(build_balanced_pane_layout(
+            &pane_ids[midpoint..],
+            !prefer_horizontal,
+        )),
+    }
+}
+
+fn split_pane_layout(
+    layout: &mut PaneLayout,
+    pane_id: &str,
+    axis: SplitAxis,
+    new_pane_first: bool,
+    new_pane_id: &str,
+) -> bool {
+    match layout {
+        PaneLayout::Leaf { pane_id: existing } if existing == pane_id => {
+            let current_leaf = PaneLayout::Leaf {
+                pane_id: existing.clone(),
+            };
+            let new_leaf = PaneLayout::Leaf {
+                pane_id: new_pane_id.to_string(),
+            };
+            *layout = if new_pane_first {
+                PaneLayout::Split {
+                    axis,
+                    first: Box::new(new_leaf),
+                    second: Box::new(current_leaf),
+                }
+            } else {
+                PaneLayout::Split {
+                    axis,
+                    first: Box::new(current_leaf),
+                    second: Box::new(new_leaf),
+                }
+            };
+            true
+        }
+        PaneLayout::Split { first, second, .. } => {
+            split_pane_layout(first, pane_id, axis, new_pane_first, new_pane_id)
+                || split_pane_layout(second, pane_id, axis, new_pane_first, new_pane_id)
+        }
+        PaneLayout::Leaf { .. } => false,
+    }
+}
+
+fn remove_pane_from_layout(layout: PaneLayout, pane_id: &str) -> Option<PaneLayout> {
+    match layout {
+        PaneLayout::Leaf { pane_id: existing } => {
+            if existing == pane_id {
+                None
+            } else {
+                Some(PaneLayout::Leaf { pane_id: existing })
+            }
+        }
+        PaneLayout::Split {
+            axis,
+            first,
+            second,
+        } => {
+            let first = remove_pane_from_layout(*first, pane_id);
+            let second = remove_pane_from_layout(*second, pane_id);
+            match (first, second) {
+                (Some(first), Some(second)) => Some(PaneLayout::Split {
+                    axis,
+                    first: Box::new(first),
+                    second: Box::new(second),
+                }),
+                (Some(node), None) | (None, Some(node)) => Some(node),
+                (None, None) => None,
+            }
+        }
+    }
+}
+
+fn persist_pane_layout(workspace: &WorkspaceRecord) -> Option<PersistedPaneLayout> {
+    let pane_index_by_id = workspace
+        .panes
+        .iter()
+        .enumerate()
+        .map(|(index, pane)| (pane.id.clone(), index))
+        .collect::<HashMap<_, _>>();
+    persist_pane_layout_node(&workspace.pane_layout, &pane_index_by_id)
+}
+
+fn persist_pane_layout_node(
+    layout: &PaneLayout,
+    pane_index_by_id: &HashMap<String, usize>,
+) -> Option<PersistedPaneLayout> {
+    match layout {
+        PaneLayout::Leaf { pane_id } => pane_index_by_id
+            .get(pane_id)
+            .copied()
+            .map(|index| PersistedPaneLayout::Leaf { index }),
+        PaneLayout::Split {
+            axis,
+            first,
+            second,
+        } => Some(PersistedPaneLayout::Split {
+            axis: *axis,
+            first: Box::new(persist_pane_layout_node(first, pane_index_by_id)?),
+            second: Box::new(persist_pane_layout_node(second, pane_index_by_id)?),
+        }),
+    }
+}
+
+fn restore_pane_layout(layout: &PersistedPaneLayout, pane_ids: &[String]) -> Option<PaneLayout> {
+    match layout {
+        PersistedPaneLayout::Leaf { index } => pane_ids
+            .get(*index)
+            .cloned()
+            .map(|pane_id| PaneLayout::Leaf { pane_id }),
+        PersistedPaneLayout::Split {
+            axis,
+            first,
+            second,
+        } => Some(PaneLayout::Split {
+            axis: *axis,
+            first: Box::new(restore_pane_layout(first, pane_ids)?),
+            second: Box::new(restore_pane_layout(second, pane_ids)?),
+        }),
+    }
+}
+
+fn list_directory_entries(path: &Path) -> Result<Vec<String>, String> {
+    let mut entries = fs::read_dir(path)
+        .map_err(|error| format!("failed to read directory: {error}"))?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| {
+            let file_type = entry.file_type().ok();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if file_type.map(|kind| kind.is_dir()).unwrap_or(false) {
+                format!("{name}/")
+            } else {
+                name
+            }
+        })
+        .collect::<Vec<_>>();
+
+    entries.sort_unstable();
+    if entries.is_empty() {
+        return Ok(vec!["(empty)".to_string()]);
+    }
+
+    if entries.len() > 24 {
+        let remaining = entries.len() - 24;
+        entries.truncate(24);
+        entries.push(format!("... {remaining} more"));
+    }
+
+    Ok(entries)
+}
+
+fn layout_for_pane_count(pane_count: u8) -> Result<LayoutPreset, String> {
+    if !(1..=16).contains(&pane_count) {
+        return Err("terminal count must be between 1 and 16".to_string());
+    }
+
+    let columns = ((pane_count as f32).sqrt().ceil() as u8).clamp(1, 4);
+    let rows = ((pane_count + columns - 1) / columns).clamp(1, 4);
+    Ok(LayoutPreset::new(
+        &format!("count-{pane_count}"),
+        format!("{pane_count} terminals"),
+        rows,
+        columns,
+        pane_count,
+    ))
+}
+
+fn layout_presets() -> Vec<LayoutPreset> {
+    [1, 2, 4, 8, 12, 16]
+        .into_iter()
+        .filter_map(|pane_count| layout_for_pane_count(pane_count).ok())
+        .collect()
+}
+
+fn pane_count_from_legacy_layout_id(layout_id: &str) -> Option<u8> {
+    match layout_id {
+        "2x2" => Some(4),
+        "3x4" => Some(12),
+        "4x4" => Some(16),
+        _ => None,
+    }
+}
+
+fn terminate_sessions(killers: Vec<Box<dyn ChildKiller + Send + Sync>>) {
+    for mut killer in killers {
+        let _ = killer.kill();
+    }
+}
+
+fn write_shell_command(
+    writer: &Arc<Mutex<Box<dyn Write + Send>>>,
+    command: &str,
+) -> Result<(), String> {
+    let mut writer = writer
+        .lock()
+        .map_err(|_| "failed to acquire pane writer".to_string())?;
+    writer
+        .write_all(command.as_bytes())
+        .map_err(|error| format!("failed to write to pane: {error}"))?;
+    writer
+        .flush()
+        .map_err(|error| format!("failed to flush pane writer: {error}"))?;
+    Ok(())
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
+        .manage(AppState::default())
+        .setup(|app| {
+            let shared = app.state::<AppState>().inner.clone();
+            let restore = (|| -> Result<(Vec<PaneJob>, String), String> {
+                let persistence_path = resolve_persistence_path(app.handle())?;
+                let mut runtime = shared
+                    .lock()
+                    .map_err(|_| "failed to acquire application state".to_string())?;
+
+                if let Err(error) = runtime.load_persisted_from_disk(persistence_path) {
+                    eprintln!("{error}");
+                }
+
+                let pane_jobs = runtime
+                    .active_workspace_id
+                    .clone()
+                    .and_then(|workspace_id| prepare_workspace_launch(&mut runtime, &workspace_id))
+                    .unwrap_or_default();
+
+                Ok((pane_jobs, runtime.shell.clone()))
+            })();
+
+            match restore {
+                Ok((pane_jobs, shell)) => {
+                    spawn_pane_jobs(shared, app.handle().clone(), shell, pane_jobs);
+                }
+                Err(error) => eprintln!("{error}"),
+            }
+
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            get_app_snapshot,
+            reset_to_launcher,
+            create_workspace,
+            rename_workspace,
+            complete_launcher_input,
+            set_theme,
+            switch_workspace,
+            close_workspace,
+            split_pane,
+            close_pane,
+            show_in_finder,
+            run_launcher_command,
+            write_to_pane,
+            resize_pane
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running CrewDock");
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        env, fs,
+        path::{Path, PathBuf},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::{
+        complete_launcher_input_for_base, default_launcher_path, execute_launcher_command,
+        extract_navigation_target, layout_for_pane_count, layout_presets, normalize_workspace_path,
+        prepare_workspace_launch, resolve_navigation_path, RuntimeState, ThemeId,
+    };
+
+    #[test]
+    fn launcher_starts_without_any_workspaces() {
+        let runtime = RuntimeState::seeded();
+        assert!(runtime.workspaces.is_empty());
+        assert!(runtime.active_workspace_id.is_none());
+        assert_eq!(runtime.launcher.presets.len(), 6);
+        assert_eq!(runtime.settings.theme_id, ThemeId::OneDark);
+    }
+
+    #[test]
+    fn preset_counts_match_grid_size() {
+        let presets = layout_presets();
+        assert_eq!(presets[0].pane_count, 1);
+        assert_eq!(presets[1].pane_count, 2);
+        assert_eq!(presets[2].pane_count, 4);
+        assert_eq!(presets[3].pane_count, 8);
+        assert_eq!(presets[4].pane_count, 12);
+        assert_eq!(presets[5].pane_count, 16);
+    }
+
+    #[test]
+    fn dynamic_layouts_balance_the_grid() {
+        let five = layout_for_pane_count(5).unwrap();
+        assert_eq!(five.rows, 2);
+        assert_eq!(five.columns, 3);
+
+        let eleven = layout_for_pane_count(11).unwrap();
+        assert_eq!(eleven.rows, 3);
+        assert_eq!(eleven.columns, 4);
+
+        assert!(layout_for_pane_count(0).is_err());
+        assert!(layout_for_pane_count(17).is_err());
+    }
+
+    #[test]
+    fn starting_a_workspace_marks_it_live_and_booting() {
+        let mut runtime = RuntimeState::seeded();
+        let cwd = normalize_workspace_path(".").expect("cwd should resolve");
+        let workspace = runtime
+            .build_workspace_record(&cwd, runtime.launcher.presets[0].pane_count, None)
+            .unwrap();
+        let workspace_id = workspace.id.clone();
+        runtime.workspaces.push(workspace);
+
+        let jobs = prepare_workspace_launch(&mut runtime, &workspace_id)
+            .expect("workspace should produce pane jobs");
+
+        assert_eq!(jobs.len(), 1);
+        assert!(runtime.workspaces[0].started);
+        assert!(runtime.workspaces[0]
+            .panes
+            .iter()
+            .all(|pane| pane.status == super::PaneStatus::Booting));
+    }
+
+    #[test]
+    fn same_folder_can_back_multiple_workspace_sessions() {
+        let mut runtime = RuntimeState::seeded();
+        let cwd = normalize_workspace_path(".").expect("cwd should resolve");
+
+        let first = runtime.build_workspace_record(&cwd, 2, None).unwrap();
+        let second = runtime.build_workspace_record(&cwd, 4, None).unwrap();
+
+        runtime.active_workspace_id = Some(second.id.clone());
+        runtime.workspaces.push(first.clone());
+        runtime.workspaces.push(second.clone());
+
+        let persisted = runtime.persisted_state();
+        assert_eq!(runtime.workspaces.len(), 2);
+        assert_eq!(runtime.workspaces[0].path, runtime.workspaces[1].path);
+        assert_eq!(persisted.active_workspace_index, Some(1));
+        assert_eq!(
+            persisted.workspaces[0].name.as_deref(),
+            Some(runtime.workspaces[0].name.as_str())
+        );
+        assert_eq!(
+            persisted.workspaces[1].name.as_deref(),
+            Some(runtime.workspaces[1].name.as_str())
+        );
+        assert_eq!(persisted.workspaces[0].pane_count, Some(2));
+        assert_eq!(persisted.workspaces[1].pane_count, Some(4));
+        assert_eq!(persisted.settings.theme_id.as_deref(), Some("one-dark"));
+    }
+
+    #[test]
+    fn theme_parser_accepts_only_supported_theme_ids() {
+        assert_eq!(ThemeId::parse("one-dark"), Some(ThemeId::OneDark));
+        assert_eq!(ThemeId::parse("tokyo-night"), Some(ThemeId::TokyoNight));
+        assert_eq!(
+            ThemeId::parse("gruvbox-material-dark"),
+            Some(ThemeId::GruvboxMaterialDark)
+        );
+        assert_eq!(ThemeId::parse("dracula"), Some(ThemeId::Dracula));
+        assert_eq!(
+            ThemeId::parse("catppuccin-mocha"),
+            Some(ThemeId::CatppuccinMocha)
+        );
+        assert_eq!(
+            ThemeId::parse("catppuccin-latte"),
+            Some(ThemeId::CatppuccinLatte)
+        );
+        assert_eq!(ThemeId::parse("nord"), None);
+    }
+
+    #[test]
+    fn persisted_theme_is_restored_from_disk() {
+        let fixture = TestWorkspace::new();
+        let persistence_path = fixture.root_dir().join("workspaces.json");
+        fs::write(
+            &persistence_path,
+            r#"{"settings":{"themeId":"tokyo-night"},"workspaces":[]}"#,
+        )
+        .expect("should write persisted state");
+
+        let mut runtime = RuntimeState::seeded();
+        runtime
+            .load_persisted_from_disk(persistence_path)
+            .expect("should load persisted state");
+
+        assert_eq!(runtime.settings.theme_id, ThemeId::TokyoNight);
+    }
+
+    #[test]
+    fn persisted_workspace_name_is_restored_from_disk() {
+        let fixture = TestWorkspace::new();
+        let persistence_path = fixture.root_dir().join("workspaces.json");
+        let workspace_path = fixture.project_dir().display().to_string();
+        fs::write(
+            &persistence_path,
+            format!(
+                r#"{{"workspaces":[{{"path":"{workspace_path}","name":"Sprint Board","paneCount":1}}]}}"#
+            ),
+        )
+        .expect("should write persisted state");
+
+        let mut runtime = RuntimeState::seeded();
+        runtime
+            .load_persisted_from_disk(persistence_path)
+            .expect("should load persisted state");
+
+        assert_eq!(runtime.workspaces.len(), 1);
+        assert_eq!(runtime.workspaces[0].name, "Sprint Board");
+    }
+
+    #[test]
+    fn navigation_input_supports_cd_and_plain_paths() {
+        assert_eq!(extract_navigation_target("cd ..").unwrap(), "..");
+        assert_eq!(extract_navigation_target("src/api").unwrap(), "src/api");
+        assert_eq!(extract_navigation_target("cd").unwrap(), "~");
+        assert!(extract_navigation_target("cd foo && pwd").is_err());
+    }
+
+    #[test]
+    fn resolve_navigation_path_handles_relative_and_home_targets() {
+        let fixture = TestWorkspace::new();
+        let original_home = env::var_os("HOME");
+
+        // Point HOME at a temp tree so ~ resolution is deterministic.
+        unsafe {
+            env::set_var("HOME", fixture.home_root());
+        }
+
+        let parent = resolve_navigation_path(fixture.project_dir(), "cd ..").unwrap();
+        assert_eq!(parent, canonical_path(fixture.root_dir()));
+
+        let nested = resolve_navigation_path(fixture.project_dir(), "backend/api").unwrap();
+        assert_eq!(nested, canonical_path(fixture.api_dir()));
+
+        let home = resolve_navigation_path(fixture.project_dir(), "~").unwrap();
+        assert_eq!(home, canonical_path(fixture.home_root()));
+
+        match original_home {
+            Some(value) => unsafe { env::set_var("HOME", value) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+    }
+
+    #[test]
+    fn default_launcher_path_prefers_existing_directory() {
+        let fixture = TestWorkspace::new();
+        let original_dir = env::current_dir().ok();
+
+        env::set_current_dir(fixture.project_dir()).unwrap();
+        let resolved = default_launcher_path();
+        assert_eq!(
+            resolved,
+            canonical_path(fixture.project_dir()).display().to_string()
+        );
+
+        if let Some(path) = original_dir {
+            env::set_current_dir(path).unwrap();
+        }
+    }
+
+    #[test]
+    fn launcher_commands_support_shell_like_flow() {
+        let fixture = TestWorkspace::new();
+        let project = canonical_path(fixture.project_dir());
+        let backend = canonical_path(fixture.project_dir().join("backend").as_path());
+        let api = canonical_path(fixture.api_dir());
+
+        let help = execute_launcher_command(&project, "help").unwrap();
+        assert!(help.output[0].contains("Commands:"));
+        assert_eq!(help.base_path, project.display().to_string());
+
+        let list = execute_launcher_command(&project, "ls backend").unwrap();
+        assert_eq!(list.base_path, project.display().to_string());
+        assert_eq!(list.output[0], backend.display().to_string());
+
+        let open = execute_launcher_command(&project, "open backend/api").unwrap();
+        assert_eq!(open.open_path, Some(api.display().to_string()));
+
+        let clear = execute_launcher_command(&project, "clear").unwrap();
+        assert!(clear.clear_output);
+        assert!(execute_launcher_command(&project, "pwd && ls").is_err());
+    }
+
+    #[test]
+    fn launcher_completion_supports_commands_and_paths() {
+        let fixture = TestWorkspace::new();
+        let project = canonical_path(fixture.project_dir());
+
+        let commands = complete_launcher_input_for_base(&project, "c").unwrap();
+        assert_eq!(commands.completed_input, "c");
+        assert_eq!(
+            commands.matches,
+            vec!["cd".to_string(), "clear".to_string()]
+        );
+
+        let command = complete_launcher_input_for_base(&project, "cd").unwrap();
+        assert_eq!(command.completed_input, "cd ");
+
+        let path = complete_launcher_input_for_base(&project, "cd back").unwrap();
+        assert_eq!(path.completed_input, "cd backend/");
+        assert_eq!(path.matches, vec!["backend/".to_string()]);
+    }
+
+    struct TestWorkspace {
+        root: PathBuf,
+        project: PathBuf,
+        api: PathBuf,
+        home: PathBuf,
+    }
+
+    impl TestWorkspace {
+        fn new() -> Self {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be monotonic")
+                .as_nanos();
+            let root = env::temp_dir().join(format!("crewdock-nav-{unique}"));
+            let project = root.join("project");
+            let api = project.join("backend").join("api");
+            let home = root.join("home");
+
+            fs::create_dir_all(&api).unwrap();
+            fs::create_dir_all(&home).unwrap();
+
+            Self {
+                root,
+                project,
+                api,
+                home,
+            }
+        }
+
+        fn root_dir(&self) -> &Path {
+            &self.root
+        }
+
+        fn project_dir(&self) -> &Path {
+            &self.project
+        }
+
+        fn api_dir(&self) -> &Path {
+            &self.api
+        }
+
+        fn home_root(&self) -> &Path {
+            &self.home
+        }
+    }
+
+    impl Drop for TestWorkspace {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    fn canonical_path(path: &Path) -> PathBuf {
+        fs::canonicalize(path).expect("fixture path should be canonicalizable")
+    }
+}

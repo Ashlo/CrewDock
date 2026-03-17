@@ -1,0 +1,18 @@
+{
+  "name": "crewdock",
+  "version": "0.1.0",
+  "private": true,
+  "description": "CrewDock MVP architecture spike",
+  "type": "module",
+  "scripts": {
+    "postinstall": "npm run sync:xterm",
+    "sync:xterm": "mkdir -p src-web/vendor && cp node_modules/@xterm/xterm/lib/xterm.mjs src-web/vendor/xterm.mjs && cp node_modules/@xterm/xterm/css/xterm.css src-web/vendor/xterm.css && cp node_modules/@xterm/addon-fit/lib/addon-fit.mjs src-web/vendor/addon-fit.mjs",
+    "dev": "cargo run --manifest-path src-tauri/Cargo.toml",
+    "check": "cargo check --manifest-path src-tauri/Cargo.toml",
+    "fmt": "cargo fmt --manifest-path src-tauri/Cargo.toml --all"
+  },
+  "dependencies": {
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0"
+  }
+}
