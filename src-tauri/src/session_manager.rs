@@ -11,6 +11,7 @@ use super::{
     events::{
         emit_runtime_event, emit_snapshot, emit_terminal_data, RuntimeEvent, TerminalDataPayload,
     },
+    persistence::{self, ActivityEventKind},
     PaneStatus, RuntimeState,
 };
 
@@ -168,6 +169,14 @@ fn spawn_terminal_session(
                 killer,
             },
         );
+        persistence::record_runtime_activity(
+            &mut runtime,
+            &workspace_id,
+            ActivityEventKind::PaneReady,
+            &label,
+            None,
+        );
+        runtime.persist_to_disk()?;
         runtime.build_snapshot()
     };
 
@@ -263,6 +272,7 @@ fn mark_pane_closed(
             .map_err(|_| "failed to acquire application state".to_string())?;
 
         let mut event = None;
+        let mut activity = None;
         runtime.sessions.remove(pane_id);
         if let Some(workspace) = runtime
             .workspaces
@@ -271,12 +281,24 @@ fn mark_pane_closed(
         {
             if let Some(pane) = workspace.panes.iter_mut().find(|pane| pane.id == pane_id) {
                 pane.status = PaneStatus::Closed;
+                activity = Some((workspace.id.clone(), pane.label.clone()));
                 event = Some(RuntimeEvent::PaneClosed {
                     workspace_id: workspace.id.clone(),
                     pane_id: pane_id.to_string(),
                     label: pane.label.clone(),
                 });
             }
+        }
+
+        if let Some((workspace_id, label)) = activity {
+            persistence::record_runtime_activity(
+                &mut runtime,
+                &workspace_id,
+                ActivityEventKind::PaneClosed,
+                &label,
+                None,
+            );
+            runtime.persist_to_disk()?;
         }
 
         (runtime.build_snapshot(), event)
@@ -301,6 +323,7 @@ fn fail_pane(
             .map_err(|_| "failed to acquire application state".to_string())?;
 
         let mut event = None;
+        let mut activity = None;
         runtime.sessions.remove(pane_id);
         if let Some(workspace) = runtime
             .workspaces
@@ -309,6 +332,7 @@ fn fail_pane(
         {
             if let Some(pane) = workspace.panes.iter_mut().find(|pane| pane.id == pane_id) {
                 pane.status = PaneStatus::Failed;
+                activity = Some((workspace.id.clone(), pane.label.clone(), error.clone()));
                 event = Some(RuntimeEvent::PaneFailed {
                     workspace_id: workspace.id.clone(),
                     pane_id: pane_id.to_string(),
@@ -316,6 +340,17 @@ fn fail_pane(
                     error: error.clone(),
                 });
             }
+        }
+
+        if let Some((workspace_id, label, failure)) = activity {
+            persistence::record_runtime_activity(
+                &mut runtime,
+                &workspace_id,
+                ActivityEventKind::PaneFailed,
+                &label,
+                Some(failure.as_str()),
+            );
+            runtime.persist_to_disk()?;
         }
 
         (runtime.build_snapshot(), event)

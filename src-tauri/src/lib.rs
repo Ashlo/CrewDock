@@ -1,5 +1,8 @@
 mod events;
+mod persistence;
 mod session_manager;
+mod source_control;
+mod workspace_manager;
 
 use std::{
     collections::HashMap,
@@ -14,13 +17,21 @@ use portable_pty::{ChildKiller, PtySize};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager, State};
 
-const PERSISTENCE_FILE: &str = "workspaces.json";
 const MAX_LAUNCHER_COMPLETION_MATCHES: usize = 24;
 const LAUNCHER_COMMANDS: [&str; 6] = ["help", "pwd", "ls", "cd", "open", "clear"];
 const PATH_AWARE_LAUNCHER_COMMANDS: [&str; 3] = ["ls", "cd", "open"];
 
 use events::emit_snapshot;
+use persistence::resolve_persistence_path;
 use session_manager::{prepare_workspace_launch, spawn_pane_jobs, LiveSession, PaneJob};
+use source_control::{
+    discard_paths, git_task_write_stdin as write_git_task_input,
+    load_workspace_git_commit_detail as build_workspace_git_commit_detail,
+    load_workspace_git_diff as build_workspace_git_diff,
+    load_workspace_source_control as build_workspace_source_control, stage_paths, start_git_task,
+    unstage_paths, GitCommitDetailSnapshot, GitDiffMode, GitDiffSnapshot, GitTaskRecord,
+    WorkspaceSourceControlSnapshot,
+};
 
 #[derive(Clone)]
 struct AppState {
@@ -42,7 +53,9 @@ struct RuntimeState {
     settings: SettingsRecord,
     workspaces: Vec<WorkspaceRecord>,
     active_workspace_id: Option<String>,
+    activity_history: Vec<persistence::ActivityEventRecord>,
     sessions: HashMap<String, LiveSession>,
+    git_tasks: HashMap<String, GitTaskRecord>,
     persistence_path: Option<PathBuf>,
 }
 
@@ -83,7 +96,9 @@ impl RuntimeState {
             settings: SettingsRecord::default(),
             workspaces: Vec::new(),
             active_workspace_id: None,
+            activity_history: Vec::new(),
             sessions: HashMap::new(),
+            git_tasks: HashMap::new(),
             persistence_path: None,
         }
     }
@@ -94,14 +109,15 @@ impl RuntimeState {
     }
 
     fn build_snapshot(&self) -> AppSnapshot {
-        let active_workspace = self
+        let active_workspace_record = self
             .active_workspace_id
             .as_ref()
             .and_then(|workspace_id| {
                 self.workspaces
                     .iter()
                     .find(|workspace| workspace.id == *workspace_id)
-            })
+            });
+        let active_workspace = active_workspace_record
             .map(|workspace| WorkspaceSnapshot {
                 id: workspace.id.clone(),
                 name: workspace.name.clone(),
@@ -111,12 +127,26 @@ impl RuntimeState {
                 pane_layout: workspace.pane_layout.clone(),
                 git_detail: workspace.git.clone(),
             });
+        let active_workspace_name = active_workspace_record.map(|workspace| workspace.name.clone());
+        let window_title = active_workspace_name
+            .as_ref()
+            .map(|name| format!("{name} · CrewDock"))
+            .unwrap_or_else(|| "CrewDock".to_string());
 
         AppSnapshot {
+            window: AppWindowSnapshot {
+                id: "window-main".to_string(),
+                label: "Primary".to_string(),
+                title: window_title,
+                workspace_count: self.workspaces.len(),
+                active_workspace_id: self.active_workspace_id.clone(),
+                active_workspace_name,
+            },
             launcher: self.launcher.clone(),
             settings: SettingsSnapshot {
                 theme_id: self.settings.theme_id,
             },
+            activity: persistence::build_activity_snapshot(self),
             workspaces: self
                 .workspaces
                 .iter()
@@ -140,189 +170,31 @@ impl RuntimeState {
         pane_count: u8,
         persisted_layout: Option<&PersistedPaneLayout>,
     ) -> Result<WorkspaceRecord, String> {
-        let workspace_id = self.next_id("workspace");
-        let path_string = path.display().to_string();
-        let name = workspace_name(path);
-        let layout = layout_for_pane_count(pane_count)?;
-        let panes = (0..layout.pane_count)
-            .map(|index| PaneRecord {
-                id: self.next_id("pane"),
-                label: format!("Shell {:02}", index + 1),
-                status: PaneStatus::Closed,
-            })
-            .collect::<Vec<_>>();
-        let pane_ids = panes.iter().map(|pane| pane.id.clone()).collect::<Vec<_>>();
-        let pane_layout = persisted_layout
-            .and_then(|layout| restore_pane_layout(layout, &pane_ids))
-            .unwrap_or_else(|| {
-                build_balanced_pane_layout(&pane_ids, layout.columns >= layout.rows)
-            });
-
-        Ok(WorkspaceRecord {
-            id: workspace_id,
-            name,
-            path: path_string,
-            layout,
-            panes,
-            pane_layout,
-            started: false,
-            git: None,
-        })
+        workspace_manager::build_workspace_record(self, path, pane_count, persisted_layout)
     }
 
     fn refresh_workspace_git(&mut self, workspace_id: &str) -> Result<(), String> {
-        let workspace_index = self
-            .find_workspace_index_by_id(workspace_id)
-            .ok_or_else(|| "workspace not found".to_string())?;
-        let workspace_path = PathBuf::from(self.workspaces[workspace_index].path.clone());
-        self.workspaces[workspace_index].git = Some(collect_git_detail(&workspace_path));
-        Ok(())
-    }
-
-    fn find_workspace_index_by_id(&self, workspace_id: &str) -> Option<usize> {
-        self.workspaces
-            .iter()
-            .position(|workspace| workspace.id == workspace_id)
+        workspace_manager::refresh_workspace_git(self, workspace_id)
     }
 
     fn active_workspace_path(&self) -> Option<String> {
-        let active_id = self.active_workspace_id.as_ref()?;
-        self.workspaces
-            .iter()
-            .find(|workspace| workspace.id == *active_id)
-            .map(|workspace| workspace.path.clone())
+        workspace_manager::active_workspace_path(self)
     }
 
     fn active_workspace_index(&self) -> Option<usize> {
-        let active_id = self.active_workspace_id.as_ref()?;
-        self.workspaces
-            .iter()
-            .position(|workspace| workspace.id == *active_id)
+        workspace_manager::active_workspace_index(self)
     }
 
-    fn persisted_state(&self) -> PersistedWorkspaceState {
-        PersistedWorkspaceState {
-            settings: PersistedSettings {
-                theme_id: Some(self.settings.theme_id.as_str().to_string()),
-            },
-            workspaces: self
-                .workspaces
-                .iter()
-                .map(|workspace| PersistedWorkspace {
-                    path: workspace.path.clone(),
-                    name: Some(workspace.name.clone()),
-                    pane_count: Some(workspace.layout.pane_count),
-                    layout_id: None,
-                    pane_layout: persist_pane_layout(workspace),
-                })
-                .collect(),
-            active_workspace_index: self.active_workspace_index(),
-            active_workspace_path: self.active_workspace_path(),
-        }
+    fn persisted_state(&self) -> persistence::PersistedWorkspaceState {
+        persistence::build_persisted_state(self)
     }
 
     fn persist_to_disk(&self) -> Result<(), String> {
-        let Some(path) = self.persistence_path.as_ref() else {
-            return Ok(());
-        };
-
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|error| format!("failed to create app data directory: {error}"))?;
-        }
-
-        let payload = serde_json::to_vec_pretty(&self.persisted_state())
-            .map_err(|error| format!("failed to serialize workspace state: {error}"))?;
-        fs::write(path, payload)
-            .map_err(|error| format!("failed to persist workspace state: {error}"))
+        persistence::persist_to_disk(self)
     }
 
     fn load_persisted_from_disk(&mut self, path: PathBuf) -> Result<(), String> {
-        self.persistence_path = Some(path.clone());
-
-        let contents = match fs::read_to_string(&path) {
-            Ok(contents) => contents,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(error) => {
-                return Err(format!("failed to read persisted workspaces: {error}"));
-            }
-        };
-
-        let persisted: PersistedWorkspaceState = serde_json::from_str(&contents)
-            .map_err(|error| format!("failed to parse persisted workspaces: {error}"))?;
-
-        self.workspaces.clear();
-        self.active_workspace_id = None;
-        self.settings = SettingsRecord::default();
-        self.sessions.clear();
-
-        if let Some(theme_id) = persisted
-            .settings
-            .theme_id
-            .as_deref()
-            .and_then(ThemeId::parse)
-        {
-            self.settings.theme_id = theme_id;
-        }
-
-        let active_index = persisted.active_workspace_index;
-        let active_path = persisted.active_workspace_path;
-        for (index, persisted_workspace) in persisted.workspaces.into_iter().enumerate() {
-            let Ok(path) = normalize_workspace_path(&persisted_workspace.path) else {
-                continue;
-            };
-
-            let Some(pane_count) = persisted_workspace.pane_count.or_else(|| {
-                persisted_workspace
-                    .layout_id
-                    .as_deref()
-                    .and_then(pane_count_from_legacy_layout_id)
-            }) else {
-                continue;
-            };
-
-            let workspace = match self.build_workspace_record(
-                &path,
-                pane_count,
-                persisted_workspace.pane_layout.as_ref(),
-            ) {
-                Ok(mut workspace) => {
-                    if let Some(name) = persisted_workspace
-                        .name
-                        .as_deref()
-                        .and_then(|raw| normalize_workspace_name(raw).ok())
-                    {
-                        workspace.name = name;
-                    }
-                    workspace
-                }
-                Err(_) => continue,
-            };
-            if active_index == Some(index)
-                || (active_index.is_none()
-                    && active_path.as_deref() == Some(workspace.path.as_str()))
-            {
-                self.active_workspace_id = Some(workspace.id.clone());
-            }
-            self.workspaces.push(workspace);
-        }
-
-        if self.active_workspace_id.is_none() {
-            self.active_workspace_id = self
-                .workspaces
-                .first()
-                .map(|workspace| workspace.id.clone());
-        }
-
-        if let Some(path) = self.active_workspace_path().or_else(|| {
-            self.workspaces
-                .first()
-                .map(|workspace| workspace.path.clone())
-        }) {
-            self.launcher.base_path = path;
-        }
-
-        Ok(())
+        persistence::load_persisted_from_disk(self, path)
     }
 
     fn drain_all_killers(&mut self) -> Vec<Box<dyn ChildKiller + Send + Sync>> {
@@ -358,11 +230,24 @@ impl RuntimeState {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AppSnapshot {
+    window: AppWindowSnapshot,
     launcher: LauncherSnapshot,
     settings: SettingsSnapshot,
+    activity: persistence::ActivitySnapshot,
     workspaces: Vec<WorkspaceTabSnapshot>,
     active_workspace_id: Option<String>,
     active_workspace: Option<WorkspaceSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppWindowSnapshot {
+    id: String,
+    label: String,
+    title: String,
+    workspace_count: usize,
+    active_workspace_id: Option<String>,
+    active_workspace_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -596,40 +481,6 @@ impl ThemeId {
     }
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PersistedWorkspaceState {
-    #[serde(default)]
-    settings: PersistedSettings,
-    #[serde(default)]
-    workspaces: Vec<PersistedWorkspace>,
-    #[serde(default)]
-    active_workspace_index: Option<usize>,
-    #[serde(default)]
-    active_workspace_path: Option<String>,
-}
-
-#[derive(Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PersistedSettings {
-    #[serde(default)]
-    theme_id: Option<String>,
-}
-
-#[derive(Debug, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PersistedWorkspace {
-    path: String,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    pane_count: Option<u8>,
-    #[serde(default)]
-    layout_id: Option<String>,
-    #[serde(default)]
-    pane_layout: Option<PersistedPaneLayout>,
-}
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 enum PersistedPaneLayout {
@@ -687,17 +538,11 @@ fn create_workspace(
             .lock()
             .map_err(|_| "failed to acquire application state".to_string())?;
 
-        layout_for_pane_count(pane_count)?;
-
-        let workspace =
-            runtime.build_workspace_record(Path::new(&workspace_path), pane_count, None)?;
-        let workspace_id = workspace.id.clone();
-        runtime.workspaces.push(workspace);
-
-        runtime.active_workspace_id = Some(workspace_id.clone());
-        runtime.launcher.base_path = workspace_path.clone();
-        let pane_jobs = prepare_workspace_launch(&mut runtime, &workspace_id).unwrap_or_default();
-        runtime.persist_to_disk()?;
+        let pane_jobs = workspace_manager::create_workspace_in_runtime(
+            &mut runtime,
+            pane_count,
+            Path::new(&workspace_path),
+        )?;
 
         (runtime.build_snapshot(), runtime.shell.clone(), pane_jobs)
     };
@@ -720,12 +565,7 @@ fn rename_workspace(
             .lock()
             .map_err(|_| "failed to acquire application state".to_string())?;
 
-        let workspace_index = runtime
-            .find_workspace_index_by_id(&workspace_id)
-            .ok_or_else(|| "workspace not found".to_string())?;
-        let next_name = normalize_workspace_name(&name)?;
-        runtime.workspaces[workspace_index].name = next_name;
-        runtime.persist_to_disk()?;
+        workspace_manager::rename_workspace_in_runtime(&mut runtime, &workspace_id, &name)?;
         runtime.build_snapshot()
     };
 
@@ -745,16 +585,8 @@ fn switch_workspace(
             .lock()
             .map_err(|_| "failed to acquire application state".to_string())?;
 
-        if runtime.find_workspace_index_by_id(&workspace_id).is_none() {
-            return Err("workspace not found".to_string());
-        }
-
-        runtime.active_workspace_id = Some(workspace_id.clone());
-        if let Some(path) = runtime.active_workspace_path() {
-            runtime.launcher.base_path = path;
-        }
-        let pane_jobs = prepare_workspace_launch(&mut runtime, &workspace_id).unwrap_or_default();
-        runtime.persist_to_disk()?;
+        let pane_jobs =
+            workspace_manager::switch_workspace_in_runtime(&mut runtime, &workspace_id)?;
 
         (runtime.build_snapshot(), runtime.shell.clone(), pane_jobs)
     };
@@ -776,47 +608,8 @@ fn close_workspace(
             .lock()
             .map_err(|_| "failed to acquire application state".to_string())?;
 
-        let Some(index) = runtime.find_workspace_index_by_id(&workspace_id) else {
-            return Err("workspace not found".to_string());
-        };
-
-        let removed_was_active =
-            runtime.active_workspace_id.as_deref() == Some(workspace_id.as_str());
-        let fallback_active_id = if removed_was_active {
-            if index > 0 {
-                runtime
-                    .workspaces
-                    .get(index - 1)
-                    .map(|workspace| workspace.id.clone())
-            } else {
-                runtime
-                    .workspaces
-                    .get(index + 1)
-                    .map(|workspace| workspace.id.clone())
-            }
-        } else {
-            runtime.active_workspace_id.clone()
-        };
-
-        let killers = runtime.drain_workspace_killers(&workspace_id);
-        runtime.workspaces.remove(index);
-        runtime.active_workspace_id = fallback_active_id.filter(|active_id| {
-            runtime
-                .workspaces
-                .iter()
-                .any(|workspace| workspace.id == *active_id)
-        });
-        if let Some(path) = runtime.active_workspace_path() {
-            runtime.launcher.base_path = path;
-        }
-
-        let pane_jobs = runtime
-            .active_workspace_id
-            .clone()
-            .and_then(|active_id| prepare_workspace_launch(&mut runtime, &active_id))
-            .unwrap_or_default();
-
-        runtime.persist_to_disk()?;
+        let (pane_jobs, killers) =
+            workspace_manager::close_workspace_in_runtime(&mut runtime, &workspace_id)?;
 
         (
             runtime.build_snapshot(),
@@ -846,78 +639,8 @@ fn split_pane(
             .lock()
             .map_err(|_| "failed to acquire application state".to_string())?;
 
-        let Some(workspace_index) = runtime
-            .workspaces
-            .iter()
-            .position(|workspace| workspace.panes.iter().any(|pane| pane.id == pane_id))
-        else {
-            return Err("pane not found".to_string());
-        };
-
-        let new_pane_id = runtime.next_id("pane");
-        let should_spawn = runtime.workspaces[workspace_index].started;
-        let pane_total = runtime.workspaces[workspace_index].panes.len() + 1;
-        if pane_total > 16 {
-            return Err("workspace cannot exceed 16 panes".to_string());
-        }
-
-        let layout = layout_for_pane_count(pane_total as u8)?;
-        let split_axis = if matches!(direction.as_str(), "left" | "right") {
-            SplitAxis::Horizontal
-        } else {
-            SplitAxis::Vertical
-        };
-        let new_pane_first = matches!(direction.as_str(), "left" | "up");
-        let new_pane = PaneRecord {
-            id: new_pane_id.clone(),
-            label: String::new(),
-            status: if should_spawn {
-                PaneStatus::Booting
-            } else {
-                PaneStatus::Closed
-            },
-        };
-
-        let workspace_id = runtime.workspaces[workspace_index].id.clone();
-        let cwd = runtime.workspaces[workspace_index].path.clone();
-        let insertion_index = runtime.workspaces[workspace_index]
-            .panes
-            .iter()
-            .position(|pane| pane.id == pane_id)
-            .map(|index| if new_pane_first { index } else { index + 1 })
-            .ok_or_else(|| "pane not found".to_string())?;
-        runtime.workspaces[workspace_index]
-            .panes
-            .insert(insertion_index, new_pane);
-        relabel_panes(&mut runtime.workspaces[workspace_index].panes);
-        if !split_pane_layout(
-            &mut runtime.workspaces[workspace_index].pane_layout,
-            &pane_id,
-            split_axis,
-            new_pane_first,
-            &new_pane_id,
-        ) {
-            return Err("pane not found".to_string());
-        }
-        runtime.workspaces[workspace_index].layout = layout.clone();
-        runtime.persist_to_disk()?;
-
-        let pane_jobs = if should_spawn {
-            vec![PaneJob {
-                workspace_id,
-                pane_id: new_pane_id.clone(),
-                label: runtime.workspaces[workspace_index]
-                    .panes
-                    .iter()
-                    .find(|pane| pane.id == new_pane_id)
-                    .map(|pane| pane.label.clone())
-                    .unwrap_or_else(|| format!("Shell {:02}", pane_total)),
-                layout_label: layout.label.clone(),
-                cwd,
-            }]
-        } else {
-            Vec::new()
-        };
+        let pane_jobs =
+            workspace_manager::split_pane_in_runtime(&mut runtime, &pane_id, &direction)?;
 
         (runtime.build_snapshot(), runtime.shell.clone(), pane_jobs)
     };
@@ -939,41 +662,7 @@ fn close_pane(
             .lock()
             .map_err(|_| "failed to acquire application state".to_string())?;
 
-        let Some(workspace_index) = runtime
-            .workspaces
-            .iter()
-            .position(|workspace| workspace.panes.iter().any(|pane| pane.id == pane_id))
-        else {
-            return Err("pane not found".to_string());
-        };
-
-        if runtime.workspaces[workspace_index].panes.len() <= 1 {
-            return Err("workspace must keep at least one pane".to_string());
-        }
-
-        let pane_index = runtime.workspaces[workspace_index]
-            .panes
-            .iter()
-            .position(|pane| pane.id == pane_id)
-            .ok_or_else(|| "pane not found".to_string())?;
-
-        runtime.workspaces[workspace_index].panes.remove(pane_index);
-        runtime.workspaces[workspace_index].pane_layout = remove_pane_from_layout(
-            runtime.workspaces[workspace_index].pane_layout.clone(),
-            &pane_id,
-        )
-        .ok_or_else(|| "workspace must keep at least one pane".to_string())?;
-        relabel_panes(&mut runtime.workspaces[workspace_index].panes);
-        runtime.workspaces[workspace_index].layout =
-            layout_for_pane_count(runtime.workspaces[workspace_index].panes.len() as u8)?;
-
-        let killers = runtime
-            .sessions
-            .remove(&pane_id)
-            .map(|session| vec![session.killer])
-            .unwrap_or_default();
-
-        runtime.persist_to_disk()?;
+        let killers = workspace_manager::close_pane_in_runtime(&mut runtime, &pane_id)?;
         (runtime.build_snapshot(), killers)
     };
 
@@ -1068,6 +757,337 @@ fn refresh_workspace_git_status(
 }
 
 #[tauri::command]
+fn load_workspace_source_control(
+    workspace_id: String,
+    graph_cursor: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<WorkspaceSourceControlSnapshot, String> {
+    let runtime = state
+        .inner
+        .lock()
+        .map_err(|_| "failed to acquire application state".to_string())?;
+    build_workspace_source_control(&runtime, &workspace_id, graph_cursor)
+}
+
+#[tauri::command]
+fn load_workspace_git_diff(
+    workspace_id: String,
+    path: String,
+    mode: String,
+    state: State<'_, AppState>,
+) -> Result<GitDiffSnapshot, String> {
+    let mode = match mode.as_str() {
+        "staged" => GitDiffMode::Staged,
+        _ => GitDiffMode::WorkingTree,
+    };
+
+    let runtime = state
+        .inner
+        .lock()
+        .map_err(|_| "failed to acquire application state".to_string())?;
+    build_workspace_git_diff(&runtime, &workspace_id, &path, mode)
+}
+
+#[tauri::command]
+fn load_workspace_git_commit_detail(
+    workspace_id: String,
+    oid: String,
+    state: State<'_, AppState>,
+) -> Result<GitCommitDetailSnapshot, String> {
+    let runtime = state
+        .inner
+        .lock()
+        .map_err(|_| "failed to acquire application state".to_string())?;
+    build_workspace_git_commit_detail(&runtime, &workspace_id, &oid)
+}
+
+#[tauri::command]
+fn git_stage_paths(
+    workspace_id: String,
+    paths: Vec<String>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<WorkspaceSourceControlSnapshot, String> {
+    let (snapshot, source_control) = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+        stage_paths(&mut runtime, &workspace_id, &paths)?;
+        let source_control = build_workspace_source_control(&runtime, &workspace_id, None)?;
+        (runtime.build_snapshot(), source_control)
+    };
+
+    emit_snapshot(&app, &snapshot)?;
+    Ok(source_control)
+}
+
+#[tauri::command]
+fn git_unstage_paths(
+    workspace_id: String,
+    paths: Vec<String>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<WorkspaceSourceControlSnapshot, String> {
+    let (snapshot, source_control) = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+        unstage_paths(&mut runtime, &workspace_id, &paths)?;
+        let source_control = build_workspace_source_control(&runtime, &workspace_id, None)?;
+        (runtime.build_snapshot(), source_control)
+    };
+
+    emit_snapshot(&app, &snapshot)?;
+    Ok(source_control)
+}
+
+#[tauri::command]
+fn git_discard_paths(
+    workspace_id: String,
+    paths: Vec<String>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<WorkspaceSourceControlSnapshot, String> {
+    let (snapshot, source_control) = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+        discard_paths(&mut runtime, &workspace_id, &paths)?;
+        let source_control = build_workspace_source_control(&runtime, &workspace_id, None)?;
+        (runtime.build_snapshot(), source_control)
+    };
+
+    emit_snapshot(&app, &snapshot)?;
+    Ok(source_control)
+}
+
+#[tauri::command]
+fn git_commit(
+    workspace_id: String,
+    message: String,
+    commit_all: Option<bool>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<WorkspaceSourceControlSnapshot, String> {
+    let trimmed = message.trim();
+    if trimmed.is_empty() {
+        return Err("commit message cannot be empty".to_string());
+    }
+
+    if commit_all.unwrap_or(false) {
+        let snapshot = {
+            let mut runtime = state
+                .inner
+                .lock()
+                .map_err(|_| "failed to acquire application state".to_string())?;
+            source_control::stage_all_changes(&mut runtime, &workspace_id)?;
+            runtime.build_snapshot()
+        };
+        emit_snapshot(&app, &snapshot)?;
+    }
+
+    start_git_task(
+        state.inner.clone(),
+        app,
+        workspace_id,
+        "Commit".to_string(),
+        vec![
+            "commit".to_string(),
+            "-m".to_string(),
+            message,
+        ],
+    )
+}
+
+#[tauri::command]
+fn git_checkout_branch(
+    workspace_id: String,
+    branch_name: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<WorkspaceSourceControlSnapshot, String> {
+    start_git_task(
+        state.inner.clone(),
+        app,
+        workspace_id,
+        format!("Checkout {}", branch_name.trim()),
+        vec!["checkout".to_string(), branch_name],
+    )
+}
+
+#[tauri::command]
+fn git_create_branch(
+    workspace_id: String,
+    branch_name: String,
+    start_point: Option<String>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<WorkspaceSourceControlSnapshot, String> {
+    let mut args = vec![
+        "checkout".to_string(),
+        "-b".to_string(),
+        branch_name.clone(),
+    ];
+    if let Some(start_point) = start_point.filter(|value| !value.trim().is_empty()) {
+        args.push(start_point);
+    }
+
+    start_git_task(
+        state.inner.clone(),
+        app,
+        workspace_id,
+        format!("Create branch {}", branch_name.trim()),
+        args,
+    )
+}
+
+#[tauri::command]
+fn git_rename_branch(
+    workspace_id: String,
+    current_name: String,
+    next_name: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<WorkspaceSourceControlSnapshot, String> {
+    start_git_task(
+        state.inner.clone(),
+        app,
+        workspace_id,
+        format!("Rename branch {}", current_name.trim()),
+        vec![
+            "branch".to_string(),
+            "-m".to_string(),
+            current_name,
+            next_name,
+        ],
+    )
+}
+
+#[tauri::command]
+fn git_delete_branch(
+    workspace_id: String,
+    branch_name: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<WorkspaceSourceControlSnapshot, String> {
+    start_git_task(
+        state.inner.clone(),
+        app,
+        workspace_id,
+        format!("Delete branch {}", branch_name.trim()),
+        vec!["branch".to_string(), "-d".to_string(), branch_name],
+    )
+}
+
+#[tauri::command]
+fn git_fetch(
+    workspace_id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<WorkspaceSourceControlSnapshot, String> {
+    start_git_task(
+        state.inner.clone(),
+        app,
+        workspace_id,
+        "Fetch".to_string(),
+        vec![
+            "fetch".to_string(),
+            "--all".to_string(),
+            "--prune".to_string(),
+        ],
+    )
+}
+
+#[tauri::command]
+fn git_pull(
+    workspace_id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<WorkspaceSourceControlSnapshot, String> {
+    start_git_task(
+        state.inner.clone(),
+        app,
+        workspace_id,
+        "Pull".to_string(),
+        vec!["pull".to_string()],
+    )
+}
+
+#[tauri::command]
+fn git_push(
+    workspace_id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<WorkspaceSourceControlSnapshot, String> {
+    start_git_task(
+        state.inner.clone(),
+        app,
+        workspace_id,
+        "Push".to_string(),
+        vec!["push".to_string()],
+    )
+}
+
+#[tauri::command]
+fn git_publish_branch(
+    workspace_id: String,
+    branch_name: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<WorkspaceSourceControlSnapshot, String> {
+    let remote = resolve_default_git_remote(&state.inner, &workspace_id)?;
+    start_git_task(
+        state.inner.clone(),
+        app,
+        workspace_id,
+        format!("Publish {}", branch_name.trim()),
+        vec![
+            "push".to_string(),
+            "--set-upstream".to_string(),
+            remote,
+            branch_name,
+        ],
+    )
+}
+
+#[tauri::command]
+fn git_set_upstream(
+    workspace_id: String,
+    branch_name: String,
+    upstream_name: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<WorkspaceSourceControlSnapshot, String> {
+    start_git_task(
+        state.inner.clone(),
+        app,
+        workspace_id,
+        format!("Set upstream for {}", branch_name.trim()),
+        vec![
+            "branch".to_string(),
+            format!("--set-upstream-to={upstream_name}"),
+            branch_name,
+        ],
+    )
+}
+
+#[tauri::command]
+fn git_task_write_stdin(
+    workspace_id: String,
+    data: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let runtime = state
+        .inner
+        .lock()
+        .map_err(|_| "failed to acquire application state".to_string())?;
+    write_git_task_input(&runtime, &workspace_id, &data)
+}
+
+#[tauri::command]
 fn write_to_pane(pane_id: String, data: String, state: State<'_, AppState>) -> Result<(), String> {
     let writer = {
         let runtime = state
@@ -1123,14 +1143,6 @@ fn resize_pane(
     Ok(())
 }
 
-fn resolve_persistence_path(app: &AppHandle) -> Result<PathBuf, String> {
-    let base_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("failed to resolve app data directory: {error}"))?;
-    Ok(base_dir.join(PERSISTENCE_FILE))
-}
-
 fn default_launcher_path() -> String {
     env::current_dir()
         .ok()
@@ -1158,6 +1170,38 @@ fn normalize_workspace_path(raw: &str) -> Result<PathBuf, String> {
     }
 
     Ok(resolved)
+}
+
+fn resolve_default_git_remote(
+    shared: &Arc<Mutex<RuntimeState>>,
+    workspace_id: &str,
+) -> Result<String, String> {
+    let runtime = shared
+        .lock()
+        .map_err(|_| "failed to acquire application state".to_string())?;
+    let workspace = runtime
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.id == workspace_id)
+        .ok_or_else(|| "workspace not found".to_string())?;
+    let output = run_git_command("git", Path::new(&workspace.path), &["remote"])
+        .map_err(|error| error.message)?;
+    let remotes = output
+        .lines()
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+
+    if remotes.is_empty() {
+        return Err("no git remote configured for this repository".to_string());
+    }
+
+    Ok(remotes
+        .iter()
+        .find(|remote| remote.as_str() == "origin")
+        .cloned()
+        .unwrap_or_else(|| remotes[0].clone()))
 }
 
 fn execute_launcher_command(
@@ -2333,6 +2377,23 @@ pub fn run() {
             complete_launcher_input,
             set_theme,
             refresh_workspace_git_status,
+            load_workspace_source_control,
+            load_workspace_git_diff,
+            load_workspace_git_commit_detail,
+            git_stage_paths,
+            git_unstage_paths,
+            git_discard_paths,
+            git_commit,
+            git_checkout_branch,
+            git_create_branch,
+            git_rename_branch,
+            git_delete_branch,
+            git_fetch,
+            git_pull,
+            git_push,
+            git_publish_branch,
+            git_set_upstream,
+            git_task_write_stdin,
             switch_workspace,
             close_workspace,
             split_pane,
@@ -2359,8 +2420,8 @@ mod tests {
         collect_git_detail, collect_git_detail_with_binary, complete_launcher_input_for_base,
         default_launcher_path, execute_launcher_command, extract_navigation_target,
         layout_for_pane_count, layout_presets, normalize_workspace_path,
-        parse_git_status_porcelain, prepare_workspace_launch, resolve_navigation_path, GitFileKind,
-        GitState, RuntimeState, ThemeId,
+        parse_git_status_porcelain, persistence::ActivityEventKind, prepare_workspace_launch,
+        resolve_navigation_path, GitFileKind, GitState, RuntimeState, ThemeId,
     };
 
     #[test]
@@ -2505,6 +2566,45 @@ mod tests {
 
         assert_eq!(runtime.workspaces.len(), 1);
         assert_eq!(runtime.workspaces[0].name, "Sprint Board");
+    }
+
+    #[test]
+    fn persisted_activity_history_is_restored_from_disk() {
+        let fixture = TestWorkspace::new();
+        let persistence_path = fixture.root_dir().join("workspaces.json");
+        let workspace_path = fixture.project_dir().display().to_string();
+        fs::write(
+            &persistence_path,
+            format!(
+                r#"{{"workspaces":[{{"path":"{}","paneCount":1}}],"recentActivity":[{{"kind":"paneReady","workspacePath":"{}","label":"Shell 01","at":1710000000000}}]}}"#,
+                workspace_path,
+                workspace_path
+            ),
+        )
+        .expect("should write persisted state");
+
+        let mut runtime = RuntimeState::seeded();
+        runtime
+            .load_persisted_from_disk(persistence_path)
+            .expect("should load persisted state");
+
+        assert_eq!(
+            runtime.workspaces[0].path,
+            canonical_path(fixture.project_dir()).display().to_string()
+        );
+        assert_eq!(runtime.activity_history.len(), 1);
+        let snapshot = runtime.build_snapshot();
+        assert_eq!(snapshot.activity.recent_events.len(), 1);
+        assert_eq!(
+            snapshot.activity.recent_events[0].kind,
+            ActivityEventKind::PaneReady
+        );
+        assert_eq!(
+            snapshot.activity.recent_events[0].workspace_id,
+            runtime.workspaces[0].id
+        );
+        assert_eq!(snapshot.activity.recent_events[0].label, "Shell 01");
+        assert_eq!(snapshot.activity.recent_events[0].at, 1_710_000_000_000);
     }
 
     #[test]
