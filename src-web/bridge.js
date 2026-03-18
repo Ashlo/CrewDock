@@ -27,6 +27,40 @@ export function createBridge({
         tauriApi.core.invoke("rename_workspace", { workspaceId, name }),
       refreshWorkspaceGitStatus: (workspaceId) =>
         tauriApi.core.invoke("refresh_workspace_git_status", { workspaceId }),
+      loadWorkspaceSourceControl: (workspaceId, graphCursor = null) =>
+        tauriApi.core.invoke("load_workspace_source_control", { workspaceId, graphCursor }),
+      loadWorkspaceGitDiff: (workspaceId, path, mode) =>
+        tauriApi.core.invoke("load_workspace_git_diff", { workspaceId, path, mode }),
+      loadWorkspaceGitCommitDetail: (workspaceId, oid) =>
+        tauriApi.core.invoke("load_workspace_git_commit_detail", { workspaceId, oid }),
+      gitStagePaths: (workspaceId, paths) =>
+        tauriApi.core.invoke("git_stage_paths", { workspaceId, paths }),
+      gitUnstagePaths: (workspaceId, paths) =>
+        tauriApi.core.invoke("git_unstage_paths", { workspaceId, paths }),
+      gitDiscardPaths: (workspaceId, paths) =>
+        tauriApi.core.invoke("git_discard_paths", { workspaceId, paths }),
+      gitCommit: (workspaceId, message, commitAll = false) =>
+        tauriApi.core.invoke("git_commit", { workspaceId, message, commitAll }),
+      gitCheckoutBranch: (workspaceId, branchName) =>
+        tauriApi.core.invoke("git_checkout_branch", { workspaceId, branchName }),
+      gitCreateBranch: (workspaceId, branchName, startPoint = null) =>
+        tauriApi.core.invoke("git_create_branch", { workspaceId, branchName, startPoint }),
+      gitRenameBranch: (workspaceId, currentName, nextName) =>
+        tauriApi.core.invoke("git_rename_branch", { workspaceId, currentName, nextName }),
+      gitDeleteBranch: (workspaceId, branchName) =>
+        tauriApi.core.invoke("git_delete_branch", { workspaceId, branchName }),
+      gitFetch: (workspaceId) =>
+        tauriApi.core.invoke("git_fetch", { workspaceId }),
+      gitPull: (workspaceId) =>
+        tauriApi.core.invoke("git_pull", { workspaceId }),
+      gitPush: (workspaceId) =>
+        tauriApi.core.invoke("git_push", { workspaceId }),
+      gitPublishBranch: (workspaceId, branchName) =>
+        tauriApi.core.invoke("git_publish_branch", { workspaceId, branchName }),
+      gitSetUpstream: (workspaceId, branchName, upstreamName) =>
+        tauriApi.core.invoke("git_set_upstream", { workspaceId, branchName, upstreamName }),
+      gitTaskWriteStdin: (workspaceId, data) =>
+        tauriApi.core.invoke("git_task_write_stdin", { workspaceId, data }),
       switchWorkspace: (workspaceId) =>
         tauriApi.core.invoke("switch_workspace", { workspaceId }),
       closeWorkspace: (workspaceId) =>
@@ -129,12 +163,27 @@ function createMockBridge({
   let workspaceCounter = 0;
   let workspaces = [];
   let activeWorkspaceId = null;
+  let activityHistory = [];
+  const MAX_ACTIVITY_HISTORY = 80;
 
   function emitState() {
     const activeWorkspace = workspaces.find((workspace) => workspace.id === activeWorkspaceId);
     const snapshot = {
+      window: {
+        id: "window-main",
+        label: "Primary",
+        title: activeWorkspace ? `${activeWorkspace.name} · CrewDock` : "CrewDock",
+        workspaceCount: workspaces.length,
+        activeWorkspaceId,
+        activeWorkspaceName: activeWorkspace?.name || null,
+      },
       launcher,
       settings,
+      activity: {
+        recentEvents: activityHistory
+          .filter((event) => workspaces.some((workspace) => workspace.id === event.workspaceId))
+          .map((event) => ({ ...event })),
+      },
       workspaces: workspaces.map((workspace) => ({
         id: workspace.id,
         name: workspace.name,
@@ -171,6 +220,18 @@ function createMockBridge({
   }
 
   function emitRuntimeEvent(payload) {
+    activityHistory.unshift({
+      kind: payload.kind,
+      workspaceId: payload.workspaceId,
+      paneId: payload.paneId || "",
+      label: payload.label || "Terminal",
+      error: payload.error ? String(payload.error) : "",
+      at: Date.now(),
+    });
+    if (activityHistory.length > MAX_ACTIVITY_HISTORY) {
+      activityHistory.length = MAX_ACTIVITY_HISTORY;
+    }
+
     for (const listener of runtimeListeners) {
       listener(structuredClone(payload));
     }
@@ -247,6 +308,146 @@ function createMockBridge({
       repoRoot: path,
       workspaceRelativePath: null,
       files: [],
+    };
+  }
+
+  function buildMockBranches(workspace) {
+    const currentBranch = workspace.gitDetail?.summary?.branch || "main";
+    return {
+      local: [
+        {
+          name: currentBranch,
+          fullName: `refs/heads/${currentBranch}`,
+          upstream: `origin/${currentBranch}`,
+          shortOid: "a1b2c3d",
+          subject: "Current workspace branch",
+          relativeDate: "just now",
+          isCurrent: true,
+          isRemote: false,
+        },
+        {
+          name: "feature/mock-ui",
+          fullName: "refs/heads/feature/mock-ui",
+          upstream: "origin/feature/mock-ui",
+          shortOid: "d4e5f6a",
+          subject: "Mock branch preview",
+          relativeDate: "2h ago",
+          isCurrent: false,
+          isRemote: false,
+        },
+      ],
+      remote: [
+        {
+          name: `origin/${currentBranch}`,
+          fullName: `refs/remotes/origin/${currentBranch}`,
+          upstream: null,
+          shortOid: "a1b2c3d",
+          subject: "Remote tracking branch",
+          relativeDate: "just now",
+          isCurrent: false,
+          isRemote: true,
+        },
+      ],
+    };
+  }
+
+  function buildMockGraph(workspace, graphCursor) {
+    const skip = Number.parseInt(graphCursor || "0", 10) || 0;
+    const base = [
+      {
+        oid: "a1b2c3d4",
+        shortOid: "a1b2c3d",
+        subject: "Polish source control chrome",
+        author: "CrewDock",
+        relativeDate: "10m ago",
+        graphPrefix: "*",
+        refs: [
+          { label: "HEAD", kind: "head" },
+          { label: workspace.gitDetail?.summary?.branch || "main", kind: "local-branch" },
+          { label: `origin/${workspace.gitDetail?.summary?.branch || "main"}`, kind: "remote-branch" },
+        ],
+      },
+      {
+        oid: "d4e5f6a7",
+        shortOid: "d4e5f6a",
+        subject: "Add quick workspace switcher",
+        author: "CrewDock",
+        relativeDate: "1h ago",
+        graphPrefix: "*",
+        refs: [],
+      },
+      {
+        oid: "f7a8b9c0",
+        shortOid: "f7a8b9c",
+        subject: "Initial mock graph history",
+        author: "CrewDock",
+        relativeDate: "1d ago",
+        graphPrefix: "*",
+        refs: [],
+      },
+    ];
+    const commits = base.slice(skip, skip + 50);
+    return {
+      commits,
+      nextCursor: skip + commits.length < base.length ? String(skip + commits.length) : null,
+    };
+  }
+
+  function buildMockSourceControl(workspace, graphCursor = null) {
+    const detail = workspace?.gitDetail || buildMockGitDetail(workspace?.path || "");
+    const branches = buildMockBranches(workspace);
+    return {
+      workspaceId: workspace.id,
+      workspaceName: workspace.name,
+      workspacePath: workspace.path,
+      repoRoot: detail.repoRoot,
+      workspaceRelativePath: detail.workspaceRelativePath,
+      summary: detail.summary,
+      changes: detail.files || [],
+      localBranches: branches.local,
+      remoteBranches: branches.remote,
+      graph: buildMockGraph(workspace, graphCursor),
+      task: workspace.gitTask || null,
+    };
+  }
+
+  function buildMockDiff(path, mode) {
+    return {
+      path,
+      originalPath: null,
+      mode,
+      text:
+        `diff --git a/${path} b/${path}\n` +
+        `index 1111111..2222222 100644\n` +
+        `--- a/${path}\n` +
+        `+++ b/${path}\n` +
+        `@@ -1,3 +1,5 @@\n` +
+        `-old line\n` +
+        `+new line\n` +
+        `+mock source control preview\n`,
+      isBinary: false,
+      isTruncated: false,
+    };
+  }
+
+  function buildMockCommitDetail(oid) {
+    return {
+      oid,
+      shortOid: oid.slice(0, 7),
+      subject: "Mock commit detail",
+      body: "This is a mock commit detail payload used in browser mode.",
+      author: "CrewDock",
+      email: "mock@crewdock.dev",
+      relativeDate: "10m ago",
+      refs: [],
+      parents: [],
+      files: [
+        {
+          status: "M",
+          path: "src-web/app.js",
+          originalPath: null,
+        },
+      ],
     };
   }
 
@@ -335,6 +536,104 @@ function createMockBridge({
       }
       return emitState();
     },
+    loadWorkspaceSourceControl: async (workspaceId, graphCursor = null) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      if (!workspace) {
+        throw new Error("workspace not found");
+      }
+      return buildMockSourceControl(workspace, graphCursor);
+    },
+    loadWorkspaceGitDiff: async (_workspaceId, path, mode) => buildMockDiff(path, mode),
+    loadWorkspaceGitCommitDetail: async (_workspaceId, oid) => buildMockCommitDetail(oid),
+    gitStagePaths: async (workspaceId) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      return buildMockSourceControl(workspace);
+    },
+    gitUnstagePaths: async (workspaceId) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      return buildMockSourceControl(workspace);
+    },
+    gitDiscardPaths: async (workspaceId, paths) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      if (workspace?.gitDetail?.files?.length) {
+        workspace.gitDetail.files = workspace.gitDetail.files.filter((file) => !paths.includes(file.path));
+      }
+      return buildMockSourceControl(workspace);
+    },
+    gitCommit: async (workspaceId, message) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      if (!workspace) {
+        throw new Error("workspace not found");
+      }
+      workspace.gitTask = {
+        id: `git-task-${Date.now()}`,
+        title: "Commit",
+        command: `git commit -m ${JSON.stringify(message)}`,
+        status: "succeeded",
+        output: "Mock commit completed successfully.\n",
+        canWriteInput: false,
+        startedAt: Date.now(),
+        finishedAt: Date.now(),
+        exitCode: 0,
+      };
+      workspace.gitDetail = buildMockGitDetail(workspace.path);
+      emitState();
+      emitRuntimeEvent({
+        kind: "gitTaskSnapshot",
+        workspaceId: workspace.id,
+        task: workspace.gitTask,
+      });
+      return buildMockSourceControl(workspace);
+    },
+    gitCheckoutBranch: async (workspaceId, branchName) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      if (workspace?.gitDetail?.summary) {
+        workspace.gitDetail.summary.branch = branchName;
+      }
+      return buildMockSourceControl(workspace);
+    },
+    gitCreateBranch: async (workspaceId, branchName) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      if (workspace?.gitDetail?.summary) {
+        workspace.gitDetail.summary.branch = branchName;
+      }
+      return buildMockSourceControl(workspace);
+    },
+    gitRenameBranch: async (workspaceId, currentName, nextName) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      if (workspace?.gitDetail?.summary?.branch === currentName) {
+        workspace.gitDetail.summary.branch = nextName;
+      }
+      return buildMockSourceControl(workspace);
+    },
+    gitDeleteBranch: async (workspaceId) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      return buildMockSourceControl(workspace);
+    },
+    gitFetch: async (workspaceId) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      return buildMockSourceControl(workspace);
+    },
+    gitPull: async (workspaceId) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      return buildMockSourceControl(workspace);
+    },
+    gitPush: async (workspaceId) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      return buildMockSourceControl(workspace);
+    },
+    gitPublishBranch: async (workspaceId) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      return buildMockSourceControl(workspace);
+    },
+    gitSetUpstream: async (workspaceId, branchName, upstreamName) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      if (workspace?.gitDetail?.summary?.branch === branchName) {
+        workspace.gitDetail.summary.upstream = upstreamName;
+      }
+      return buildMockSourceControl(workspace);
+    },
+    gitTaskWriteStdin: async () => {},
     switchWorkspace: async (workspaceId) => {
       const workspace = workspaces.find((entry) => entry.id === workspaceId);
       if (!workspace) {

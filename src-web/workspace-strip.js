@@ -1,4 +1,5 @@
 export function renderWorkspaceStrip({
+  windowSummary,
   workspaces,
   activeWorkspaceId,
   workspaceRenameDraft,
@@ -11,6 +12,7 @@ export function renderWorkspaceStrip({
   return `
     <div class="workspace-strip-track" data-tauri-drag-region>
       <div class="workspace-strip-leading" data-tauri-drag-region aria-hidden="true"></div>
+      ${renderWindowSummary(windowSummary, workspaces.length, escapeHtml)}
       <div class="workspace-tabs-shell" data-workspace-tabs-shell data-tauri-drag-region>
         <button
           class="workspace-tabs-scroll workspace-tabs-scroll-left"
@@ -77,6 +79,28 @@ export function renderWorkspaceStrip({
           ${renderPlusIcon()}
         </button>
       </div>
+    </div>
+  `;
+}
+
+function renderWindowSummary(windowSummary, workspaceCount, escapeHtml) {
+  const label = windowSummary?.label || "Primary";
+  const title = windowSummary?.title || "CrewDock";
+  const count = typeof windowSummary?.workspaceCount === "number"
+    ? windowSummary.workspaceCount
+    : workspaceCount;
+  const meta = `${count} ${count === 1 ? "workspace" : "workspaces"}`;
+
+  return `
+    <div
+      class="workspace-window-summary"
+      data-tauri-drag-region="true"
+      title="${escapeHtml(title)}"
+      aria-label="${escapeHtml(`${label} window with ${meta}`)}"
+    >
+      <span class="workspace-window-mark">Window</span>
+      <strong>${escapeHtml(label)}</strong>
+      <span>${escapeHtml(meta)}</span>
     </div>
   `;
 }

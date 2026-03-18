@@ -1,7 +1,7 @@
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
-use super::AppSnapshot;
+use super::{source_control::GitTaskSnapshot, AppSnapshot};
 
 const STATE_EVENT: &str = "crewdock://state-changed";
 const TERMINAL_DATA_EVENT: &str = "crewdock://terminal-data";
@@ -32,6 +32,10 @@ pub(crate) enum RuntimeEvent {
         pane_id: String,
         label: String,
         error: String,
+    },
+    GitTaskSnapshot {
+        workspace_id: String,
+        task: GitTaskSnapshot,
     },
 }
 
