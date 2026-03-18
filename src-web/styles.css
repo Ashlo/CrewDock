@@ -2322,7 +2322,7 @@ button {
 }
 
 .workspace-git-panel {
-  width: min(428px, calc(100vw - 20px));
+  width: min(760px, calc(100vw - 20px));
   height: 100%;
   max-height: min(780px, calc(100vh - 28px));
   display: grid;
@@ -2334,10 +2334,6 @@ button {
   box-shadow:
     0 22px 56px rgba(0, 0, 0, 0.28),
     inset 0 1px 0 rgba(255, 255, 255, 0.025);
-}
-
-.workspace-git-panel.is-wide {
-  width: min(820px, calc(100vw - 20px));
 }
 
 .workspace-git-panel-body::-webkit-scrollbar {
@@ -3912,10 +3908,6 @@ button {
     width: min(720px, 100%);
   }
 
-  .workspace-git-panel.is-wide {
-    width: min(720px, 100%);
-  }
-
   .workspace-activity-rail {
     width: min(360px, calc(100vw - 24px));
   }
@@ -4051,10 +4043,6 @@ button {
     width: 100%;
     max-height: 100%;
     border-radius: 20px;
-  }
-
-  .workspace-git-panel.is-wide {
-    width: 100%;
   }
 
   .workspace-git-panel-header {

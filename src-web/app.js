@@ -3627,17 +3627,10 @@ function renderGitPanel(workspace) {
   const isLoading = uiState.gitPanelVisible
     && uiState.sourceControl.lastLoadedWorkspaceId !== workspace.id
     && !snapshot;
-  const isWide = Boolean(
-    snapshot
-      && (
-        (uiState.sourceControl.activeTab === "changes" && uiState.sourceControl.selectedPath)
-        || (uiState.sourceControl.activeTab === "graph" && uiState.sourceControl.selectedCommitOid)
-      ),
-  );
 
   return `
     <div class="workspace-git-backdrop" data-action="close-git-panel">
-      <section class="workspace-git-panel ${isWide ? "is-wide" : ""}" role="dialog" aria-modal="true" aria-labelledby="git-panel-title">
+      <section class="workspace-git-panel" role="dialog" aria-modal="true" aria-labelledby="git-panel-title">
         <header class="workspace-git-panel-header">
           <div class="workspace-git-panel-heading">
             <p class="workspace-git-panel-mark">Source Control</p>
