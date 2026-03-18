@@ -2328,11 +2328,13 @@ button {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
-  border-radius: 14px;
+  border-radius: 16px;
   border: 1px solid color-mix(in srgb, var(--overlay-panel-border) 84%, transparent);
-  background: color-mix(in srgb, var(--overlay-panel-bg) 96%, black 4%);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 18%),
+    color-mix(in srgb, var(--overlay-panel-bg) 96%, black 4%);
   box-shadow:
-    0 22px 56px rgba(0, 0, 0, 0.28),
+    0 24px 64px rgba(0, 0, 0, 0.32),
     inset 0 1px 0 rgba(255, 255, 255, 0.025);
 }
 
@@ -2350,8 +2352,11 @@ button {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 12px 14px 10px;
+  padding: 14px 16px 12px;
   border-bottom: 1px solid color-mix(in srgb, var(--overlay-divider) 92%, transparent);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.014), transparent),
+    rgba(255, 255, 255, 0.012);
 }
 
 .workspace-git-panel-heading {
@@ -2463,8 +2468,8 @@ button {
 .workspace-git-panel-body {
   display: grid;
   align-content: start;
-  gap: 10px;
-  padding: 10px 12px 12px;
+  gap: 12px;
+  padding: 12px;
   overflow: auto;
   scrollbar-width: thin;
   scrollbar-color: var(--scrollbar-thumb) transparent;
@@ -2479,8 +2484,8 @@ button {
   align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  padding: 2px 2px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.045);
 }
 
 .workspace-scm-toolbar-meta {
@@ -2591,8 +2596,8 @@ button {
 .workspace-scm-tabs {
   display: flex;
   gap: 2px;
-  padding: 2px 0 7px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  padding: 0 2px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.045);
 }
 
 .workspace-scm-tab {
@@ -2629,14 +2634,21 @@ button {
 .workspace-scm-main-graph {
   display: grid;
   grid-template-columns: minmax(0, 1.04fr) minmax(300px, 0.96fr);
-  gap: 10px;
+  gap: 12px;
   min-height: 0;
 }
 
 .workspace-scm-main-branches {
   display: grid;
-  gap: 10px;
+  gap: 12px;
   min-height: 0;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.055);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent 22%),
+    rgba(255, 255, 255, 0.018);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
 }
 
 .workspace-scm-column {
@@ -2649,23 +2661,31 @@ button {
   display: grid;
   align-content: start;
   gap: 10px;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.055);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent 22%),
+    rgba(255, 255, 255, 0.018);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
 }
 
 .workspace-scm-column-list {
   overflow: auto;
-  padding-right: 4px;
+  padding-right: 10px;
 }
 
 .workspace-scm-column-detail {
-  padding-left: 12px;
-  border-left: 1px solid rgba(255, 255, 255, 0.04);
+  position: relative;
 }
 
 .workspace-scm-commit {
   display: grid;
   gap: 7px;
-  padding: 0 0 10px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  background: rgba(0, 0, 0, 0.08);
 }
 
 .workspace-scm-commit-head {
@@ -2734,6 +2754,10 @@ button {
   justify-content: space-between;
 }
 
+.workspace-scm-commit-hint {
+  margin: 0;
+}
+
 .workspace-scm-count-badge {
   min-height: 18px;
   display: inline-flex;
@@ -2771,12 +2795,17 @@ button {
 .workspace-scm-section-list,
 .workspace-scm-branch-groups {
   display: grid;
-  gap: 12px;
+  gap: 10px;
+}
+
+.workspace-scm-branch-groups {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .workspace-scm-section {
   display: grid;
   gap: 5px;
+  padding: 2px 0 0;
 }
 
 .workspace-scm-section-header {
@@ -2784,6 +2813,8 @@ button {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
 }
 
 .workspace-scm-section-title {
@@ -2841,7 +2872,7 @@ button {
 .workspace-scm-graph-list,
 .workspace-scm-commit-files {
   display: grid;
-  gap: 0;
+  gap: 4px;
 }
 
 .workspace-scm-file-row,
@@ -2853,17 +2884,23 @@ button {
   gap: 8px;
   padding: 6px 8px;
   border-radius: 10px;
-  border-bottom: 0;
-  transition: background 140ms ease;
+  border: 1px solid transparent;
+  transition:
+    border-color 140ms ease,
+    background 140ms ease;
+  position: relative;
 }
 
 .workspace-scm-file-row:hover,
 .workspace-scm-branch-row:hover {
+  border-color: rgba(255, 255, 255, 0.05);
   background: rgba(255, 255, 255, 0.025);
 }
 
 .workspace-scm-file-row.is-selected {
-  background: rgba(255, 255, 255, 0.045);
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.05);
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent) 70%, transparent);
 }
 
 .workspace-scm-file-row:last-child,
@@ -2969,7 +3006,9 @@ button {
 
 .workspace-scm-file-row:hover .workspace-scm-file-actions,
 .workspace-scm-file-row.is-selected .workspace-scm-file-actions,
-.workspace-scm-branch-row:hover .workspace-scm-branch-actions {
+.workspace-scm-branch-row:hover .workspace-scm-branch-actions,
+.workspace-scm-file-row:focus-within .workspace-scm-file-actions,
+.workspace-scm-branch-row:focus-within .workspace-scm-branch-actions {
   opacity: 1;
   pointer-events: auto;
 }
@@ -2986,6 +3025,8 @@ button {
   align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
 }
 
 .workspace-scm-detail-kicker {
@@ -3022,6 +3063,7 @@ button {
 .workspace-scm-diff-shell {
   display: grid;
   gap: 8px;
+  min-height: 0;
 }
 
 .workspace-scm-diff,
@@ -3043,6 +3085,7 @@ button {
 .workspace-scm-diff,
 .workspace-scm-task-output {
   padding: 10px 11px;
+  min-height: 260px;
 }
 
 .workspace-scm-commit-body {
@@ -3059,6 +3102,10 @@ button {
 .workspace-scm-branches-head {
   display: grid;
   gap: 8px;
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  background: rgba(0, 0, 0, 0.08);
   padding-bottom: 10px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.04);
 }
@@ -3116,19 +3163,24 @@ button {
   gap: 8px;
   padding: 6px 8px;
   border-radius: 10px;
-  border: 0;
+  border: 1px solid transparent;
   background: transparent;
   color: inherit;
   text-align: left;
-  transition: background 140ms ease;
+  transition:
+    border-color 140ms ease,
+    background 140ms ease;
 }
 
 .workspace-scm-graph-row:hover {
+  border-color: rgba(255, 255, 255, 0.05);
   background: rgba(255, 255, 255, 0.025);
 }
 
 .workspace-scm-graph-row.is-selected {
-  background: rgba(255, 255, 255, 0.045);
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.05);
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent) 70%, transparent);
 }
 
 .workspace-scm-graph-prefix {
@@ -3179,7 +3231,7 @@ button {
 .workspace-scm-task {
   display: grid;
   gap: 7px;
-  padding-top: 10px;
+  padding: 10px 0 0;
   border-top: 1px solid rgba(255, 255, 255, 0.04);
 }
 
@@ -3953,11 +4005,12 @@ button {
     grid-template-columns: 1fr;
   }
 
+  .workspace-scm-branch-groups {
+    grid-template-columns: 1fr;
+  }
+
   .workspace-scm-column-detail {
-    padding-left: 0;
-    border-left: 0;
-    padding-top: 10px;
-    border-top: 1px solid rgba(255, 255, 255, 0.04);
+    padding-top: 12px;
   }
 }
 
@@ -4074,6 +4127,12 @@ button {
 
   .workspace-scm-branch-form {
     grid-template-columns: 1fr;
+  }
+
+  .workspace-scm-column-list,
+  .workspace-scm-column-detail,
+  .workspace-scm-main-branches {
+    padding: 10px;
   }
 
   .workspace-modal-backdrop {

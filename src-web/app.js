@@ -2052,11 +2052,13 @@ async function submitSourceControlCommit({ commitAll = false } = {}) {
     return;
   }
 
-  await runSourceControlMutation(() => bridge.gitCommit(workspaceId, message, commitAll), {
+  const snapshot = await runSourceControlMutation(() => bridge.gitCommit(workspaceId, message, commitAll), {
     resetGraphSelection: true,
   });
-  uiState.sourceControl.commitMessage = "";
-  render();
+  if (snapshot) {
+    uiState.sourceControl.commitMessage = "";
+    render();
+  }
 }
 
 async function submitSourceControlCreateBranch() {
@@ -2072,13 +2074,15 @@ async function submitSourceControlCreateBranch() {
     return;
   }
 
-  await runSourceControlMutation(
+  const snapshot = await runSourceControlMutation(
     () => bridge.gitCreateBranch(workspaceId, branchName, startPoint || null),
     { resetGraphSelection: true },
   );
-  uiState.sourceControl.createBranchName = "";
-  uiState.sourceControl.createBranchStartPoint = "";
-  render();
+  if (snapshot) {
+    uiState.sourceControl.createBranchName = "";
+    uiState.sourceControl.createBranchStartPoint = "";
+    render();
+  }
 }
 
 async function submitSourceControlTaskInput() {

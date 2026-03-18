@@ -1,8 +1,7 @@
 use std::{
-    env,
-    fs,
+    env, fs,
     io::{Read, Write},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     process::Command as ProcessCommand,
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
@@ -15,7 +14,8 @@ use tauri::AppHandle;
 use crate::{
     collect_git_detail,
     events::{emit_runtime_event, emit_snapshot, RuntimeEvent},
-    run_git_command, AppSnapshot, GitFileSnapshot, GitSummarySnapshot, RuntimeState,
+    run_git_command, validate_git_cli_arg, AppSnapshot, GitFileSnapshot, GitSummarySnapshot,
+    RuntimeState,
 };
 
 const GRAPH_PAGE_SIZE: usize = 120;
@@ -155,6 +155,12 @@ pub(crate) struct GitTaskRecord {
     pub(crate) writer: Option<Arc<Mutex<Box<dyn Write + Send>>>>,
 }
 
+struct SpawnedGitTaskProcess {
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    reader: Box<dyn Read + Send>,
+    writer: Box<dyn Write + Send>,
+}
+
 pub(crate) fn load_workspace_source_control(
     runtime: &RuntimeState,
     workspace_id: &str,
@@ -227,20 +233,28 @@ pub(crate) fn load_workspace_git_diff(
         .repo_root
         .as_deref()
         .map(PathBuf::from)
-        .ok_or_else(|| detail.summary.message.unwrap_or_else(|| "repository not found".to_string()))?;
+        .ok_or_else(|| {
+            detail
+                .summary
+                .message
+                .unwrap_or_else(|| "repository not found".to_string())
+        })?;
     let file = detail
         .files
         .iter()
         .find(|file| file.path == path)
-        .cloned();
-    let original_path = file.and_then(|entry| entry.original_path);
+        .cloned()
+        .ok_or_else(|| "file is not part of the current git status".to_string())?;
+    let original_path = file.original_path.clone();
 
     let text = match mode {
-        GitDiffMode::Staged => run_git_capture(&repo_root, &["diff", "--cached", "--", path])?,
+        GitDiffMode::Staged => {
+            run_git_capture(&repo_root, &["diff", "--cached", "--", &file.path])?
+        }
         GitDiffMode::WorkingTree => {
-            let diff = run_git_capture(&repo_root, &["diff", "--", path])?;
+            let diff = run_git_capture(&repo_root, &["diff", "--", &file.path])?;
             if diff.is_empty() {
-                load_untracked_diff(&repo_root, path)?
+                load_untracked_diff(&repo_root, &file.path)?
             } else {
                 diff
             }
@@ -265,6 +279,7 @@ pub(crate) fn load_workspace_git_commit_detail(
     workspace_id: &str,
     oid: &str,
 ) -> Result<GitCommitDetailSnapshot, String> {
+    let oid = validate_git_cli_arg(oid.to_string(), "commit id")?;
     let workspace = runtime
         .workspaces
         .iter()
@@ -275,16 +290,22 @@ pub(crate) fn load_workspace_git_commit_detail(
         .repo_root
         .as_deref()
         .map(PathBuf::from)
-        .ok_or_else(|| detail.summary.message.unwrap_or_else(|| "repository not found".to_string()))?;
+        .ok_or_else(|| {
+            detail
+                .summary
+                .message
+                .unwrap_or_else(|| "repository not found".to_string())
+        })?;
 
     let output = run_git_capture(
         &repo_root,
         &[
             "show",
-            "--format=%H%x1f%h%x1f%an%x1f%ae%x1f%ar%x1f%s%x1f%b%x1f%P%x1f%D",
+            "-z",
+            "--format=%H%x00%h%x00%an%x00%ae%x00%ar%x00%s%x00%b%x00%P%x00%D%x00",
             "--name-status",
             "--no-color",
-            oid,
+            &oid,
         ],
     )?;
     parse_commit_detail(&output)
@@ -363,12 +384,13 @@ pub(crate) fn discard_paths(
     }
 
     for path in untracked {
-        let target = repo_root.join(&path);
+        let target = resolve_repo_relative_existing_path(&repo_root, &path)?;
         if target.is_dir() {
             fs::remove_dir_all(&target)
                 .map_err(|error| format!("failed to remove {path}: {error}"))?;
         } else if target.exists() {
-            fs::remove_file(&target).map_err(|error| format!("failed to remove {path}: {error}"))?;
+            fs::remove_file(&target)
+                .map_err(|error| format!("failed to remove {path}: {error}"))?;
         }
     }
 
@@ -422,37 +444,10 @@ pub(crate) fn start_git_task(
             .map_err(|_| "failed to acquire application state".to_string())?;
         workspace_repo_root(&runtime, &workspace_id)?
     };
-
-    let pair = native_pty_system()
-        .openpty(PtySize {
-            rows: 24,
-            cols: 80,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(|error| format!("failed to open git task PTY: {error}"))?;
-    let mut command = CommandBuilder::new("git");
-    for arg in &args {
-        command.arg(arg);
-    }
-    command.cwd(&repo_root);
-    strip_tooling_env(&mut command);
-    command.env("TERM", "xterm-256color");
-    command.env("COLORTERM", "truecolor");
-
-    let mut child = pair
-        .slave
-        .spawn_command(command)
-        .map_err(|error| format!("failed to spawn git task: {error}"))?;
-    let reader = pair
-        .master
-        .try_clone_reader()
-        .map_err(|error| format!("failed to clone git task reader: {error}"))?;
-    let writer = pair
-        .master
-        .take_writer()
-        .map_err(|error| format!("failed to open git task writer: {error}"))?;
-    let writer = Arc::new(Mutex::new(writer));
+    let spawned = spawn_git_task_process(&repo_root, &args)?;
+    let mut child = spawned.child;
+    let reader = spawned.reader;
+    let writer = Arc::new(Mutex::new(spawned.writer));
 
     let task_snapshot = {
         let mut runtime = shared
@@ -515,6 +510,100 @@ pub(crate) fn start_git_task(
     load_workspace_source_control(&runtime, &workspace_id, None)
 }
 
+fn spawn_git_task_process(
+    repo_root: &Path,
+    args: &[String],
+) -> Result<SpawnedGitTaskProcess, String> {
+    let pair = native_pty_system()
+        .openpty(PtySize {
+            rows: 24,
+            cols: 80,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(|error| format!("failed to open git task PTY: {error}"))?;
+    let mut command = CommandBuilder::new("git");
+    for arg in args {
+        command.arg(arg);
+    }
+    command.cwd(repo_root);
+    strip_tooling_env(&mut command);
+    command.env("TERM", "xterm-256color");
+    command.env("COLORTERM", "truecolor");
+
+    let child = pair
+        .slave
+        .spawn_command(command)
+        .map_err(|error| format!("failed to spawn git task: {error}"))?;
+    let reader = pair
+        .master
+        .try_clone_reader()
+        .map_err(|error| format!("failed to clone git task reader: {error}"))?;
+    let writer = pair
+        .master
+        .take_writer()
+        .map_err(|error| format!("failed to open git task writer: {error}"))?;
+
+    Ok(SpawnedGitTaskProcess {
+        child,
+        reader,
+        writer,
+    })
+}
+
+#[cfg(test)]
+fn run_git_task_blocking(
+    repo_root: &Path,
+    title: &str,
+    args: &[String],
+    stdin: Option<&str>,
+) -> Result<GitTaskSnapshot, String> {
+    let started_at = now_timestamp_ms();
+    let mut spawned = spawn_git_task_process(repo_root, args)?;
+    if let Some(stdin) = stdin {
+        spawned
+            .writer
+            .write_all(stdin.as_bytes())
+            .map_err(|error| format!("failed to write git task input: {error}"))?;
+        spawned
+            .writer
+            .flush()
+            .map_err(|error| format!("failed to flush git task input: {error}"))?;
+    }
+    drop(spawned.writer);
+
+    let mut raw_output = Vec::new();
+    spawned
+        .reader
+        .read_to_end(&mut raw_output)
+        .map_err(|error| format!("failed to read git task output: {error}"))?;
+    let mut output = String::from_utf8_lossy(&raw_output).into_owned();
+    trim_task_output(&mut output);
+
+    let status = spawned
+        .child
+        .wait()
+        .map_err(|error| format!("failed to wait for git task: {error}"))?;
+    let exit_code = i32::try_from(status.exit_code()).ok();
+    let task_status = if exit_code == Some(0) {
+        GitTaskStatus::Succeeded
+    } else {
+        GitTaskStatus::Failed
+    };
+
+    Ok(GitTaskSnapshot {
+        id: "test-task".to_string(),
+        title: title.to_string(),
+        command: format!("git {}", args.join(" ")),
+        status: task_status,
+        output,
+        can_write_input: false,
+        started_at,
+        finished_at: Some(now_timestamp_ms()),
+        exit_code,
+    })
+}
+
 fn stream_git_task_output(
     shared: Arc<Mutex<RuntimeState>>,
     app: AppHandle,
@@ -540,7 +629,8 @@ fn stream_git_task_output(
                 }
             }
             Err(error) => {
-                if let Ok(task) = finish_git_task(&shared, &workspace_id, Some(error.to_string()), None)
+                if let Ok(task) =
+                    finish_git_task(&shared, &workspace_id, Some(error.to_string()), None)
                 {
                     let _ = emit_runtime_event(
                         &app,
@@ -559,12 +649,7 @@ fn stream_git_task_output(
     let task = match outcome {
         Ok(status) => {
             let exit_code = i32::try_from(status.exit_code()).ok();
-            finish_git_task(
-                &shared,
-                &workspace_id,
-                None,
-                exit_code,
-            )
+            finish_git_task(&shared, &workspace_id, None, exit_code)
         }
         Err(error) => finish_git_task(&shared, &workspace_id, Some(error.to_string()), None),
     };
@@ -642,7 +727,7 @@ fn finish_git_task(
 }
 
 fn load_untracked_diff(repo_root: &Path, path: &str) -> Result<String, String> {
-    let absolute = repo_root.join(path);
+    let absolute = resolve_repo_relative_existing_path(repo_root, path)?;
     if !absolute.exists() {
         return Ok(String::new());
     }
@@ -652,11 +737,17 @@ fn load_untracked_diff(repo_root: &Path, path: &str) -> Result<String, String> {
         .current_dir(repo_root)
         .output()
         .map_err(|error| format!("failed to run git diff --no-index: {error}"))?;
-    Ok(String::from_utf8_lossy(&output.stdout).trim_end().to_string())
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .trim_end()
+        .to_string())
 }
 
 fn load_branches(repo_root: &Path, remotes: bool) -> Result<Vec<GitBranchSnapshot>, String> {
-    let refs = if remotes { "refs/remotes" } else { "refs/heads" };
+    let refs = if remotes {
+        "refs/remotes"
+    } else {
+        "refs/heads"
+    };
     let output = run_git_capture(
         repo_root,
         &[
@@ -719,7 +810,10 @@ fn load_graph_page(repo_root: &Path, skip: usize) -> Result<GitGraphSnapshot, St
         None
     };
 
-    Ok(GitGraphSnapshot { commits, next_cursor })
+    Ok(GitGraphSnapshot {
+        commits,
+        next_cursor,
+    })
 }
 
 fn parse_graph_commit_line(line: &str) -> Option<GitGraphCommitSnapshot> {
@@ -732,10 +826,7 @@ fn parse_graph_commit_line(line: &str) -> Option<GitGraphCommitSnapshot> {
     let author = parts.next()?.to_string();
     let relative_date = parts.next()?.to_string();
     let subject = parts.next()?.to_string();
-    let refs = parts
-        .next()
-        .map(parse_git_refs)
-        .unwrap_or_default();
+    let refs = parts.next().map(parse_git_refs).unwrap_or_default();
 
     Some(GitGraphCommitSnapshot {
         oid,
@@ -749,46 +840,105 @@ fn parse_graph_commit_line(line: &str) -> Option<GitGraphCommitSnapshot> {
 }
 
 fn parse_commit_detail(output: &str) -> Result<GitCommitDetailSnapshot, String> {
-    let mut lines = output.lines();
-    let header = lines
+    let mut parts = output.split('\0');
+    let oid = parts
         .next()
         .ok_or_else(|| "missing commit detail header".to_string())?;
-    let parts = header.split('\u{001f}').collect::<Vec<_>>();
-    if parts.len() < 9 {
+    let short_oid = parts
+        .next()
+        .ok_or_else(|| "missing commit short oid".to_string())?;
+    let author = parts
+        .next()
+        .ok_or_else(|| "missing commit author".to_string())?;
+    let email = parts
+        .next()
+        .ok_or_else(|| "missing commit email".to_string())?;
+    let relative_date = parts
+        .next()
+        .ok_or_else(|| "missing commit relative date".to_string())?;
+    let subject = parts
+        .next()
+        .ok_or_else(|| "missing commit subject".to_string())?;
+    let body = parts
+        .next()
+        .ok_or_else(|| "missing commit body".to_string())?;
+    let parents = parts
+        .next()
+        .ok_or_else(|| "missing commit parents".to_string())?;
+    let refs = parts
+        .next()
+        .ok_or_else(|| "missing commit refs".to_string())?;
+
+    if oid.is_empty() || short_oid.is_empty() {
         return Err("invalid commit detail payload".to_string());
     }
 
-    let files = lines
-        .filter(|line| !line.trim().is_empty())
-        .filter_map(|line| {
-            let mut status_parts = line.splitn(3, '\t');
-            let status = status_parts.next()?.trim().to_string();
-            let path = status_parts.next()?.trim().to_string();
-            let original_path = status_parts.next().map(|value| value.trim().to_string());
-            Some(GitCommitFileSnapshot {
-                status,
-                path,
-                original_path,
-            })
-        })
-        .collect::<Vec<_>>();
+    let file_tokens = parts.collect::<Vec<_>>();
+    let files = parse_commit_files(&file_tokens)?;
 
     Ok(GitCommitDetailSnapshot {
-        oid: parts[0].to_string(),
-        short_oid: parts[1].to_string(),
-        author: parts[2].to_string(),
-        email: parts[3].to_string(),
-        relative_date: parts[4].to_string(),
-        subject: parts[5].to_string(),
-        body: parts[6].trim().to_string(),
-        parents: parts[7]
+        oid: oid.to_string(),
+        short_oid: short_oid.to_string(),
+        author: author.to_string(),
+        email: email.to_string(),
+        relative_date: relative_date.to_string(),
+        subject: subject.to_string(),
+        body: body.trim().to_string(),
+        parents: parents
             .split_whitespace()
             .filter(|entry| !entry.is_empty())
             .map(str::to_string)
             .collect(),
-        refs: parse_git_refs(parts[8]),
+        refs: parse_git_refs(refs),
         files,
     })
+}
+
+fn parse_commit_files(tokens: &[&str]) -> Result<Vec<GitCommitFileSnapshot>, String> {
+    let mut files = Vec::new();
+    let mut index = 0;
+
+    while index < tokens.len() {
+        let status = tokens[index].trim();
+        if status.is_empty() {
+            index += 1;
+            continue;
+        }
+
+        if status.starts_with('R') || status.starts_with('C') {
+            let original_path = tokens
+                .get(index + 1)
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| format!("missing original path for commit status {status}"))?;
+            let path = tokens
+                .get(index + 2)
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| format!("missing path for commit status {status}"))?;
+            files.push(GitCommitFileSnapshot {
+                status: status.to_string(),
+                path: path.to_string(),
+                original_path: Some(original_path.to_string()),
+            });
+            index += 3;
+            continue;
+        }
+
+        let path = tokens
+            .get(index + 1)
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| format!("missing path for commit status {status}"))?;
+        files.push(GitCommitFileSnapshot {
+            status: status.to_string(),
+            path: path.to_string(),
+            original_path: None,
+        });
+        index += 2;
+    }
+
+    Ok(files)
 }
 
 fn parse_git_refs(raw: &str) -> Vec<GitRefLabelSnapshot> {
@@ -843,7 +993,41 @@ fn workspace_repo_root(runtime: &RuntimeState, workspace_id: &str) -> Result<Pat
         .repo_root
         .as_deref()
         .map(PathBuf::from)
-        .ok_or_else(|| detail.summary.message.unwrap_or_else(|| "repository not found".to_string()))
+        .ok_or_else(|| {
+            detail
+                .summary
+                .message
+                .unwrap_or_else(|| "repository not found".to_string())
+        })
+}
+
+fn resolve_repo_relative_existing_path(repo_root: &Path, path: &str) -> Result<PathBuf, String> {
+    let relative = Path::new(path);
+    if relative.is_absolute() {
+        return Err("invalid file path".to_string());
+    }
+    if relative.components().any(|component| {
+        matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        )
+    }) {
+        return Err("invalid file path".to_string());
+    }
+
+    let absolute = repo_root.join(relative);
+    let repo_root = repo_root
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve repository root: {error}"))?;
+    let absolute = absolute
+        .canonicalize()
+        .map_err(|error| format!("failed to resolve file path: {error}"))?;
+
+    if !absolute.starts_with(&repo_root) {
+        return Err("invalid file path".to_string());
+    }
+
+    Ok(absolute)
 }
 
 fn refresh_workspace_cache(runtime: &mut RuntimeState, workspace_id: &str) -> Result<(), String> {
@@ -870,11 +1054,17 @@ fn run_git_strings(repo_root: &Path, args: &[String]) -> Result<String, String> 
         .map_err(|error| format!("failed to run git {}: {error}", args.join(" ")))?;
 
     if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).trim_end().to_string())
+        Ok(String::from_utf8_lossy(&output.stdout)
+            .trim_end()
+            .to_string())
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         if stderr.is_empty() {
-            Err(format!("git {} failed with status {}", args.join(" "), output.status))
+            Err(format!(
+                "git {} failed with status {}",
+                args.join(" "),
+                output.status
+            ))
         } else {
             Err(stderr)
         }
@@ -935,5 +1125,369 @@ fn normalize_optional_text(raw: &str) -> Option<String> {
         None
     } else {
         Some(trimmed.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        fs,
+        path::PathBuf,
+        process::Command,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    use super::{
+        parse_commit_detail, resolve_repo_relative_existing_path, run_git_task_blocking,
+        GitTaskStatus,
+    };
+
+    #[test]
+    fn parse_commit_detail_supports_multiline_body_and_renames() {
+        let payload = concat!(
+            "0123456789abcdef0123456789abcdef01234567\0",
+            "0123456\0",
+            "Ash\0",
+            "ash@example.com\0",
+            "2 hours ago\0",
+            "Refine source control\0",
+            "body line 1\nbody line 2\n\0",
+            "parent-a parent-b\0",
+            "HEAD -> main, origin/main\0",
+            "\0",
+            "M\0",
+            "src-tauri/src/lib.rs\0",
+            "R100\0",
+            "src/old-name.rs\0",
+            "src/new-name.rs\0",
+        );
+
+        let snapshot = parse_commit_detail(payload).expect("commit detail should parse");
+        assert_eq!(snapshot.subject, "Refine source control");
+        assert_eq!(snapshot.body, "body line 1\nbody line 2");
+        assert_eq!(snapshot.parents, vec!["parent-a", "parent-b"]);
+        assert_eq!(snapshot.refs.len(), 3);
+        assert_eq!(snapshot.files.len(), 2);
+        assert_eq!(snapshot.files[0].status, "M");
+        assert_eq!(snapshot.files[0].path, "src-tauri/src/lib.rs");
+        assert_eq!(snapshot.files[1].status, "R100");
+        assert_eq!(snapshot.files[1].path, "src/new-name.rs");
+        assert_eq!(
+            snapshot.files[1].original_path.as_deref(),
+            Some("src/old-name.rs")
+        );
+    }
+
+    #[test]
+    fn resolve_repo_relative_existing_path_rejects_escape_attempts() {
+        let root = unique_temp_dir("path-validation");
+        let nested = root.join("src");
+        let inside = nested.join("tracked.txt");
+        let outside = root
+            .parent()
+            .expect("temp dir should have a parent")
+            .join("outside-secret.txt");
+
+        fs::create_dir_all(&nested).expect("nested repo dir should exist");
+        fs::write(&inside, "tracked").expect("inside file should be written");
+        fs::write(&outside, "secret").expect("outside file should be written");
+
+        let resolved = resolve_repo_relative_existing_path(&root, "src/tracked.txt")
+            .expect("repo file should resolve");
+        assert_eq!(resolved, inside.canonicalize().unwrap());
+        assert!(resolve_repo_relative_existing_path(&root, "../outside-secret.txt").is_err());
+        assert!(resolve_repo_relative_existing_path(&root, outside.to_str().unwrap()).is_err());
+
+        let _ = fs::remove_file(&outside);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn git_task_blocking_supports_branch_rename_and_delete() {
+        let repo = init_test_repo("branch-flow");
+
+        let checkout = run_git_task_blocking(
+            &repo,
+            "Checkout",
+            &[
+                "checkout".to_string(),
+                "-b".to_string(),
+                "feature/one".to_string(),
+            ],
+            None,
+        )
+        .expect("branch create should run");
+        assert_eq!(checkout.status, GitTaskStatus::Succeeded);
+
+        fs::write(repo.join("feature.txt"), "feature branch work\n")
+            .expect("branch file should be written");
+        run_git(&repo, &["add", "feature.txt"]);
+        run_git(&repo, &["commit", "-m", "feature work"]);
+
+        let rename = run_git_task_blocking(
+            &repo,
+            "Rename",
+            &[
+                "branch".to_string(),
+                "-m".to_string(),
+                "feature/one".to_string(),
+                "feature/two".to_string(),
+            ],
+            None,
+        )
+        .expect("branch rename should run");
+        assert_eq!(rename.status, GitTaskStatus::Succeeded);
+
+        let checkout_main = run_git_task_blocking(
+            &repo,
+            "Checkout main",
+            &["checkout".to_string(), "main".to_string()],
+            None,
+        )
+        .expect("checkout main should run");
+        assert_eq!(checkout_main.status, GitTaskStatus::Succeeded);
+
+        run_git(&repo, &["merge", "--ff-only", "feature/two"]);
+
+        let delete = run_git_task_blocking(
+            &repo,
+            "Delete",
+            &[
+                "branch".to_string(),
+                "-d".to_string(),
+                "feature/two".to_string(),
+            ],
+            None,
+        )
+        .expect("branch delete should run");
+        assert_eq!(delete.status, GitTaskStatus::Succeeded);
+
+        let branches = git_output(&repo, &["branch"]);
+        assert!(branches.contains("main"));
+        assert!(!branches.contains("feature/two"));
+
+        let _ = fs::remove_dir_all(repo.parent().unwrap());
+    }
+
+    #[test]
+    fn git_task_blocking_supports_publish_fetch_and_pull() {
+        let root = unique_temp_dir("sync-flow");
+        let remote = root.join("remote.git");
+        let primary = root.join("primary");
+        let secondary = root.join("secondary");
+
+        let init_remote = Command::new("git")
+            .args([
+                "init",
+                "--bare",
+                "--initial-branch=main",
+                remote.to_str().expect("remote path should be utf-8"),
+            ])
+            .current_dir(&root)
+            .output()
+            .expect("bare remote should start");
+        assert!(
+            init_remote.status.success(),
+            "git init --bare failed: {}",
+            String::from_utf8_lossy(&init_remote.stderr)
+        );
+
+        fs::create_dir_all(&primary).expect("primary repo dir should exist");
+        configure_repo(&primary);
+        fs::write(primary.join("README.md"), "initial\n").expect("initial file should be written");
+        run_git(&primary, &["add", "README.md"]);
+        run_git(&primary, &["commit", "-m", "initial"]);
+        run_git(
+            &primary,
+            &[
+                "remote",
+                "add",
+                "origin",
+                remote.to_str().expect("remote path should be utf-8"),
+            ],
+        );
+        run_git(&primary, &["push", "-u", "origin", "main"]);
+
+        let clone = Command::new("git")
+            .args([
+                "clone",
+                remote.to_str().expect("remote path should be utf-8"),
+                secondary.to_str().expect("secondary path should be utf-8"),
+            ])
+            .current_dir(&root)
+            .output()
+            .expect("clone should start");
+        assert!(
+            clone.status.success(),
+            "git clone failed: {}",
+            String::from_utf8_lossy(&clone.stderr)
+        );
+        run_git(&secondary, &["config", "user.name", "CrewDock Test"]);
+        run_git(&secondary, &["config", "user.email", "test@crewdock.dev"]);
+
+        let checkout = run_git_task_blocking(
+            &secondary,
+            "Checkout feature",
+            &[
+                "checkout".to_string(),
+                "-b".to_string(),
+                "feature/sync".to_string(),
+            ],
+            None,
+        )
+        .expect("feature checkout should run");
+        assert_eq!(checkout.status, GitTaskStatus::Succeeded);
+
+        fs::write(secondary.join("feature.txt"), "secondary feature\n")
+            .expect("feature file should be written");
+        run_git(&secondary, &["add", "feature.txt"]);
+        run_git(&secondary, &["commit", "-m", "feature commit"]);
+
+        let publish = run_git_task_blocking(
+            &secondary,
+            "Publish",
+            &[
+                "push".to_string(),
+                "--set-upstream".to_string(),
+                "origin".to_string(),
+                "feature/sync".to_string(),
+            ],
+            None,
+        )
+        .expect("feature publish should run");
+        assert_eq!(publish.status, GitTaskStatus::Succeeded);
+
+        let fetch = run_git_task_blocking(
+            &primary,
+            "Fetch",
+            &[
+                "fetch".to_string(),
+                "--all".to_string(),
+                "--prune".to_string(),
+            ],
+            None,
+        )
+        .expect("fetch should run");
+        assert_eq!(fetch.status, GitTaskStatus::Succeeded);
+        let remote_branches = git_output(&primary, &["branch", "-r"]);
+        assert!(remote_branches.contains("origin/feature/sync"));
+
+        fs::write(primary.join("README.md"), "updated on main\n")
+            .expect("updated main file should be written");
+        run_git(&primary, &["add", "README.md"]);
+        run_git(&primary, &["commit", "-m", "main update"]);
+        run_git(&primary, &["push"]);
+
+        let checkout_main = run_git_task_blocking(
+            &secondary,
+            "Checkout main",
+            &["checkout".to_string(), "main".to_string()],
+            None,
+        )
+        .expect("checkout main should run");
+        assert_eq!(checkout_main.status, GitTaskStatus::Succeeded);
+
+        let pull = run_git_task_blocking(&secondary, "Pull", &["pull".to_string()], None)
+            .expect("pull should run");
+        assert_eq!(pull.status, GitTaskStatus::Succeeded);
+        assert_eq!(
+            fs::read_to_string(secondary.join("README.md")).expect("pulled file should exist"),
+            "updated on main\n"
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn git_task_blocking_accepts_stdin() {
+        let repo = init_test_repo("stdin-flow");
+        let snapshot = run_git_task_blocking(
+            &repo,
+            "Hash stdin",
+            &[
+                "hash-object".to_string(),
+                "-w".to_string(),
+                "--stdin".to_string(),
+            ],
+            Some("hello from crewdock\n"),
+        )
+        .expect("stdin-backed git command should run");
+
+        assert_eq!(snapshot.status, GitTaskStatus::Succeeded);
+        let oid = snapshot
+            .output
+            .split(|ch: char| !ch.is_ascii_hexdigit())
+            .find(|token| token.len() == 40)
+            .expect("git hash-object should emit an object id");
+        assert_eq!(oid.len(), 40);
+        let object = git_output(&repo, &["cat-file", "-p", oid]);
+        assert_eq!(object, "hello from crewdock");
+
+        let _ = fs::remove_dir_all(repo.parent().unwrap());
+    }
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be valid")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("crewdock-{label}-{unique}"));
+        fs::create_dir_all(&dir).expect("temp dir should be created");
+        dir
+    }
+
+    fn init_test_repo(label: &str) -> PathBuf {
+        let root = unique_temp_dir(label);
+        let repo = root.join("repo");
+        fs::create_dir_all(&repo).expect("repo dir should exist");
+        configure_repo(&repo);
+        fs::write(repo.join("README.md"), "hello\n").expect("seed file should be written");
+        run_git(&repo, &["add", "README.md"]);
+        run_git(&repo, &["commit", "-m", "initial"]);
+        repo
+    }
+
+    fn configure_repo(repo: &PathBuf) {
+        let init = Command::new("git")
+            .args(["init", "--initial-branch=main"])
+            .current_dir(repo)
+            .output()
+            .expect("git init should start");
+        assert!(
+            init.status.success(),
+            "git init failed: {}",
+            String::from_utf8_lossy(&init.stderr)
+        );
+        run_git(repo, &["config", "user.name", "CrewDock Test"]);
+        run_git(repo, &["config", "user.email", "test@crewdock.dev"]);
+    }
+
+    fn run_git(cwd: &PathBuf, args: &[&str]) {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git command should start");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn git_output(cwd: &PathBuf, args: &[&str]) -> String {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .expect("git command should start");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
     }
 }
