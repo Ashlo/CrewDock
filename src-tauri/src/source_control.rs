@@ -84,7 +84,6 @@ pub(crate) enum GitRefKind {
     LocalBranch,
     RemoteBranch,
     Tag,
-    Other,
 }
 
 #[derive(Debug, Clone, Serialize)]

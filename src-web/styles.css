@@ -85,6 +85,8 @@
   --shadow: 0 24px 80px rgba(0, 0, 0, 0.34);
   --chrome-height: 46px;
   --chrome-leading-space: 18px;
+  --statusbar-height: 24px;
+  --scm-sidebar-width: 428px;
 }
 
 * {
@@ -2306,35 +2308,40 @@ button {
 
 .workspace-git-backdrop {
   position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: stretch end;
-  padding: 10px;
+  top: var(--chrome-height);
+  right: 0;
+  bottom: var(--statusbar-height);
+  left: 0;
+  display: flex;
+  justify-content: flex-end;
+  align-items: stretch;
+  padding: 0;
   background:
     linear-gradient(
       270deg,
-      color-mix(in srgb, var(--overlay-bg) 92%, transparent) 0%,
-      color-mix(in srgb, var(--overlay-bg) 48%, transparent) 18%,
-      transparent 54%
+      color-mix(in srgb, var(--overlay-bg) 38%, transparent) 0%,
+      color-mix(in srgb, var(--overlay-bg) 14%, transparent) 14%,
+      transparent 34%
     );
-  backdrop-filter: blur(4px);
   pointer-events: auto;
 }
 
 .workspace-git-panel {
-  width: min(760px, calc(100vw - 20px));
+  width: min(var(--scm-sidebar-width), calc(100vw - 20px));
   height: 100%;
-  max-height: min(780px, calc(100vh - 28px));
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
-  border-radius: 16px;
-  border: 1px solid color-mix(in srgb, var(--overlay-panel-border) 84%, transparent);
+  border-radius: 0;
+  border-top: 0;
+  border-right: 0;
+  border-bottom: 0;
+  border-left: 1px solid color-mix(in srgb, var(--overlay-panel-border) 90%, transparent);
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 18%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent 18%),
     color-mix(in srgb, var(--overlay-panel-bg) 96%, black 4%);
   box-shadow:
-    0 24px 64px rgba(0, 0, 0, 0.32),
+    -18px 0 42px rgba(0, 0, 0, 0.24),
     inset 0 1px 0 rgba(255, 255, 255, 0.025);
 }
 
@@ -2352,7 +2359,7 @@ button {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 14px 16px 12px;
+  padding: 12px 14px 10px;
   border-bottom: 1px solid color-mix(in srgb, var(--overlay-divider) 92%, transparent);
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.014), transparent),
@@ -2468,8 +2475,8 @@ button {
 .workspace-git-panel-body {
   display: grid;
   align-content: start;
-  gap: 12px;
-  padding: 12px;
+  gap: 10px;
+  padding: 10px 10px 12px;
   overflow: auto;
   scrollbar-width: thin;
   scrollbar-color: var(--scrollbar-thumb) transparent;
@@ -2477,6 +2484,9 @@ button {
 
 .workspace-scm-shell {
   min-height: 0;
+  display: grid;
+  align-content: start;
+  gap: 10px;
 }
 
 .workspace-scm-toolbar {
@@ -2633,22 +2643,19 @@ button {
 .workspace-scm-main-changes,
 .workspace-scm-main-graph {
   display: grid;
-  grid-template-columns: minmax(0, 1.04fr) minmax(300px, 0.96fr);
-  gap: 12px;
+  grid-template-columns: 1fr;
+  gap: 10px;
   min-height: 0;
 }
 
 .workspace-scm-main-branches {
   display: grid;
-  gap: 12px;
+  gap: 10px;
   min-height: 0;
-  padding: 12px;
-  border-radius: 14px;
-  border: 1px solid rgba(255, 255, 255, 0.055);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent 22%),
-    rgba(255, 255, 255, 0.018);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
 }
 
 .workspace-scm-column {
@@ -2661,22 +2668,21 @@ button {
   display: grid;
   align-content: start;
   gap: 10px;
-  padding: 12px;
-  border-radius: 14px;
-  border: 1px solid rgba(255, 255, 255, 0.055);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent 22%),
-    rgba(255, 255, 255, 0.018);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.02);
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
 }
 
 .workspace-scm-column-list {
   overflow: auto;
-  padding-right: 10px;
+  padding-right: 4px;
 }
 
 .workspace-scm-column-detail {
   position: relative;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.045);
 }
 
 .workspace-scm-commit {
@@ -2799,7 +2805,7 @@ button {
 }
 
 .workspace-scm-branch-groups {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: 1fr;
 }
 
 .workspace-scm-section {
@@ -3085,7 +3091,8 @@ button {
 .workspace-scm-diff,
 .workspace-scm-task-output {
   padding: 10px 11px;
-  min-height: 260px;
+  min-height: 220px;
+  max-height: 320px;
 }
 
 .workspace-scm-commit-body {
@@ -4088,6 +4095,8 @@ button {
   }
 
   .workspace-git-backdrop {
+    top: 0;
+    bottom: 0;
     padding: 12px;
     background: rgba(8, 10, 14, 0.56);
   }
@@ -4095,6 +4104,7 @@ button {
   .workspace-git-panel {
     width: 100%;
     max-height: 100%;
+    border: 1px solid color-mix(in srgb, var(--overlay-panel-border) 84%, transparent);
     border-radius: 20px;
   }
 
