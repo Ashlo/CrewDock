@@ -2672,11 +2672,10 @@ function ensureFrame() {
 
 function createWorkspaceScreenElement(
   workspace,
-  windowSummary,
   layoutSignature = workspaceLayoutSignature(workspace),
 ) {
   const template = document.createElement("template");
-  template.innerHTML = renderWorkspace(workspace, windowSummary).trim();
+  template.innerHTML = renderWorkspace(workspace).trim();
   const screen = template.content.firstElementChild;
   if (!(screen instanceof HTMLElement)) {
     throw new Error("failed to create workspace screen");
@@ -2910,7 +2909,7 @@ function render() {
       workspaceScreens.delete(activeWorkspace.id);
     } else {
       discardCachedWorkspaceScreen(activeWorkspace.id);
-      const screen = createWorkspaceScreenElement(activeWorkspace, snapshot.window, nextLayoutSignature);
+      const screen = createWorkspaceScreenElement(activeWorkspace, nextLayoutSignature);
       stageRegion.appendChild(screen);
       mountWorkspaceTerminals(activeWorkspace, screen);
     }
@@ -4876,37 +4875,14 @@ function relabelMockPanes(panes) {
   });
 }
 
-function renderWorkspace(workspace, windowSummary = null) {
+function renderWorkspace(workspace) {
   const paneLayout = resolveWorkspacePaneLayout(workspace);
   const maximizedPane = uiState.maximizedPaneId
     ? workspace.panes.find((pane) => pane.id === uiState.maximizedPaneId) || null
     : null;
   const paneIndexById = new Map(workspace.panes.map((pane, index) => [pane.id, index]));
-  const paneCount = workspace.panes.length;
-  const gitSummary = workspace.gitDetail?.summary || null;
-  const gitBranchLabel = gitSummary && gitSummary.state !== "not-repo" && gitSummary.state !== "error"
-    ? formatGitBranchLabel(gitSummary)
-    : null;
-  const windowLabel = `${windowSummary?.label || "Primary"} window`;
   return `
     <main class="workspace-screen ${maximizedPane ? "is-maximized" : ""}">
-      <header class="workspace-session-header">
-        <div class="workspace-session-copy">
-          <p class="workspace-session-mark">Workspace Session</p>
-          <h1>${escapeHtml(workspace.name)}</h1>
-          <p class="workspace-session-path" title="${escapeHtml(workspace.path)}">${escapeHtml(workspace.path)}</p>
-        </div>
-        <div class="workspace-session-meta">
-          <span class="workspace-session-chip">${escapeHtml(windowLabel)}</span>
-          <span class="workspace-session-chip">${escapeHtml(`${paneCount} ${paneCount === 1 ? "pane" : "panes"}`)}</span>
-          <span class="workspace-session-chip">${escapeHtml(workspace.layout?.label || "Custom layout")}</span>
-          ${
-            gitBranchLabel
-              ? `<span class="workspace-session-chip is-${escapeHtml(getGitTone(gitSummary))}">${escapeHtml(gitBranchLabel)}</span>`
-              : ""
-          }
-        </div>
-      </header>
       <section class="terminal-layout">
         ${
           maximizedPane

@@ -2375,7 +2375,7 @@ button {
 .workspace-git-panel-mark {
   margin: 0;
   color: var(--muted);
-  font-size: 0.58rem;
+  font-size: 0.5rem;
   font-weight: 600;
   letter-spacing: 0.16em;
   text-transform: uppercase;
@@ -2391,7 +2391,7 @@ button {
 .workspace-git-panel h2 {
   margin: 0;
   font-family: "SF Pro Display", "Avenir Next", sans-serif;
-  font-size: 0.92rem;
+  font-size: 0.8rem;
   font-weight: 600;
   letter-spacing: -0.015em;
   line-height: 1.1;
@@ -2410,7 +2410,7 @@ button {
   border: 1px solid color-mix(in srgb, var(--overlay-panel-border) 88%, transparent);
   background: color-mix(in srgb, var(--overlay-panel-control-bg) 82%, transparent);
   color: var(--surface-soft-text);
-  font-size: 0.6rem;
+  font-size: 0.52rem;
   font-weight: 600;
 }
 
@@ -2433,7 +2433,7 @@ button {
 .workspace-git-panel-copy {
   margin: 0;
   color: var(--surface-soft-text);
-  font-size: 0.66rem;
+  font-size: 0.58rem;
   line-height: 1.4;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2515,7 +2515,7 @@ button {
   border: 1px solid rgba(255, 255, 255, 0.05);
   background: rgba(255, 255, 255, 0.025);
   color: var(--surface-soft-text);
-  font-size: 0.61rem;
+  font-size: 0.54rem;
   font-weight: 600;
 }
 
@@ -2555,7 +2555,7 @@ button {
 .workspace-scm-secondary-button,
 .workspace-scm-ghost-button,
 .workspace-scm-load-more {
-  min-height: 26px;
+  min-height: 24px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -2564,7 +2564,7 @@ button {
   border: 1px solid rgba(255, 255, 255, 0.07);
   background: rgba(255, 255, 255, 0.025);
   color: var(--text);
-  font-size: 0.64rem;
+  font-size: 0.56rem;
   font-weight: 600;
   transition:
     border-color 140ms ease,
@@ -2617,7 +2617,7 @@ button {
   border: 0;
   background: transparent;
   color: var(--surface-soft-text);
-  font-size: 0.64rem;
+  font-size: 0.56rem;
   font-weight: 600;
   letter-spacing: 0.01em;
   transition:
@@ -2702,14 +2702,14 @@ button {
 }
 
 .workspace-scm-commit-head strong {
-  font-size: 0.72rem;
+  font-size: 0.64rem;
   font-weight: 600;
 }
 
 .workspace-scm-commit-head span,
 .workspace-scm-commit-hint {
   color: var(--surface-soft-text);
-  font-size: 0.61rem;
+  font-size: 0.55rem;
   line-height: 1.4;
 }
 
@@ -2722,7 +2722,7 @@ button {
   background: rgba(0, 0, 0, 0.12);
   color: var(--text);
   font: inherit;
-  font-size: 0.67rem;
+  font-size: 0.59rem;
   line-height: 1.5;
   outline: none;
   transition:
@@ -2731,13 +2731,13 @@ button {
 }
 
 .workspace-scm-commit-input {
-  min-height: 76px;
+  min-height: 68px;
   padding: 9px 10px;
   resize: vertical;
 }
 
 .workspace-scm-input {
-  min-height: 30px;
+  min-height: 28px;
   padding: 0 9px;
 }
 
@@ -2765,7 +2765,7 @@ button {
 }
 
 .workspace-scm-count-badge {
-  min-height: 18px;
+  min-height: 17px;
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -2773,11 +2773,11 @@ button {
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.025);
   color: var(--surface-soft-text);
-  font-size: 0.58rem;
+  font-size: 0.52rem;
 }
 
 .workspace-scm-count-badge strong {
-  font-size: 0.62rem;
+  font-size: 0.55rem;
 }
 
 .workspace-scm-count-badge.is-staged strong {
@@ -2830,7 +2830,7 @@ button {
 }
 
 .workspace-scm-section-title strong {
-  font-size: 0.62rem;
+  font-size: 0.55rem;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -2838,7 +2838,7 @@ button {
 
 .workspace-scm-section-title span {
   color: var(--surface-soft-text);
-  font-size: 0.6rem;
+  font-size: 0.54rem;
 }
 
 .workspace-scm-section-actions,
@@ -2852,7 +2852,7 @@ button {
 }
 
 .workspace-scm-inline-action {
-  min-height: 22px;
+  min-height: 20px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -2861,7 +2861,7 @@ button {
   border: 1px solid rgba(255, 255, 255, 0.055);
   background: transparent;
   color: var(--surface-soft-text);
-  font-size: 0.58rem;
+  font-size: 0.52rem;
   font-weight: 600;
   transition:
     border-color 140ms ease,
@@ -2938,7 +2938,7 @@ button {
   align-items: center;
   justify-content: center;
   color: var(--surface-soft-text);
-  font-size: 0.64rem;
+  font-size: 0.56rem;
   font-weight: 700;
 }
 
@@ -2988,7 +2988,7 @@ button {
 .workspace-scm-branch-head strong,
 .workspace-scm-graph-copy strong,
 .workspace-scm-detail-header strong {
-  font-size: 0.72rem;
+  font-size: 0.64rem;
   font-weight: 600;
   color: var(--text);
 }
@@ -2999,7 +2999,7 @@ button {
 .workspace-scm-detail-header span,
 .workspace-scm-task-header span {
   color: var(--surface-soft-text);
-  font-size: 0.6rem;
+  font-size: 0.54rem;
   line-height: 1.4;
 }
 
@@ -3038,7 +3038,7 @@ button {
 .workspace-scm-detail-kicker {
   margin: 0 0 4px;
   color: var(--surface-soft-text);
-  font-size: 0.56rem;
+  font-size: 0.5rem;
   font-weight: 600;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -3056,7 +3056,7 @@ button {
   border: 1px solid rgba(255, 255, 255, 0.055);
   background: transparent;
   color: var(--surface-soft-text);
-  font-size: 0.58rem;
+  font-size: 0.52rem;
   font-weight: 600;
 }
 
@@ -3082,7 +3082,7 @@ button {
   background: rgba(0, 0, 0, 0.16);
   color: color-mix(in srgb, var(--text) 88%, white 12%);
   font-family: "SF Mono", "Menlo", monospace;
-  font-size: 0.61rem;
+  font-size: 0.55rem;
   line-height: 1.58;
   white-space: pre-wrap;
   word-break: break-word;
@@ -3103,7 +3103,7 @@ button {
 .workspace-scm-task-command {
   margin: 0;
   color: var(--surface-soft-text);
-  font-size: 0.58rem;
+  font-size: 0.52rem;
 }
 
 .workspace-scm-branches-head {
@@ -3123,13 +3123,13 @@ button {
 }
 
 .workspace-scm-branch-summary strong {
-  font-size: 0.72rem;
+  font-size: 0.64rem;
   font-weight: 600;
 }
 
 .workspace-scm-branch-summary span {
   color: var(--surface-soft-text);
-  font-size: 0.61rem;
+  font-size: 0.55rem;
 }
 
 .workspace-scm-branch-form,
@@ -3157,7 +3157,7 @@ button {
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.04);
   color: var(--surface-soft-text);
-  font-size: 0.54rem;
+  font-size: 0.48rem;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -3194,7 +3194,7 @@ button {
   width: 28px;
   color: var(--surface-soft-text);
   font-family: "SF Mono", "Menlo", monospace;
-  font-size: 0.62rem;
+  font-size: 0.55rem;
   line-height: 1.45;
   white-space: pre;
 }
@@ -3215,7 +3215,7 @@ button {
   border: 1px solid rgba(255, 255, 255, 0.055);
   background: rgba(255, 255, 255, 0.025);
   color: var(--surface-soft-text);
-  font-size: 0.54rem;
+  font-size: 0.48rem;
   font-weight: 600;
 }
 
@@ -3602,99 +3602,7 @@ button {
 
 .workspace-screen {
   height: 100%;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  gap: 10px;
   overflow: hidden;
-}
-
-.workspace-session-header {
-  min-width: 0;
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 12px 14px;
-  border-radius: 14px;
-  border: 1px solid var(--surface-card-border);
-  background:
-    linear-gradient(180deg, var(--overlay-panel-highlight), transparent 28%),
-    color-mix(in srgb, var(--surface-card-bg) 84%, var(--panel) 16%);
-  box-shadow: inset 0 1px 0 var(--overlay-panel-highlight);
-}
-
-.workspace-session-copy {
-  min-width: 0;
-  display: grid;
-  gap: 4px;
-}
-
-.workspace-session-mark {
-  margin: 0;
-  color: var(--muted);
-  font-size: 0.62rem;
-  font-weight: 700;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-}
-
-.workspace-session-copy h1 {
-  margin: 0;
-  font-family: "SF Pro Display", "Avenir Next", sans-serif;
-  font-size: 1.08rem;
-  font-weight: 600;
-  letter-spacing: -0.03em;
-  line-height: 1.05;
-}
-
-.workspace-session-path {
-  min-width: 0;
-  max-width: min(100%, 72ch);
-  margin: 0;
-  color: var(--surface-soft-text);
-  font-size: 0.76rem;
-  line-height: 1.4;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.workspace-session-meta {
-  flex: 0 0 auto;
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-.workspace-session-chip {
-  min-height: 26px;
-  display: inline-flex;
-  align-items: center;
-  padding: 0 10px;
-  border-radius: 999px;
-  border: 1px solid var(--control-border);
-  background: var(--surface-pill-bg);
-  color: var(--surface-soft-text);
-  font-size: 0.7rem;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-}
-
-.workspace-session-chip.is-clean {
-  border-color: color-mix(in srgb, #8fd7a2 34%, transparent);
-  color: #8fd7a2;
-}
-
-.workspace-session-chip.is-dirty {
-  border-color: color-mix(in srgb, #f2c36a 34%, transparent);
-  color: #f2c36a;
-}
-
-.workspace-session-chip.is-conflicted,
-.workspace-session-chip.is-error {
-  border-color: color-mix(in srgb, var(--danger) 34%, transparent);
-  color: color-mix(in srgb, var(--danger) 38%, var(--text) 62%);
 }
 
 .terminal-layout,
@@ -3707,6 +3615,7 @@ button {
 .terminal-layout {
   display: flex;
   flex: 1;
+  height: 100%;
   min-height: 0;
   overflow: hidden;
   padding: 1px;
@@ -4049,21 +3958,6 @@ button {
 
   .workspace-stage {
     padding: 6px 10px 10px;
-  }
-
-  .workspace-session-header {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 10px;
-    padding: 11px 12px;
-  }
-
-  .workspace-session-copy h1 {
-    font-size: 0.96rem;
-  }
-
-  .workspace-session-meta {
-    justify-content: flex-start;
   }
 
   .workspace-activity-rail {
