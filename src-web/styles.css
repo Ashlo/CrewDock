@@ -87,6 +87,7 @@
   --chrome-leading-space: 18px;
   --statusbar-height: 24px;
   --scm-sidebar-width: 428px;
+  --ui-text-scale: 1;
 }
 
 * {
@@ -99,6 +100,10 @@ body,
   height: 100%;
   margin: 0;
   overflow: hidden;
+}
+
+html {
+  font-size: calc(16px * var(--ui-text-scale));
 }
 
 body {
@@ -2032,6 +2037,237 @@ button {
   line-height: 1.5;
 }
 
+.settings-adjustment-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.settings-adjustment-card {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.settings-adjustment-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-adjustment-title {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.settings-adjustment-copy {
+  margin: 4px 0 0;
+  color: var(--surface-soft-text);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.settings-adjustment-value {
+  flex: 0 0 auto;
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.settings-adjustment-range-shell {
+  display: grid;
+  gap: 8px;
+  --settings-adjustment-progress: 50%;
+}
+
+.settings-adjustment-range {
+  width: 100%;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  outline: none;
+  cursor: ew-resize;
+}
+
+.settings-adjustment-range::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 999px;
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--accent) 72%, white 8%) 0%,
+      color-mix(in srgb, var(--accent) 72%, white 8%) var(--settings-adjustment-progress),
+      rgba(255, 255, 255, 0.08) var(--settings-adjustment-progress),
+      rgba(255, 255, 255, 0.08) 100%
+    );
+}
+
+.settings-adjustment-range::-webkit-slider-thumb {
+  width: 16px;
+  height: 16px;
+  margin-top: -5px;
+  appearance: none;
+  -webkit-appearance: none;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 54%, rgba(255, 255, 255, 0.22));
+  background: color-mix(in srgb, var(--panel-strong) 72%, white 28%);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+  cursor: ew-resize;
+}
+
+.settings-adjustment-range::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 54%, rgba(255, 255, 255, 0.22));
+  background: color-mix(in srgb, var(--panel-strong) 72%, white 28%);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+  cursor: ew-resize;
+}
+
+.settings-adjustment-range::-moz-range-track {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.settings-adjustment-range::-moz-range-progress {
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 72%, white 8%);
+}
+
+.settings-adjustment-range-labels {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--surface-soft-text);
+  font-size: 0.7rem;
+  letter-spacing: 0.01em;
+}
+
+.settings-adjustment-preview {
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 36%),
+    rgba(0, 0, 0, 0.12);
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    font-size 140ms ease,
+    transform 140ms ease;
+}
+
+.settings-adjustment-preview-interface {
+  --settings-preview-interface-scale: 1;
+  font-size: calc(0.8rem * var(--settings-preview-interface-scale));
+  line-height: 1.4;
+  transition:
+    font-size 140ms ease,
+    gap 140ms ease;
+}
+
+.settings-preview-interface-rail {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-preview-interface-tab,
+.settings-preview-interface-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.9em;
+  padding: 0 0.85em;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--surface-soft-text);
+  font-size: 0.8em;
+  font-weight: 600;
+}
+
+.settings-preview-interface-tab.is-active {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 24%, rgba(255, 255, 255, 0.08));
+  background: color-mix(in srgb, var(--accent) 12%, rgba(255, 255, 255, 0.03));
+}
+
+.settings-preview-interface-pill {
+  color: color-mix(in srgb, var(--accent) 78%, white 10%);
+}
+
+.settings-preview-interface-card {
+  display: grid;
+  gap: 4px;
+}
+
+.settings-preview-interface-card strong {
+  font-size: 1em;
+  font-weight: 600;
+}
+
+.settings-preview-interface-card span,
+.settings-preview-interface-meta {
+  color: var(--surface-soft-text);
+  font-size: 0.84em;
+}
+
+.settings-adjustment-preview-terminal {
+  --settings-preview-terminal-size: 13.5;
+  font-family: "SF Mono", "SFMono-Regular", "Menlo", monospace;
+  font-size: calc(var(--settings-preview-terminal-size) * 0.066rem);
+  line-height: 1.45;
+  transition:
+    font-size 140ms ease,
+    line-height 140ms ease,
+    letter-spacing 140ms ease;
+}
+
+.settings-preview-terminal-line {
+  display: flex;
+  align-items: center;
+  gap: 0.7em;
+  color: var(--text);
+}
+
+.settings-preview-terminal-line.is-muted {
+  color: var(--surface-soft-text);
+}
+
+.settings-preview-terminal-line.is-accent {
+  color: color-mix(in srgb, var(--accent) 70%, white 12%);
+}
+
+.settings-preview-terminal-prompt {
+  color: color-mix(in srgb, var(--accent) 62%, white 10%);
+  font-weight: 600;
+}
+
 .settings-theme-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -3892,6 +4128,10 @@ button {
     grid-template-columns: 1fr;
   }
 
+  .settings-adjustment-grid {
+    grid-template-columns: 1fr;
+  }
+
   .settings-guide-header {
     flex-direction: column;
   }
@@ -4055,6 +4295,11 @@ button {
 
   .settings-sheet-header,
   .settings-panel-intro {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .settings-adjustment-head {
     flex-direction: column;
     align-items: stretch;
   }

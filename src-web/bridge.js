@@ -21,6 +21,10 @@ export function createBridge({
     return {
       getAppSnapshot: () => tauriApi.core.invoke("get_app_snapshot"),
       setTheme: (themeId) => tauriApi.core.invoke("set_theme", { themeId }),
+      setInterfaceTextScale: (interfaceTextScale) =>
+        tauriApi.core.invoke("set_interface_text_scale", { interfaceTextScale }),
+      setTerminalFontSize: (terminalFontSize) =>
+        tauriApi.core.invoke("set_terminal_font_size", { terminalFontSize }),
       createWorkspace: (path, paneCount) =>
         tauriApi.core.invoke("create_workspace", { path, paneCount }),
       renameWorkspace: (workspaceId, name) =>
@@ -158,6 +162,8 @@ function createMockBridge({
   };
   const settings = {
     themeId: defaultThemeId,
+    interfaceTextScale: 1,
+    terminalFontSize: 13.5,
   };
 
   let workspaceCounter = 0;
@@ -473,6 +479,14 @@ function createMockBridge({
       }
 
       settings.themeId = themeId;
+      return emitState();
+    },
+    setInterfaceTextScale: async (interfaceTextScale) => {
+      settings.interfaceTextScale = Number(interfaceTextScale) || 1;
+      return emitState();
+    },
+    setTerminalFontSize: async (terminalFontSize) => {
+      settings.terminalFontSize = Number(terminalFontSize) || 13.5;
       return emitState();
     },
     openDirectory: async (defaultPath) => {

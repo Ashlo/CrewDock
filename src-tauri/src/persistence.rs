@@ -28,6 +28,10 @@ pub(crate) struct PersistedWorkspaceState {
 pub(crate) struct PersistedSettings {
     #[serde(default)]
     pub(crate) theme_id: Option<String>,
+    #[serde(default)]
+    pub(crate) interface_text_scale: Option<f64>,
+    #[serde(default)]
+    pub(crate) terminal_font_size: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -90,6 +94,8 @@ pub(crate) fn build_persisted_state(runtime: &RuntimeState) -> PersistedWorkspac
     PersistedWorkspaceState {
         settings: PersistedSettings {
             theme_id: Some(runtime.settings.theme_id.as_str().to_string()),
+            interface_text_scale: Some(runtime.settings.interface_text_scale),
+            terminal_font_size: Some(runtime.settings.terminal_font_size),
         },
         workspaces: runtime
             .workspaces
@@ -217,6 +223,16 @@ pub(crate) fn load_persisted_from_disk(
         .and_then(ThemeId::parse)
     {
         runtime.settings.theme_id = theme_id;
+    }
+
+    if let Some(interface_text_scale) = persisted.settings.interface_text_scale {
+        runtime.settings.interface_text_scale =
+            crate::normalize_interface_text_scale(interface_text_scale);
+    }
+
+    if let Some(terminal_font_size) = persisted.settings.terminal_font_size {
+        runtime.settings.terminal_font_size =
+            crate::normalize_terminal_font_size(terminal_font_size);
     }
 
     let active_index = persisted.active_workspace_index;

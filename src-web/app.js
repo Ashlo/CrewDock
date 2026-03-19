@@ -23,6 +23,12 @@ const MAX_WORKSPACE_ATTENTION_COUNT = 99;
 const LAUNCHER_CARD_TRANSITION_MS = 360;
 const GIT_REFRESH_INTERVAL_MS = 3000;
 const DEFAULT_THEME_ID = "one-dark";
+const DEFAULT_INTERFACE_TEXT_SCALE = 1;
+const MIN_INTERFACE_TEXT_SCALE = 0.85;
+const MAX_INTERFACE_TEXT_SCALE = 1.2;
+const DEFAULT_TERMINAL_FONT_SIZE = 13.5;
+const MIN_TERMINAL_FONT_SIZE = 11;
+const MAX_TERMINAL_FONT_SIZE = 18;
 const COMPACT_PANE_HEIGHT = 420;
 const LAUNCHER_COMMANDS = Object.freeze(["help", "pwd", "ls", "cd", "open", "clear"]);
 const PATH_AWARE_LAUNCHER_COMMANDS = new Set(["ls", "cd", "open"]);
@@ -585,12 +591,12 @@ async function init() {
   document.body.dataset.platform = detectPlatform();
   uiState.snapshot = await bridge.getAppSnapshot();
   hydrateRuntimeActivityFromSnapshot(uiState.snapshot);
-  applyActiveTheme(getActiveThemeId(uiState.snapshot));
+  applySnapshotSettings(uiState.snapshot);
 
   if (bridge.listenState) {
     await bridge.listenState((snapshot) => {
       uiState.snapshot = snapshot;
-      applyActiveTheme(getActiveThemeId(snapshot));
+      applySnapshotSettings(snapshot);
       render();
     });
   }
@@ -793,6 +799,56 @@ function getActiveThemeId(snapshot = uiState.snapshot) {
   return normalizeThemeId(snapshot?.settings?.themeId);
 }
 
+function normalizeInterfaceTextScale(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) {
+    return DEFAULT_INTERFACE_TEXT_SCALE;
+  }
+
+  return Math.min(MAX_INTERFACE_TEXT_SCALE, Math.max(MIN_INTERFACE_TEXT_SCALE, numericValue));
+}
+
+function normalizeTerminalFontSize(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) {
+    return DEFAULT_TERMINAL_FONT_SIZE;
+  }
+
+  return Math.min(MAX_TERMINAL_FONT_SIZE, Math.max(MIN_TERMINAL_FONT_SIZE, numericValue));
+}
+
+function getInterfaceTextScale(snapshot = uiState.snapshot) {
+  return normalizeInterfaceTextScale(snapshot?.settings?.interfaceTextScale);
+}
+
+function getTerminalFontSize(snapshot = uiState.snapshot) {
+  return normalizeTerminalFontSize(snapshot?.settings?.terminalFontSize);
+}
+
+function createSettingsDraft(snapshot = uiState.snapshot) {
+  return {
+    interfaceTextScale: getInterfaceTextScale(snapshot),
+    terminalFontSize: getTerminalFontSize(snapshot),
+  };
+}
+
+function syncSettingsDraftFromSnapshot(snapshot = uiState.snapshot) {
+  uiState.settingsDraft = createSettingsDraft(snapshot);
+  return uiState.settingsDraft;
+}
+
+function getDraftInterfaceTextScale(snapshot = uiState.snapshot) {
+  return normalizeInterfaceTextScale(
+    uiState.settingsDraft?.interfaceTextScale ?? snapshot?.settings?.interfaceTextScale,
+  );
+}
+
+function getDraftTerminalFontSize(snapshot = uiState.snapshot) {
+  return normalizeTerminalFontSize(
+    uiState.settingsDraft?.terminalFontSize ?? snapshot?.settings?.terminalFontSize,
+  );
+}
+
 function getCurrentThemeDefinition() {
   return getThemeDefinition(getActiveThemeId());
 }
@@ -812,16 +868,270 @@ function applyActiveTheme(themeId) {
 
   root.style.colorScheme = theme.colorScheme || "dark";
   document.body.dataset.theme = theme.id;
-  if (uiState.appliedThemeId !== theme.id) {
-    uiState.appliedThemeId = theme.id;
-    syncMountedTerminalThemes(theme);
+}
+
+function applyInterfaceTextScale(interfaceTextScale) {
+  const root = document.documentElement;
+  root.style.setProperty("--ui-text-scale", String(interfaceTextScale));
+}
+
+function applySettingsAppearance(themeId, interfaceTextScale, terminalFontSize) {
+  applyActiveTheme(themeId);
+  applyInterfaceTextScale(interfaceTextScale);
+
+  if (
+    uiState.appliedThemeId !== themeId
+    || uiState.appliedTerminalFontSize !== terminalFontSize
+  ) {
+    syncMountedTerminalAppearance(getThemeDefinition(themeId), terminalFontSize);
+    uiState.appliedThemeId = themeId;
+    uiState.appliedTerminalFontSize = terminalFontSize;
+  }
+
+  uiState.appliedInterfaceTextScale = interfaceTextScale;
+}
+
+function applySnapshotSettings(snapshot = uiState.snapshot) {
+  applySettingsAppearance(
+    getActiveThemeId(snapshot),
+    getInterfaceTextScale(snapshot),
+    getTerminalFontSize(snapshot),
+  );
+}
+
+function applyRenderedSettings(snapshot = uiState.snapshot) {
+  const useDraft = uiState.settingsVisible && uiState.settingsDraft;
+  applySettingsAppearance(
+    getActiveThemeId(snapshot),
+    useDraft ? getDraftInterfaceTextScale(snapshot) : getInterfaceTextScale(snapshot),
+    useDraft ? getDraftTerminalFontSize(snapshot) : getTerminalFontSize(snapshot),
+  );
+}
+
+function clearSettingsDraft({ restoreSnapshot = false } = {}) {
+  uiState.settingsDraft = null;
+  if (restoreSnapshot) {
+    applySnapshotSettings(uiState.snapshot);
   }
 }
 
-function syncMountedTerminalThemes(theme = getCurrentThemeDefinition()) {
-  for (const state of paneTerminals.values()) {
-    state.terminal.setOption("theme", { ...theme.terminalTheme });
-    state.themeId = theme.id;
+function closeSettingsSheet() {
+  uiState.settingsVisible = false;
+  render();
+}
+
+function formatInterfaceTextScaleLabel(value) {
+  return `${Math.round(normalizeInterfaceTextScale(value) * 100)}%`;
+}
+
+function formatTerminalFontSizeLabel(value) {
+  return `${formatSettingNumber(normalizeTerminalFontSize(value))}px`;
+}
+
+function calculateRangeProgress(value, min, max) {
+  if (!(max > min)) {
+    return 0;
+  }
+
+  const progress = ((value - min) / (max - min)) * 100;
+  return Math.min(100, Math.max(0, progress));
+}
+
+function syncSettingsPreviewDom(root = document) {
+  const sheet = root.querySelector(".settings-sheet");
+  if (!(sheet instanceof HTMLElement) || !uiState.settingsVisible || !uiState.settingsDraft) {
+    return;
+  }
+
+  const interfaceTextScale = getDraftInterfaceTextScale();
+  const terminalFontSize = getDraftTerminalFontSize();
+
+  const interfaceValue = sheet.querySelector("[data-settings-interface-value]");
+  if (interfaceValue) {
+    interfaceValue.textContent = formatInterfaceTextScaleLabel(interfaceTextScale);
+  }
+
+  const terminalValue = sheet.querySelector("[data-settings-terminal-value]");
+  if (terminalValue) {
+    terminalValue.textContent = formatTerminalFontSizeLabel(terminalFontSize);
+  }
+
+  const interfaceRangeShell = sheet.querySelector("[data-settings-interface-range-shell]");
+  if (interfaceRangeShell instanceof HTMLElement) {
+    interfaceRangeShell.style.setProperty(
+      "--settings-adjustment-progress",
+      `${calculateRangeProgress(interfaceTextScale, MIN_INTERFACE_TEXT_SCALE, MAX_INTERFACE_TEXT_SCALE)}%`,
+    );
+  }
+  const interfaceRange = sheet.querySelector("[data-settings-interface-range]");
+  if (interfaceRange instanceof HTMLElement) {
+    interfaceRange.style.setProperty(
+      "--settings-adjustment-progress",
+      `${calculateRangeProgress(interfaceTextScale, MIN_INTERFACE_TEXT_SCALE, MAX_INTERFACE_TEXT_SCALE)}%`,
+    );
+  }
+
+  const terminalRangeShell = sheet.querySelector("[data-settings-terminal-range-shell]");
+  if (terminalRangeShell instanceof HTMLElement) {
+    terminalRangeShell.style.setProperty(
+      "--settings-adjustment-progress",
+      `${calculateRangeProgress(terminalFontSize, MIN_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE)}%`,
+    );
+  }
+  const terminalRange = sheet.querySelector("[data-settings-terminal-range]");
+  if (terminalRange instanceof HTMLElement) {
+    terminalRange.style.setProperty(
+      "--settings-adjustment-progress",
+      `${calculateRangeProgress(terminalFontSize, MIN_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE)}%`,
+    );
+  }
+
+  const interfacePreview = sheet.querySelector("[data-settings-interface-preview]");
+  if (interfacePreview instanceof HTMLElement) {
+    interfacePreview.style.fontSize = `${0.82 * interfaceTextScale}rem`;
+    interfacePreview.style.setProperty(
+      "--settings-preview-interface-scale",
+      String(interfaceTextScale),
+    );
+  }
+
+  const terminalPreview = sheet.querySelector("[data-settings-terminal-preview]");
+  if (terminalPreview instanceof HTMLElement) {
+    terminalPreview.style.fontSize = `${terminalFontSize}px`;
+    terminalPreview.style.setProperty(
+      "--settings-preview-terminal-size",
+      String(terminalFontSize),
+    );
+  }
+}
+
+function previewInterfaceTextScale(value) {
+  if (!uiState.settingsVisible) {
+    return;
+  }
+
+  if (!uiState.settingsDraft) {
+    syncSettingsDraftFromSnapshot();
+  }
+
+  uiState.settingsDraft.interfaceTextScale = normalizeInterfaceTextScale(value);
+  applyRenderedSettings(uiState.snapshot);
+  syncSettingsPreviewDom(document);
+}
+
+function previewTerminalFontSize(value) {
+  if (!uiState.settingsVisible) {
+    return;
+  }
+
+  if (!uiState.settingsDraft) {
+    syncSettingsDraftFromSnapshot();
+  }
+
+  uiState.settingsDraft.terminalFontSize = normalizeTerminalFontSize(value);
+  applyRenderedSettings(uiState.snapshot);
+  syncSettingsPreviewDom(document);
+}
+
+async function commitInterfaceTextScale(value) {
+  const interfaceTextScale = normalizeInterfaceTextScale(value);
+  if (interfaceTextScale !== getInterfaceTextScale()) {
+    uiState.snapshot = await bridge.setInterfaceTextScale(interfaceTextScale);
+  }
+  syncSettingsDraftFromSnapshot(uiState.snapshot);
+  applySnapshotSettings(uiState.snapshot);
+  render();
+}
+
+async function commitTerminalFontSize(value) {
+  const terminalFontSize = normalizeTerminalFontSize(value);
+  if (terminalFontSize !== getTerminalFontSize()) {
+    uiState.snapshot = await bridge.setTerminalFontSize(terminalFontSize);
+  }
+  syncSettingsDraftFromSnapshot(uiState.snapshot);
+  applySnapshotSettings(uiState.snapshot);
+  render();
+}
+
+function bindSettingsSheetControls(root = document) {
+  const settingsBackdrop = root.querySelector(".settings-sheet-backdrop");
+  if (settingsBackdrop instanceof HTMLElement) {
+    settingsBackdrop.addEventListener("click", (event) => {
+      if (event.target !== settingsBackdrop) {
+        return;
+      }
+
+      event.preventDefault();
+      closeSettingsSheet();
+    });
+  }
+
+  const settingsCloseButton = root.querySelector(".settings-sheet-close");
+  if (settingsCloseButton instanceof HTMLButtonElement) {
+    settingsCloseButton.type = "button";
+    settingsCloseButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      closeSettingsSheet();
+    });
+  }
+
+  const interfaceRange = root.querySelector("[data-settings-interface-range]");
+  if (interfaceRange instanceof HTMLInputElement) {
+    interfaceRange.addEventListener("input", (event) => {
+      event.stopPropagation();
+      previewInterfaceTextScale(interfaceRange.value);
+    });
+    interfaceRange.addEventListener("change", (event) => {
+      event.stopPropagation();
+      void commitInterfaceTextScale(interfaceRange.value);
+    });
+  }
+
+  const terminalRange = root.querySelector("[data-settings-terminal-range]");
+  if (terminalRange instanceof HTMLInputElement) {
+    terminalRange.addEventListener("input", (event) => {
+      event.stopPropagation();
+      previewTerminalFontSize(terminalRange.value);
+    });
+    terminalRange.addEventListener("change", (event) => {
+      event.stopPropagation();
+      void commitTerminalFontSize(terminalRange.value);
+    });
+  }
+}
+
+function syncMountedTerminalAppearance(
+  theme = getCurrentThemeDefinition(),
+  terminalFontSize = getTerminalFontSize(),
+) {
+  for (const [paneId, state] of paneTerminals.entries()) {
+    let shouldRefit = false;
+    let shouldRefresh = false;
+    if (state.themeId !== theme.id) {
+      state.terminal.setOption("theme", { ...theme.terminalTheme });
+      state.themeId = theme.id;
+      shouldRefresh = true;
+    }
+    if (state.fontSize !== terminalFontSize) {
+      state.terminal.setOption("fontSize", terminalFontSize);
+      state.fontSize = terminalFontSize;
+      shouldRefit = true;
+      shouldRefresh = true;
+    }
+    if (shouldRefit || shouldRefresh) {
+      requestAnimationFrame(() => {
+        if (shouldRefit) {
+          state.fitAddon.fit();
+          state.size = { cols: 0, rows: 0 };
+          fitTerminal(paneId);
+        }
+        if (shouldRefresh) {
+          state.terminal.clearTextureAtlas();
+          state.terminal.refresh(0, Math.max(0, state.terminal.rows - 1));
+        }
+      });
+    }
   }
 }
 
@@ -832,15 +1142,27 @@ async function handleClick(event) {
     return;
   }
 
-  if (target.dataset.action === "close-settings" && clickedElement?.closest(".settings-sheet")) {
+  if (
+    target.dataset.action === "close-settings"
+    && target.classList.contains("settings-sheet-backdrop")
+    && clickedElement?.closest(".settings-sheet")
+  ) {
     return;
   }
 
-  if (target.dataset.action === "close-git-panel" && clickedElement?.closest(".workspace-git-panel")) {
+  if (
+    target.dataset.action === "close-git-panel"
+    && target.classList.contains("workspace-git-backdrop")
+    && clickedElement?.closest(".workspace-git-panel")
+  ) {
     return;
   }
 
-  if (target.dataset.action === "close-quick-switcher" && clickedElement?.closest(".workspace-quick-switcher")) {
+  if (
+    target.dataset.action === "close-quick-switcher"
+    && target.classList.contains("workspace-quick-switcher-backdrop")
+    && clickedElement?.closest(".workspace-quick-switcher")
+  ) {
     return;
   }
 
@@ -1013,6 +1335,31 @@ async function handleClick(event) {
     }
 
     uiState.snapshot = await bridge.setTheme(themeId);
+    applySnapshotSettings(uiState.snapshot);
+    render();
+    return;
+  }
+
+  if (target.dataset.action === "set-interface-text-scale") {
+    const interfaceTextScale = normalizeInterfaceTextScale(target.dataset.textScale);
+    if (interfaceTextScale === getInterfaceTextScale()) {
+      return;
+    }
+
+    uiState.snapshot = await bridge.setInterfaceTextScale(interfaceTextScale);
+    applySnapshotSettings(uiState.snapshot);
+    render();
+    return;
+  }
+
+  if (target.dataset.action === "set-terminal-font-size") {
+    const terminalFontSize = normalizeTerminalFontSize(target.dataset.fontSize);
+    if (terminalFontSize === getTerminalFontSize()) {
+      return;
+    }
+
+    uiState.snapshot = await bridge.setTerminalFontSize(terminalFontSize);
+    applySnapshotSettings(uiState.snapshot);
     render();
     return;
   }
@@ -1341,7 +1688,7 @@ function handleInput(event) {
   }
 }
 
-function handleChange(event) {
+async function handleChange(event) {
   const countInput = event.target.closest("[data-terminal-count-input]");
   if (!countInput || !uiState.pendingWorkspaceDraft) {
     return;
@@ -2738,11 +3085,17 @@ function render() {
     return;
   }
 
-  applyActiveTheme(getActiveThemeId(uiState.snapshot));
-  syncRuntimeActivityState(uiState.snapshot);
+  const snapshot = uiState.snapshot;
+  if (!uiState.settingsVisible && uiState.settingsDraft) {
+    clearSettingsDraft();
+  } else if (uiState.settingsVisible && !uiState.settingsDraft) {
+    syncSettingsDraftFromSnapshot(snapshot);
+  }
+
+  applyRenderedSettings(snapshot);
+  syncRuntimeActivityState(snapshot);
   ensureFrame();
 
-  const snapshot = uiState.snapshot;
   const activeWorkspace = snapshot.activeWorkspace;
   const shouldShowLauncher = uiState.launcherVisible || !activeWorkspace;
 
@@ -2829,6 +3182,10 @@ function render() {
         : uiState.gitPanelVisible && activeWorkspace
           ? renderGitPanel(activeWorkspace)
           : "";
+  if (uiState.settingsVisible) {
+    syncSettingsPreviewDom(modalRegion);
+    bindSettingsSheetControls(modalRegion);
+  }
   if (sourceControlFocusState && uiState.gitPanelVisible) {
     restoreSourceControlFocusState(sourceControlFocusState, modalRegion);
   }
@@ -3357,6 +3714,8 @@ function normalizeWheelDelta(event, tabs) {
 
 function renderSettingsSheet(snapshot) {
   const activeThemeId = getActiveThemeId(snapshot);
+  const interfaceTextScale = getDraftInterfaceTextScale(snapshot);
+  const terminalFontSize = getDraftTerminalFontSize(snapshot);
   const themes = Object.values(THEME_REGISTRY);
   const primaryModifier = getPrimaryModifierLabel();
   const activeSection = normalizeSettingsSection(uiState.settingsSection);
@@ -3411,6 +3770,30 @@ function renderSettingsSheet(snapshot) {
                     <h3>${escapeHtml(getThemeDefinition(activeThemeId).label)}</h3>
                   </div>
                   <p class="settings-panel-copy">Pick a palette and CrewDock updates the launcher, chrome, menus, panes, and xterm colors in place.</p>
+                </div>
+                <div class="settings-adjustment-grid">
+                  ${renderSettingsSliderCard({
+                    kind: "interface",
+                    title: "Interface text",
+                    copy: "Scales the chrome, panels, menus, and settings UI across CrewDock.",
+                    valueLabel: formatInterfaceTextScaleLabel(interfaceTextScale),
+                    min: MIN_INTERFACE_TEXT_SCALE,
+                    max: MAX_INTERFACE_TEXT_SCALE,
+                    step: 0.0125,
+                    value: interfaceTextScale,
+                    preview: renderInterfaceTextPreview(),
+                  })}
+                  ${renderSettingsSliderCard({
+                    kind: "terminal",
+                    title: "Terminal text",
+                    copy: "Updates xterm font sizing for every mounted pane and future sessions.",
+                    valueLabel: formatTerminalFontSizeLabel(terminalFontSize),
+                    min: MIN_TERMINAL_FONT_SIZE,
+                    max: MAX_TERMINAL_FONT_SIZE,
+                    step: 0.25,
+                    value: terminalFontSize,
+                    preview: renderTerminalTextPreview(),
+                  })}
                 </div>
                 <div class="settings-theme-grid">
                   ${themes.map((theme) => renderThemeCard(theme, activeThemeId)).join("")}
@@ -3573,6 +3956,85 @@ function renderCloseIcon() {
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
       <path d="M6.7 5.3 12 10.6l5.3-5.3 1.4 1.4L13.4 12l5.3 5.3-1.4 1.4L12 13.4l-5.3 5.3-1.4-1.4L10.6 12 5.3 6.7l1.4-1.4Z" fill="currentColor"></path>
     </svg>
+  `;
+}
+
+function formatSettingNumber(value) {
+  return Number(value).toFixed(2).replace(/\.?0+$/, "");
+}
+
+function renderSettingsSliderCard({
+  kind,
+  title,
+  copy,
+  valueLabel,
+  min,
+  max,
+  step,
+  value,
+  preview,
+}) {
+  const progress = calculateRangeProgress(value, min, max);
+  return `
+    <section class="settings-adjustment-card">
+      <div class="settings-adjustment-head">
+        <div>
+          <h4 class="settings-adjustment-title">${escapeHtml(title)}</h4>
+          <p class="settings-adjustment-copy">${escapeHtml(copy)}</p>
+        </div>
+        <span class="settings-adjustment-value" data-settings-${escapeHtml(kind)}-value>${escapeHtml(valueLabel)}</span>
+      </div>
+      <div
+        class="settings-adjustment-range-shell"
+        data-settings-${escapeHtml(kind)}-range-shell
+        style="--settings-adjustment-progress:${escapeHtml(`${progress}%`)}"
+      >
+        <input
+          class="settings-adjustment-range"
+          type="range"
+          min="${escapeHtml(String(min))}"
+          max="${escapeHtml(String(max))}"
+          step="${escapeHtml(String(step))}"
+          value="${escapeHtml(String(value))}"
+          data-settings-${escapeHtml(kind)}-range
+          aria-label="${escapeHtml(title)}"
+        />
+        <div class="settings-adjustment-range-labels" aria-hidden="true">
+          <span>Smaller</span>
+          <span>Larger</span>
+        </div>
+      </div>
+      ${preview}
+    </section>
+  `;
+}
+
+function renderInterfaceTextPreview() {
+  return `
+    <div class="settings-adjustment-preview settings-adjustment-preview-interface" data-settings-interface-preview>
+      <div class="settings-preview-interface-rail">
+        <span class="settings-preview-interface-tab is-active">Workspace</span>
+        <span class="settings-preview-interface-pill">Dirty</span>
+      </div>
+      <div class="settings-preview-interface-card">
+        <strong>Source Control</strong>
+        <span>Branch, changes, and quick actions stay readable without crowding the workbench.</span>
+      </div>
+      <div class="settings-preview-interface-meta">Status bar · quick switch · settings</div>
+    </div>
+  `;
+}
+
+function renderTerminalTextPreview() {
+  return `
+    <div class="settings-adjustment-preview settings-adjustment-preview-terminal" data-settings-terminal-preview>
+      <div class="settings-preview-terminal-line">
+        <span class="settings-preview-terminal-prompt">~/crewdock</span>
+        <span>git status</span>
+      </div>
+      <div class="settings-preview-terminal-line is-muted">On branch main</div>
+      <div class="settings-preview-terminal-line is-accent">modified: src-web/app.js</div>
+    </div>
   `;
 }
 
@@ -5126,6 +5588,7 @@ async function handleContextMenuAction(target) {
 
 function mountWorkspaceTerminals(workspace, root = document) {
   const theme = getCurrentThemeDefinition();
+  const terminalFontSize = getTerminalFontSize();
 
   for (const pane of workspace.panes) {
     const host = root.querySelector(`[data-terminal-host="${pane.id}"]`);
@@ -5138,7 +5601,7 @@ function mountWorkspaceTerminals(workspace, root = document) {
       cursorBlink: true,
       convertEol: true,
       fontFamily: '"SF Mono", "SFMono-Regular", "Menlo", monospace',
-      fontSize: 13.5,
+      fontSize: terminalFontSize,
       fontWeight: "450",
       lineHeight: 1.18,
       scrollback: 8000,
@@ -5154,6 +5617,7 @@ function mountWorkspaceTerminals(workspace, root = document) {
       observer: new ResizeObserver(() => fitTerminal(pane.id)),
       size: { cols: 0, rows: 0 },
       themeId: theme.id,
+      fontSize: terminalFontSize,
       element: host.closest(".terminal-pane"),
     };
 
@@ -5187,6 +5651,7 @@ function mountWorkspaceTerminals(workspace, root = document) {
 
 function syncWorkspace(workspace) {
   const theme = getCurrentThemeDefinition();
+  const terminalFontSize = getTerminalFontSize();
   const nextPaneIds = workspace.panes.map((pane) => pane.id);
   const previousPaneIds = workspacePaneIds.get(workspace.id) || [];
 
@@ -5197,12 +5662,7 @@ function syncWorkspace(workspace) {
     }
   }
 
-  for (const [paneId, paneState] of paneTerminals.entries()) {
-    if (paneState.themeId !== theme.id) {
-      paneState.terminal.setOption("theme", { ...theme.terminalTheme });
-      paneState.themeId = theme.id;
-    }
-  }
+  syncMountedTerminalAppearance(theme, terminalFontSize);
 
   for (const paneId of previousPaneIds) {
     if (!nextPaneIds.includes(paneId)) {

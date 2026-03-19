@@ -20,6 +20,12 @@ use tauri::{AppHandle, Manager, State};
 const MAX_LAUNCHER_COMPLETION_MATCHES: usize = 24;
 const LAUNCHER_COMMANDS: [&str; 6] = ["help", "pwd", "ls", "cd", "open", "clear"];
 const PATH_AWARE_LAUNCHER_COMMANDS: [&str; 3] = ["ls", "cd", "open"];
+const DEFAULT_INTERFACE_TEXT_SCALE: f64 = 1.0;
+const MIN_INTERFACE_TEXT_SCALE: f64 = 0.85;
+const MAX_INTERFACE_TEXT_SCALE: f64 = 1.2;
+const DEFAULT_TERMINAL_FONT_SIZE: f64 = 13.5;
+const MIN_TERMINAL_FONT_SIZE: f64 = 11.0;
+const MAX_TERMINAL_FONT_SIZE: f64 = 18.0;
 
 use events::emit_snapshot;
 use persistence::resolve_persistence_path;
@@ -74,12 +80,16 @@ struct WorkspaceRecord {
 #[derive(Debug, Clone)]
 struct SettingsRecord {
     theme_id: ThemeId,
+    interface_text_scale: f64,
+    terminal_font_size: f64,
 }
 
 impl Default for SettingsRecord {
     fn default() -> Self {
         Self {
             theme_id: ThemeId::default(),
+            interface_text_scale: DEFAULT_INTERFACE_TEXT_SCALE,
+            terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
         }
     }
 }
@@ -141,6 +151,8 @@ impl RuntimeState {
             launcher: self.launcher.clone(),
             settings: SettingsSnapshot {
                 theme_id: self.settings.theme_id,
+                interface_text_scale: self.settings.interface_text_scale,
+                terminal_font_size: self.settings.terminal_font_size,
             },
             activity: persistence::build_activity_snapshot(self),
             workspaces: self
@@ -257,6 +269,8 @@ struct LauncherSnapshot {
 #[serde(rename_all = "camelCase")]
 struct SettingsSnapshot {
     theme_id: ThemeId,
+    interface_text_scale: f64,
+    terminal_font_size: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -475,6 +489,22 @@ impl ThemeId {
             _ => None,
         }
     }
+}
+
+fn normalize_interface_text_scale(value: f64) -> f64 {
+    if !value.is_finite() {
+        return DEFAULT_INTERFACE_TEXT_SCALE;
+    }
+
+    value.clamp(MIN_INTERFACE_TEXT_SCALE, MAX_INTERFACE_TEXT_SCALE)
+}
+
+fn normalize_terminal_font_size(value: f64) -> f64 {
+    if !value.is_finite() {
+        return DEFAULT_TERMINAL_FONT_SIZE;
+    }
+
+    value.clamp(MIN_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -724,6 +754,49 @@ fn set_theme(
 
         let theme_id = ThemeId::parse(&theme_id).ok_or_else(|| "theme not found".to_string())?;
         runtime.settings.theme_id = theme_id;
+        runtime.persist_to_disk()?;
+        runtime.build_snapshot()
+    };
+
+    emit_snapshot(&app, &snapshot)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn set_interface_text_scale(
+    interface_text_scale: f64,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let snapshot = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        runtime.settings.interface_text_scale =
+            normalize_interface_text_scale(interface_text_scale);
+        runtime.persist_to_disk()?;
+        runtime.build_snapshot()
+    };
+
+    emit_snapshot(&app, &snapshot)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn set_terminal_font_size(
+    terminal_font_size: f64,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let snapshot = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        runtime.settings.terminal_font_size = normalize_terminal_font_size(terminal_font_size);
         runtime.persist_to_disk()?;
         runtime.build_snapshot()
     };
@@ -2518,6 +2591,8 @@ pub fn run() {
             rename_workspace,
             complete_launcher_input,
             set_theme,
+            set_interface_text_scale,
+            set_terminal_font_size,
             refresh_workspace_git_status,
             load_workspace_source_control,
             load_workspace_git_diff,
@@ -2564,7 +2639,7 @@ mod tests {
         layout_for_pane_count, layout_presets, normalize_workspace_path,
         parse_git_status_porcelain, persistence::ActivityEventKind, prepare_workspace_launch,
         resolve_navigation_path, validate_git_cli_arg, GitFileKind, GitState, RuntimeState,
-        ThemeId,
+        ThemeId, DEFAULT_INTERFACE_TEXT_SCALE, DEFAULT_TERMINAL_FONT_SIZE,
     };
 
     #[test]
@@ -2574,6 +2649,14 @@ mod tests {
         assert!(runtime.active_workspace_id.is_none());
         assert_eq!(runtime.launcher.presets.len(), 6);
         assert_eq!(runtime.settings.theme_id, ThemeId::OneDark);
+        assert_eq!(
+            runtime.settings.interface_text_scale,
+            DEFAULT_INTERFACE_TEXT_SCALE
+        );
+        assert_eq!(
+            runtime.settings.terminal_font_size,
+            DEFAULT_TERMINAL_FONT_SIZE
+        );
     }
 
     #[test]
@@ -2649,6 +2732,8 @@ mod tests {
         assert_eq!(persisted.workspaces[0].pane_count, Some(2));
         assert_eq!(persisted.workspaces[1].pane_count, Some(4));
         assert_eq!(persisted.settings.theme_id.as_deref(), Some("one-dark"));
+        assert_eq!(persisted.settings.interface_text_scale, Some(1.0));
+        assert_eq!(persisted.settings.terminal_font_size, Some(13.5));
     }
 
     #[test]
@@ -2687,6 +2772,25 @@ mod tests {
             .expect("should load persisted state");
 
         assert_eq!(runtime.settings.theme_id, ThemeId::TokyoNight);
+    }
+
+    #[test]
+    fn persisted_text_settings_are_restored_from_disk() {
+        let fixture = TestWorkspace::new();
+        let persistence_path = fixture.root_dir().join("workspaces.json");
+        fs::write(
+            &persistence_path,
+            r#"{"settings":{"interfaceTextScale":1.08,"terminalFontSize":15.25},"workspaces":[]}"#,
+        )
+        .expect("should write persisted state");
+
+        let mut runtime = RuntimeState::seeded();
+        runtime
+            .load_persisted_from_disk(persistence_path)
+            .expect("should load persisted state");
+
+        assert_eq!(runtime.settings.interface_text_scale, 1.08);
+        assert_eq!(runtime.settings.terminal_font_size, 15.25);
     }
 
     #[test]
