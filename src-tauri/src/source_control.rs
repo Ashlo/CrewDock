@@ -380,6 +380,7 @@ pub(crate) fn build_commit_message_generation_request(
     let prompt = format!(
         concat!(
             "Generate a concise Git commit message for this repository state.\n\n",
+            "Respond with a JSON object containing exactly one key named \"message\".\n\n",
             "Repository path: {repo_root}\n",
             "Workspace scope: {workspace_relative_path}\n",
             "Branch: {branch}\n",

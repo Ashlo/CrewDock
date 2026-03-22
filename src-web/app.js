@@ -2287,6 +2287,38 @@ function captureSourceControlFocusState(root = document) {
   };
 }
 
+function captureSourceControlScrollState(root = document) {
+  const panel = root.querySelector(".workspace-git-panel");
+  if (!(panel instanceof HTMLElement)) {
+    return [];
+  }
+
+  const selectors = [
+    ".workspace-git-panel-body",
+    ".workspace-scm-column-list",
+    ".workspace-scm-column-detail",
+    ".workspace-scm-diff",
+    ".workspace-scm-task-output",
+    ".workspace-scm-commit-body",
+  ];
+
+  return selectors.flatMap((selector) => Array
+    .from(panel.querySelectorAll(selector))
+    .map((element, index) => {
+      if (!(element instanceof HTMLElement)) {
+        return null;
+      }
+
+      return {
+        selector,
+        index,
+        scrollTop: element.scrollTop,
+        scrollLeft: element.scrollLeft,
+      };
+    })
+    .filter(Boolean));
+}
+
 function restoreSourceControlFocusState(state, root = document) {
   if (!state?.selector) {
     return;
@@ -2313,6 +2345,35 @@ function restoreSourceControlFocusState(state, root = document) {
 
   if (typeof state.scrollTop === "number" && "scrollTop" in input) {
     input.scrollTop = state.scrollTop;
+  }
+}
+
+function restoreSourceControlScrollState(states, root = document) {
+  if (!Array.isArray(states) || states.length === 0) {
+    return;
+  }
+
+  const panel = root.querySelector(".workspace-git-panel");
+  if (!(panel instanceof HTMLElement)) {
+    return;
+  }
+
+  for (const state of states) {
+    if (!state?.selector) {
+      continue;
+    }
+
+    const element = panel.querySelectorAll(state.selector)[state.index];
+    if (!(element instanceof HTMLElement)) {
+      continue;
+    }
+
+    if (typeof state.scrollTop === "number") {
+      element.scrollTop = state.scrollTop;
+    }
+    if (typeof state.scrollLeft === "number") {
+      element.scrollLeft = state.scrollLeft;
+    }
   }
 }
 
@@ -3463,6 +3524,9 @@ function render() {
   const sourceControlFocusState = uiState.gitPanelVisible
     ? captureSourceControlFocusState(modalRegion)
     : null;
+  const sourceControlScrollState = uiState.gitPanelVisible
+    ? captureSourceControlScrollState(modalRegion)
+    : null;
 
   stripRegion.innerHTML = renderWorkspaceStrip({
     windowSummary: snapshot.window,
@@ -3515,6 +3579,9 @@ function render() {
     syncSettingsPreviewDom(modalRegion);
     bindSettingsSheetControls(modalRegion);
     syncSettingsActionDom(modalRegion);
+  }
+  if (sourceControlScrollState && uiState.gitPanelVisible) {
+    restoreSourceControlScrollState(sourceControlScrollState, modalRegion);
   }
   if (sourceControlFocusState && uiState.gitPanelVisible) {
     restoreSourceControlFocusState(sourceControlFocusState, modalRegion);
