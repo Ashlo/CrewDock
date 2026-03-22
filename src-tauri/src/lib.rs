@@ -20,12 +20,19 @@ use tauri::{AppHandle, Manager, State};
 const MAX_LAUNCHER_COMPLETION_MATCHES: usize = 24;
 const LAUNCHER_COMMANDS: [&str; 6] = ["help", "pwd", "ls", "cd", "open", "clear"];
 const PATH_AWARE_LAUNCHER_COMMANDS: [&str; 3] = ["ls", "cd", "open"];
+const DEFAULT_INTERFACE_TEXT_SCALE: f64 = 1.0;
+const MIN_INTERFACE_TEXT_SCALE: f64 = 0.85;
+const MAX_INTERFACE_TEXT_SCALE: f64 = 1.2;
+const DEFAULT_TERMINAL_FONT_SIZE: f64 = 13.5;
+const MIN_TERMINAL_FONT_SIZE: f64 = 11.0;
+const MAX_TERMINAL_FONT_SIZE: f64 = 18.0;
 
 use events::emit_snapshot;
 use persistence::resolve_persistence_path;
 use session_manager::{prepare_workspace_launch, spawn_pane_jobs, LiveSession, PaneJob};
 use source_control::{
-    discard_paths, git_task_write_stdin as write_git_task_input,
+    build_commit_message_generation_request, discard_paths, generate_commit_message_with_openai,
+    git_task_write_stdin as write_git_task_input,
     load_workspace_git_commit_detail as build_workspace_git_commit_detail,
     load_workspace_git_diff as build_workspace_git_diff,
     load_workspace_source_control as build_workspace_source_control, stage_paths, start_git_task,
@@ -74,12 +81,18 @@ struct WorkspaceRecord {
 #[derive(Debug, Clone)]
 struct SettingsRecord {
     theme_id: ThemeId,
+    interface_text_scale: f64,
+    terminal_font_size: f64,
+    openai_api_key: Option<String>,
 }
 
 impl Default for SettingsRecord {
     fn default() -> Self {
         Self {
             theme_id: ThemeId::default(),
+            interface_text_scale: DEFAULT_INTERFACE_TEXT_SCALE,
+            terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
+            openai_api_key: None,
         }
     }
 }
@@ -109,24 +122,20 @@ impl RuntimeState {
     }
 
     fn build_snapshot(&self) -> AppSnapshot {
-        let active_workspace_record = self
-            .active_workspace_id
-            .as_ref()
-            .and_then(|workspace_id| {
-                self.workspaces
-                    .iter()
-                    .find(|workspace| workspace.id == *workspace_id)
-            });
-        let active_workspace = active_workspace_record
-            .map(|workspace| WorkspaceSnapshot {
-                id: workspace.id.clone(),
-                name: workspace.name.clone(),
-                path: workspace.path.clone(),
-                layout: workspace.layout.clone(),
-                panes: workspace.panes.clone(),
-                pane_layout: workspace.pane_layout.clone(),
-                git_detail: workspace.git.clone(),
-            });
+        let active_workspace_record = self.active_workspace_id.as_ref().and_then(|workspace_id| {
+            self.workspaces
+                .iter()
+                .find(|workspace| workspace.id == *workspace_id)
+        });
+        let active_workspace = active_workspace_record.map(|workspace| WorkspaceSnapshot {
+            id: workspace.id.clone(),
+            name: workspace.name.clone(),
+            path: workspace.path.clone(),
+            layout: workspace.layout.clone(),
+            panes: workspace.panes.clone(),
+            pane_layout: workspace.pane_layout.clone(),
+            git_detail: workspace.git.clone(),
+        });
         let active_workspace_name = active_workspace_record.map(|workspace| workspace.name.clone());
         let window_title = active_workspace_name
             .as_ref()
@@ -145,6 +154,10 @@ impl RuntimeState {
             launcher: self.launcher.clone(),
             settings: SettingsSnapshot {
                 theme_id: self.settings.theme_id,
+                interface_text_scale: self.settings.interface_text_scale,
+                terminal_font_size: self.settings.terminal_font_size,
+                has_stored_openai_api_key: self.settings.openai_api_key.is_some(),
+                has_environment_openai_api_key: has_openai_api_key_in_environment(),
             },
             activity: persistence::build_activity_snapshot(self),
             workspaces: self
@@ -261,6 +274,12 @@ struct LauncherSnapshot {
 #[serde(rename_all = "camelCase")]
 struct SettingsSnapshot {
     theme_id: ThemeId,
+    interface_text_scale: f64,
+    terminal_font_size: f64,
+    #[serde(rename = "hasStoredOpenAiApiKey")]
+    has_stored_openai_api_key: bool,
+    #[serde(rename = "hasEnvironmentOpenAiApiKey")]
+    has_environment_openai_api_key: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -479,6 +498,40 @@ impl ThemeId {
             _ => None,
         }
     }
+}
+
+fn normalize_interface_text_scale(value: f64) -> f64 {
+    if !value.is_finite() {
+        return DEFAULT_INTERFACE_TEXT_SCALE;
+    }
+
+    value.clamp(MIN_INTERFACE_TEXT_SCALE, MAX_INTERFACE_TEXT_SCALE)
+}
+
+fn normalize_terminal_font_size(value: f64) -> f64 {
+    if !value.is_finite() {
+        return DEFAULT_TERMINAL_FONT_SIZE;
+    }
+
+    value.clamp(MIN_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE)
+}
+
+fn normalize_optional_openai_api_key(value: Option<String>) -> Option<String> {
+    value.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn has_openai_api_key_in_environment() -> bool {
+    env::var("OPENAI_API_KEY")
+        .ok()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -715,6 +768,33 @@ fn complete_launcher_input(
 }
 
 #[tauri::command]
+fn set_settings(
+    theme_id: String,
+    interface_text_scale: f64,
+    terminal_font_size: f64,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let snapshot = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        let theme_id = ThemeId::parse(&theme_id).ok_or_else(|| "theme not found".to_string())?;
+        runtime.settings.theme_id = theme_id;
+        runtime.settings.interface_text_scale =
+            normalize_interface_text_scale(interface_text_scale);
+        runtime.settings.terminal_font_size = normalize_terminal_font_size(terminal_font_size);
+        runtime.persist_to_disk()?;
+        runtime.build_snapshot()
+    };
+
+    emit_snapshot(&app, &snapshot)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
 fn set_theme(
     theme_id: String,
     state: State<'_, AppState>,
@@ -728,6 +808,70 @@ fn set_theme(
 
         let theme_id = ThemeId::parse(&theme_id).ok_or_else(|| "theme not found".to_string())?;
         runtime.settings.theme_id = theme_id;
+        runtime.persist_to_disk()?;
+        runtime.build_snapshot()
+    };
+
+    emit_snapshot(&app, &snapshot)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn set_interface_text_scale(
+    interface_text_scale: f64,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let snapshot = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        runtime.settings.interface_text_scale =
+            normalize_interface_text_scale(interface_text_scale);
+        runtime.persist_to_disk()?;
+        runtime.build_snapshot()
+    };
+
+    emit_snapshot(&app, &snapshot)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn set_terminal_font_size(
+    terminal_font_size: f64,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let snapshot = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        runtime.settings.terminal_font_size = normalize_terminal_font_size(terminal_font_size);
+        runtime.persist_to_disk()?;
+        runtime.build_snapshot()
+    };
+
+    emit_snapshot(&app, &snapshot)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn set_openai_api_key(
+    openai_api_key: Option<String>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let snapshot = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        runtime.settings.openai_api_key = normalize_optional_openai_api_key(openai_api_key);
         runtime.persist_to_disk()?;
         runtime.build_snapshot()
     };
@@ -799,6 +943,28 @@ fn load_workspace_git_commit_detail(
         .lock()
         .map_err(|_| "failed to acquire application state".to_string())?;
     build_workspace_git_commit_detail(&runtime, &workspace_id, &oid)
+}
+
+fn validate_git_cli_arg(value: String, label: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{label} is required."));
+    }
+    if trimmed.starts_with('-') || trimmed.contains(['\0', '\n', '\r']) {
+        return Err(format!("invalid {label}."));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn validate_optional_git_cli_arg(
+    value: Option<String>,
+    label: &str,
+) -> Result<Option<String>, String> {
+    match value {
+        Some(raw) if raw.trim().is_empty() => Ok(None),
+        Some(raw) => validate_git_cli_arg(raw, label).map(Some),
+        None => Ok(None),
+    }
 }
 
 #[tauri::command]
@@ -894,12 +1060,24 @@ fn git_commit(
         app,
         workspace_id,
         "Commit".to_string(),
-        vec![
-            "commit".to_string(),
-            "-m".to_string(),
-            message,
-        ],
+        vec!["commit".to_string(), "-m".to_string(), message],
     )
+}
+
+#[tauri::command]
+async fn generate_git_commit_message(
+    workspace_id: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let request = {
+        let runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+        build_commit_message_generation_request(&runtime, &workspace_id)?
+    };
+
+    generate_commit_message_with_openai(request).await
 }
 
 #[tauri::command]
@@ -909,6 +1087,7 @@ fn git_checkout_branch(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<WorkspaceSourceControlSnapshot, String> {
+    let branch_name = validate_git_cli_arg(branch_name, "branch name")?;
     start_git_task(
         state.inner.clone(),
         app,
@@ -926,6 +1105,8 @@ fn git_create_branch(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<WorkspaceSourceControlSnapshot, String> {
+    let branch_name = validate_git_cli_arg(branch_name, "branch name")?;
+    let start_point = validate_optional_git_cli_arg(start_point, "start point")?;
     let mut args = vec![
         "checkout".to_string(),
         "-b".to_string(),
@@ -952,6 +1133,8 @@ fn git_rename_branch(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<WorkspaceSourceControlSnapshot, String> {
+    let current_name = validate_git_cli_arg(current_name, "current branch name")?;
+    let next_name = validate_git_cli_arg(next_name, "next branch name")?;
     start_git_task(
         state.inner.clone(),
         app,
@@ -973,6 +1156,7 @@ fn git_delete_branch(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<WorkspaceSourceControlSnapshot, String> {
+    let branch_name = validate_git_cli_arg(branch_name, "branch name")?;
     start_git_task(
         state.inner.clone(),
         app,
@@ -1038,6 +1222,7 @@ fn git_publish_branch(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<WorkspaceSourceControlSnapshot, String> {
+    let branch_name = validate_git_cli_arg(branch_name, "branch name")?;
     let remote = resolve_default_git_remote(&state.inner, &workspace_id)?;
     start_git_task(
         state.inner.clone(),
@@ -1061,6 +1246,8 @@ fn git_set_upstream(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<WorkspaceSourceControlSnapshot, String> {
+    let branch_name = validate_git_cli_arg(branch_name, "branch name")?;
+    let upstream_name = validate_git_cli_arg(upstream_name, "upstream name")?;
     start_git_task(
         state.inner.clone(),
         app,
@@ -1068,7 +1255,8 @@ fn git_set_upstream(
         format!("Set upstream for {}", branch_name.trim()),
         vec![
             "branch".to_string(),
-            format!("--set-upstream-to={upstream_name}"),
+            "--set-upstream-to".to_string(),
+            upstream_name,
             branch_name,
         ],
     )
@@ -1664,7 +1852,13 @@ fn collect_git_detail_with_binary(git_binary: &str, workspace_path: &Path) -> Gi
     let status_output = match run_git_command(
         git_binary,
         workspace_path,
-        &["status", "--porcelain=v2", "--branch"],
+        &[
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "-z",
+            "--untracked-files=all",
+        ],
     ) {
         Ok(output) => output,
         Err(error) => {
@@ -1779,8 +1973,19 @@ fn run_git_command(git_binary: &str, cwd: &Path, args: &[&str]) -> Result<String
             .to_string());
     }
 
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    if stderr.contains("not a git repository") {
+    let combined = if stdout.is_empty() {
+        stderr.clone()
+    } else if stderr.is_empty() {
+        stdout.clone()
+    } else {
+        format!("{stderr}\n{stdout}")
+    };
+    if combined
+        .to_ascii_lowercase()
+        .contains("not a git repository")
+    {
         return Err(GitCommandError {
             kind: GitCommandErrorKind::NotRepo,
             message: "This workspace is not inside a Git repository.".to_string(),
@@ -1803,6 +2008,88 @@ fn run_git_command(git_binary: &str, cwd: &Path, args: &[&str]) -> Result<String
 }
 
 fn parse_git_status_porcelain(raw: &str) -> Result<ParsedGitStatus, String> {
+    if raw.contains('\0') {
+        return parse_git_status_porcelain_z(raw);
+    }
+
+    parse_git_status_porcelain_lines(raw)
+}
+
+fn parse_git_status_porcelain_z(raw: &str) -> Result<ParsedGitStatus, String> {
+    let mut parsed = ParsedGitStatus::default();
+    let records = raw
+        .split('\0')
+        .filter(|record| !record.is_empty())
+        .collect::<Vec<_>>();
+    let mut index = 0;
+
+    while index < records.len() {
+        let record = records[index];
+        if let Some(head) = record.strip_prefix("# branch.head ") {
+            parsed.head = Some(head.to_string());
+            index += 1;
+            continue;
+        }
+
+        if let Some(oid) = record.strip_prefix("# branch.oid ") {
+            if oid != "(initial)" {
+                parsed.oid = Some(oid.to_string());
+            }
+            index += 1;
+            continue;
+        }
+
+        if let Some(upstream) = record.strip_prefix("# branch.upstream ") {
+            parsed.upstream = Some(upstream.to_string());
+            index += 1;
+            continue;
+        }
+
+        if let Some(ab) = record.strip_prefix("# branch.ab ") {
+            for value in ab.split_whitespace() {
+                if let Some(ahead) = value.strip_prefix('+') {
+                    parsed.ahead = ahead.parse::<u32>().unwrap_or(0);
+                } else if let Some(behind) = value.strip_prefix('-') {
+                    parsed.behind = behind.parse::<u32>().unwrap_or(0);
+                }
+            }
+            index += 1;
+            continue;
+        }
+
+        match record.as_bytes().first().copied() {
+            Some(b'1') => {
+                parsed.files.push(parse_git_changed_file(record)?);
+                index += 1;
+            }
+            Some(b'2') => {
+                let original_path = records.get(index + 1).ok_or_else(|| {
+                    format!("missing original path in git rename record: {record}")
+                })?;
+                parsed
+                    .files
+                    .push(parse_git_renamed_file_z(record, original_path)?);
+                index += 2;
+            }
+            Some(b'u') => {
+                parsed.files.push(parse_git_conflicted_file(record)?);
+                index += 1;
+            }
+            Some(b'?') => {
+                parsed.files.push(parse_git_untracked_file(record)?);
+                index += 1;
+            }
+            Some(b'!') => {
+                index += 1;
+            }
+            _ => return Err(format!("unsupported git status record: {record}")),
+        }
+    }
+
+    Ok(parsed)
+}
+
+fn parse_git_status_porcelain_lines(raw: &str) -> Result<ParsedGitStatus, String> {
     let mut parsed = ParsedGitStatus::default();
 
     for line in raw.lines().filter(|line| !line.is_empty()) {
@@ -1851,7 +2138,7 @@ fn parse_git_changed_file(line: &str) -> Result<GitFileSnapshot, String> {
     let remainder = line
         .strip_prefix("1 ")
         .ok_or_else(|| format!("invalid git changed-file line: {line}"))?;
-    let mut parts = remainder.splitn(9, ' ');
+    let mut parts = remainder.splitn(8, ' ');
     let xy = parts
         .next()
         .ok_or_else(|| format!("missing XY status in git line: {line}"))?;
@@ -1876,7 +2163,7 @@ fn parse_git_renamed_file(line: &str) -> Result<GitFileSnapshot, String> {
     let remainder = line
         .strip_prefix("2 ")
         .ok_or_else(|| format!("invalid git renamed-file line: {line}"))?;
-    let mut parts = remainder.splitn(10, ' ');
+    let mut parts = remainder.splitn(9, ' ');
     let xy = parts
         .next()
         .ok_or_else(|| format!("missing XY status in git line: {line}"))?;
@@ -1889,6 +2176,31 @@ fn parse_git_renamed_file(line: &str) -> Result<GitFileSnapshot, String> {
     let (path, original_path) = paths
         .split_once('\t')
         .ok_or_else(|| format!("missing original path in rename line: {line}"))?;
+    let (index_status, worktree_status) = parse_xy_statuses(xy)?;
+
+    Ok(GitFileSnapshot {
+        path: path.to_string(),
+        original_path: Some(original_path.to_string()),
+        kind: GitFileKind::Renamed,
+        index_status,
+        worktree_status,
+    })
+}
+
+fn parse_git_renamed_file_z(record: &str, original_path: &str) -> Result<GitFileSnapshot, String> {
+    let remainder = record
+        .strip_prefix("2 ")
+        .ok_or_else(|| format!("invalid git renamed-file record: {record}"))?;
+    let mut parts = remainder.splitn(9, ' ');
+    let xy = parts
+        .next()
+        .ok_or_else(|| format!("missing XY status in git record: {record}"))?;
+    for _ in 0..7 {
+        parts.next();
+    }
+    let path = parts
+        .next()
+        .ok_or_else(|| format!("missing rename path in git record: {record}"))?;
     let (index_status, worktree_status) = parse_xy_statuses(xy)?;
 
     Ok(GitFileSnapshot {
@@ -2375,7 +2687,11 @@ pub fn run() {
             create_workspace,
             rename_workspace,
             complete_launcher_input,
+            set_settings,
             set_theme,
+            set_interface_text_scale,
+            set_terminal_font_size,
+            set_openai_api_key,
             refresh_workspace_git_status,
             load_workspace_source_control,
             load_workspace_git_diff,
@@ -2383,6 +2699,7 @@ pub fn run() {
             git_stage_paths,
             git_unstage_paths,
             git_discard_paths,
+            generate_git_commit_message,
             git_commit,
             git_checkout_branch,
             git_create_branch,
@@ -2421,7 +2738,8 @@ mod tests {
         default_launcher_path, execute_launcher_command, extract_navigation_target,
         layout_for_pane_count, layout_presets, normalize_workspace_path,
         parse_git_status_porcelain, persistence::ActivityEventKind, prepare_workspace_launch,
-        resolve_navigation_path, GitFileKind, GitState, RuntimeState, ThemeId,
+        resolve_navigation_path, validate_git_cli_arg, GitFileKind, GitState, RuntimeState,
+        ThemeId, DEFAULT_INTERFACE_TEXT_SCALE, DEFAULT_TERMINAL_FONT_SIZE,
     };
 
     #[test]
@@ -2431,6 +2749,14 @@ mod tests {
         assert!(runtime.active_workspace_id.is_none());
         assert_eq!(runtime.launcher.presets.len(), 6);
         assert_eq!(runtime.settings.theme_id, ThemeId::OneDark);
+        assert_eq!(
+            runtime.settings.interface_text_scale,
+            DEFAULT_INTERFACE_TEXT_SCALE
+        );
+        assert_eq!(
+            runtime.settings.terminal_font_size,
+            DEFAULT_TERMINAL_FONT_SIZE
+        );
     }
 
     #[test]
@@ -2506,6 +2832,9 @@ mod tests {
         assert_eq!(persisted.workspaces[0].pane_count, Some(2));
         assert_eq!(persisted.workspaces[1].pane_count, Some(4));
         assert_eq!(persisted.settings.theme_id.as_deref(), Some("one-dark"));
+        assert_eq!(persisted.settings.interface_text_scale, Some(1.0));
+        assert_eq!(persisted.settings.terminal_font_size, Some(13.5));
+        assert_eq!(persisted.settings.openai_api_key, None);
     }
 
     #[test]
@@ -2544,6 +2873,47 @@ mod tests {
             .expect("should load persisted state");
 
         assert_eq!(runtime.settings.theme_id, ThemeId::TokyoNight);
+    }
+
+    #[test]
+    fn persisted_text_settings_are_restored_from_disk() {
+        let fixture = TestWorkspace::new();
+        let persistence_path = fixture.root_dir().join("workspaces.json");
+        fs::write(
+            &persistence_path,
+            r#"{"settings":{"interfaceTextScale":1.08,"terminalFontSize":15.25},"workspaces":[]}"#,
+        )
+        .expect("should write persisted state");
+
+        let mut runtime = RuntimeState::seeded();
+        runtime
+            .load_persisted_from_disk(persistence_path)
+            .expect("should load persisted state");
+
+        assert_eq!(runtime.settings.interface_text_scale, 1.08);
+        assert_eq!(runtime.settings.terminal_font_size, 15.25);
+    }
+
+    #[test]
+    fn persisted_openai_api_key_is_restored_from_disk() {
+        let fixture = TestWorkspace::new();
+        let persistence_path = fixture.root_dir().join("workspaces.json");
+        fs::write(
+            &persistence_path,
+            r#"{"settings":{"openAiApiKey":"sk-test-123"},"workspaces":[]}"#,
+        )
+        .expect("should write persisted state");
+
+        let mut runtime = RuntimeState::seeded();
+        runtime
+            .load_persisted_from_disk(persistence_path)
+            .expect("should load persisted state");
+
+        assert_eq!(
+            runtime.settings.openai_api_key.as_deref(),
+            Some("sk-test-123")
+        );
+        assert!(runtime.build_snapshot().settings.has_stored_openai_api_key);
     }
 
     #[test]
@@ -2740,6 +3110,43 @@ u UU N... 100644 100644 100644 100644 3333333333333333333333333333333333333333 3
         );
         assert_eq!(parsed.files[2].kind, GitFileKind::Conflicted);
         assert_eq!(parsed.files[3].kind, GitFileKind::Untracked);
+    }
+
+    #[test]
+    fn parse_git_status_handles_null_delimited_records() {
+        let parsed = parse_git_status_porcelain(
+            "\
+# branch.oid 1c39cf9988972dbe28a656018d3fb0c270742433\0\
+# branch.head feature/git\0\
+# branch.upstream origin/feature/git\0\
+2 R. N... 100644 100644 100644 2222222222222222222222222222222222222222 2222222222222222222222222222222222222222 R100 src/new name.rs\0\
+src/old name.rs\0\
+1 AM N... 000000 100644 100644 0000000000000000000000000000000000000000 3333333333333333333333333333333333333333 tracked file.txt\0\
+? src/extra file.ts\0",
+        )
+        .expect("git status should parse");
+
+        assert_eq!(parsed.head.as_deref(), Some("feature/git"));
+        assert_eq!(parsed.upstream.as_deref(), Some("origin/feature/git"));
+        assert_eq!(parsed.files.len(), 3);
+        assert_eq!(parsed.files[0].kind, GitFileKind::Renamed);
+        assert_eq!(parsed.files[0].path, "src/new name.rs");
+        assert_eq!(
+            parsed.files[0].original_path.as_deref(),
+            Some("src/old name.rs")
+        );
+        assert_eq!(parsed.files[1].path, "tracked file.txt");
+        assert_eq!(parsed.files[2].path, "src/extra file.ts");
+    }
+
+    #[test]
+    fn validate_git_cli_arg_rejects_option_like_values() {
+        assert!(validate_git_cli_arg("-danger".to_string(), "branch name").is_err());
+        assert!(validate_git_cli_arg("line\nbreak".to_string(), "branch name").is_err());
+        assert_eq!(
+            validate_git_cli_arg(" feature/demo ".to_string(), "branch name").unwrap(),
+            "feature/demo"
+        );
     }
 
     #[test]

@@ -85,6 +85,9 @@
   --shadow: 0 24px 80px rgba(0, 0, 0, 0.34);
   --chrome-height: 46px;
   --chrome-leading-space: 18px;
+  --statusbar-height: 24px;
+  --scm-sidebar-width: 428px;
+  --ui-text-scale: 1;
 }
 
 * {
@@ -97,6 +100,11 @@ body,
   height: 100%;
   margin: 0;
   overflow: hidden;
+}
+
+html {
+  font-size: calc(16px * var(--ui-text-scale));
+  transition: font-size 140ms ease;
 }
 
 body {
@@ -987,6 +995,10 @@ button {
   inset: 0;
   pointer-events: none;
   z-index: 30;
+}
+
+.workspace-modal-layer.is-active {
+  pointer-events: auto;
 }
 
 .workspace-context-layer {
@@ -1932,6 +1944,13 @@ button {
   line-height: 1.45;
 }
 
+.settings-sheet-footer-copy {
+  margin: 0;
+  color: var(--surface-soft-text);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
 .settings-sheet-close {
   width: 30px;
   height: 30px;
@@ -1964,6 +1983,22 @@ button {
   grid-template-columns: 156px minmax(0, 1fr);
   gap: 22px;
   min-height: 0;
+}
+
+.settings-sheet-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding-top: 4px;
+}
+
+.settings-sheet-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .settings-nav,
@@ -2028,6 +2063,362 @@ button {
   max-width: 31ch;
   font-size: 0.86rem;
   line-height: 1.5;
+}
+
+.settings-adjustment-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.settings-adjustment-card {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.settings-ai-card {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.settings-ai-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-ai-status {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--surface-soft-text);
+  font-size: 0.72rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.settings-ai-status.is-active {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 24%, rgba(255, 255, 255, 0.06));
+  background: color-mix(in srgb, var(--accent-soft) 74%, rgba(255, 255, 255, 0.03));
+}
+
+.settings-ai-controls {
+  display: grid;
+  gap: 10px;
+}
+
+.settings-ai-input {
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  padding: 0 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(0, 0, 0, 0.14);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.82rem;
+  outline: none;
+  transition:
+    border-color 140ms ease,
+    background 140ms ease;
+}
+
+.settings-ai-input:focus {
+  border-color: color-mix(in srgb, var(--accent) 26%, rgba(255, 255, 255, 0.08));
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.settings-ai-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.settings-ai-button {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 10px;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.025);
+  color: var(--surface-soft-text);
+  font-size: 0.74rem;
+  font-weight: 600;
+  transition:
+    border-color 140ms ease,
+    background 140ms ease,
+    color 140ms ease;
+}
+
+.settings-ai-button:hover {
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.055);
+  color: var(--control-text-strong);
+}
+
+.settings-ai-button:disabled {
+  opacity: 0.42;
+  cursor: default;
+}
+
+.settings-ai-button-primary {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 22%, rgba(255, 255, 255, 0.08));
+  background: color-mix(in srgb, var(--accent-soft) 72%, rgba(255, 255, 255, 0.02));
+}
+
+.settings-adjustment-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-adjustment-title {
+  margin: 0;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.settings-adjustment-copy {
+  margin: 4px 0 0;
+  color: var(--surface-soft-text);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.settings-adjustment-value {
+  flex: 0 0 auto;
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 9px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.settings-adjustment-range-shell {
+  position: relative;
+  display: grid;
+  gap: 8px;
+  --settings-adjustment-progress: 50%;
+}
+
+.settings-adjustment-range-shell::before,
+.settings-adjustment-range-shell::after {
+  content: "";
+  position: absolute;
+  top: 5px;
+  left: 0;
+  height: 6px;
+  border-radius: 999px;
+  pointer-events: none;
+}
+
+.settings-adjustment-range-shell::before {
+  right: 0;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.settings-adjustment-range-shell::after {
+  width: var(--settings-adjustment-progress);
+  background: color-mix(in srgb, var(--accent) 72%, white 8%);
+  transition: width 120ms ease;
+}
+
+.settings-adjustment-range {
+  width: 100%;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  position: relative;
+  z-index: 1;
+  appearance: none;
+  -webkit-appearance: none;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  outline: none;
+  cursor: ew-resize;
+}
+
+.settings-adjustment-range::-webkit-slider-runnable-track {
+  height: 6px;
+  border-radius: 999px;
+  background: transparent;
+}
+
+.settings-adjustment-range::-webkit-slider-thumb {
+  width: 16px;
+  height: 16px;
+  margin-top: -5px;
+  appearance: none;
+  -webkit-appearance: none;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 54%, rgba(255, 255, 255, 0.22));
+  background: color-mix(in srgb, var(--panel-strong) 72%, white 28%);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+  cursor: ew-resize;
+}
+
+.settings-adjustment-range::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--accent) 54%, rgba(255, 255, 255, 0.22));
+  background: color-mix(in srgb, var(--panel-strong) 72%, white 28%);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+  cursor: ew-resize;
+}
+
+.settings-adjustment-range::-moz-range-track {
+  height: 6px;
+  border-radius: 999px;
+  background: transparent;
+}
+
+.settings-adjustment-range::-moz-range-progress {
+  height: 6px;
+  border-radius: 999px;
+  background: transparent;
+}
+
+.settings-adjustment-range-labels {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--surface-soft-text);
+  font-size: 0.7rem;
+  letter-spacing: 0.01em;
+}
+
+.settings-adjustment-preview {
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 36%),
+    rgba(0, 0, 0, 0.12);
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    font-size 140ms ease,
+    transform 140ms ease;
+}
+
+.settings-adjustment-preview-interface {
+  --settings-preview-interface-scale: 1;
+  font-size: calc(0.8rem * var(--settings-preview-interface-scale));
+  line-height: 1.4;
+  transition:
+    font-size 140ms ease,
+    gap 140ms ease;
+}
+
+.settings-preview-interface-rail {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-preview-interface-tab,
+.settings-preview-interface-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.9em;
+  padding: 0 0.85em;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--surface-soft-text);
+  font-size: 0.8em;
+  font-weight: 600;
+}
+
+.settings-preview-interface-tab.is-active {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 24%, rgba(255, 255, 255, 0.08));
+  background: color-mix(in srgb, var(--accent) 12%, rgba(255, 255, 255, 0.03));
+}
+
+.settings-preview-interface-pill {
+  color: color-mix(in srgb, var(--accent) 78%, white 10%);
+}
+
+.settings-preview-interface-card {
+  display: grid;
+  gap: 4px;
+}
+
+.settings-preview-interface-card strong {
+  font-size: 1em;
+  font-weight: 600;
+}
+
+.settings-preview-interface-card span,
+.settings-preview-interface-meta {
+  color: var(--surface-soft-text);
+  font-size: 0.84em;
+}
+
+.settings-adjustment-preview-terminal {
+  --settings-preview-terminal-size: 13.5;
+  font-family: "SF Mono", "SFMono-Regular", "Menlo", monospace;
+  font-size: calc(var(--settings-preview-terminal-size) * 0.066rem);
+  line-height: 1.45;
+  transition:
+    font-size 140ms ease,
+    line-height 140ms ease,
+    letter-spacing 140ms ease;
+}
+
+.settings-preview-terminal-line {
+  display: flex;
+  align-items: center;
+  gap: 0.7em;
+  color: var(--text);
+}
+
+.settings-preview-terminal-line.is-muted {
+  color: var(--surface-soft-text);
+}
+
+.settings-preview-terminal-line.is-accent {
+  color: color-mix(in srgb, var(--accent) 70%, white 12%);
+}
+
+.settings-preview-terminal-prompt {
+  color: color-mix(in srgb, var(--accent) 62%, white 10%);
+  font-weight: 600;
 }
 
 .settings-theme-grid {
@@ -2306,33 +2697,40 @@ button {
 
 .workspace-git-backdrop {
   position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: stretch end;
-  padding: 10px;
+  top: var(--chrome-height);
+  right: 0;
+  bottom: var(--statusbar-height);
+  left: 0;
+  display: flex;
+  justify-content: flex-end;
+  align-items: stretch;
+  padding: 0;
   background:
     linear-gradient(
       270deg,
-      color-mix(in srgb, var(--overlay-bg) 92%, transparent) 0%,
-      color-mix(in srgb, var(--overlay-bg) 48%, transparent) 18%,
-      transparent 54%
+      color-mix(in srgb, var(--overlay-bg) 38%, transparent) 0%,
+      color-mix(in srgb, var(--overlay-bg) 14%, transparent) 14%,
+      transparent 34%
     );
-  backdrop-filter: blur(4px);
   pointer-events: auto;
 }
 
 .workspace-git-panel {
-  width: min(760px, calc(100vw - 20px));
+  width: min(var(--scm-sidebar-width), calc(100vw - 20px));
   height: 100%;
-  max-height: min(780px, calc(100vh - 28px));
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   overflow: hidden;
-  border-radius: 14px;
-  border: 1px solid color-mix(in srgb, var(--overlay-panel-border) 84%, transparent);
-  background: color-mix(in srgb, var(--overlay-panel-bg) 96%, black 4%);
+  border-radius: 0;
+  border-top: 0;
+  border-right: 0;
+  border-bottom: 0;
+  border-left: 1px solid color-mix(in srgb, var(--overlay-panel-border) 90%, transparent);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent 18%),
+    color-mix(in srgb, var(--overlay-panel-bg) 96%, black 4%);
   box-shadow:
-    0 22px 56px rgba(0, 0, 0, 0.28),
+    -18px 0 42px rgba(0, 0, 0, 0.24),
     inset 0 1px 0 rgba(255, 255, 255, 0.025);
 }
 
@@ -2352,6 +2750,9 @@ button {
   gap: 12px;
   padding: 12px 14px 10px;
   border-bottom: 1px solid color-mix(in srgb, var(--overlay-divider) 92%, transparent);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.014), transparent),
+    rgba(255, 255, 255, 0.012);
 }
 
 .workspace-git-panel-heading {
@@ -2363,7 +2764,7 @@ button {
 .workspace-git-panel-mark {
   margin: 0;
   color: var(--muted);
-  font-size: 0.58rem;
+  font-size: 0.5rem;
   font-weight: 600;
   letter-spacing: 0.16em;
   text-transform: uppercase;
@@ -2379,7 +2780,7 @@ button {
 .workspace-git-panel h2 {
   margin: 0;
   font-family: "SF Pro Display", "Avenir Next", sans-serif;
-  font-size: 0.92rem;
+  font-size: 0.8rem;
   font-weight: 600;
   letter-spacing: -0.015em;
   line-height: 1.1;
@@ -2398,7 +2799,7 @@ button {
   border: 1px solid color-mix(in srgb, var(--overlay-panel-border) 88%, transparent);
   background: color-mix(in srgb, var(--overlay-panel-control-bg) 82%, transparent);
   color: var(--surface-soft-text);
-  font-size: 0.6rem;
+  font-size: 0.52rem;
   font-weight: 600;
 }
 
@@ -2421,7 +2822,7 @@ button {
 .workspace-git-panel-copy {
   margin: 0;
   color: var(--surface-soft-text);
-  font-size: 0.66rem;
+  font-size: 0.58rem;
   line-height: 1.4;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2464,7 +2865,7 @@ button {
   display: grid;
   align-content: start;
   gap: 10px;
-  padding: 10px 12px 12px;
+  padding: 10px 10px 12px;
   overflow: auto;
   scrollbar-width: thin;
   scrollbar-color: var(--scrollbar-thumb) transparent;
@@ -2472,6 +2873,9 @@ button {
 
 .workspace-scm-shell {
   min-height: 0;
+  display: grid;
+  align-content: start;
+  gap: 10px;
 }
 
 .workspace-scm-toolbar {
@@ -2479,8 +2883,8 @@ button {
   align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  padding: 2px 2px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.045);
 }
 
 .workspace-scm-toolbar-meta {
@@ -2500,7 +2904,7 @@ button {
   border: 1px solid rgba(255, 255, 255, 0.05);
   background: rgba(255, 255, 255, 0.025);
   color: var(--surface-soft-text);
-  font-size: 0.61rem;
+  font-size: 0.54rem;
   font-weight: 600;
 }
 
@@ -2540,7 +2944,7 @@ button {
 .workspace-scm-secondary-button,
 .workspace-scm-ghost-button,
 .workspace-scm-load-more {
-  min-height: 26px;
+  min-height: 24px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -2549,7 +2953,7 @@ button {
   border: 1px solid rgba(255, 255, 255, 0.07);
   background: rgba(255, 255, 255, 0.025);
   color: var(--text);
-  font-size: 0.64rem;
+  font-size: 0.56rem;
   font-weight: 600;
   transition:
     border-color 140ms ease,
@@ -2591,8 +2995,8 @@ button {
 .workspace-scm-tabs {
   display: flex;
   gap: 2px;
-  padding: 2px 0 7px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  padding: 0 2px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.045);
 }
 
 .workspace-scm-tab {
@@ -2602,7 +3006,7 @@ button {
   border: 0;
   background: transparent;
   color: var(--surface-soft-text);
-  font-size: 0.64rem;
+  font-size: 0.56rem;
   font-weight: 600;
   letter-spacing: 0.01em;
   transition:
@@ -2628,7 +3032,7 @@ button {
 .workspace-scm-main-changes,
 .workspace-scm-main-graph {
   display: grid;
-  grid-template-columns: minmax(0, 1.04fr) minmax(300px, 0.96fr);
+  grid-template-columns: 1fr;
   gap: 10px;
   min-height: 0;
 }
@@ -2637,6 +3041,10 @@ button {
   display: grid;
   gap: 10px;
   min-height: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
 }
 
 .workspace-scm-column {
@@ -2649,6 +3057,10 @@ button {
   display: grid;
   align-content: start;
   gap: 10px;
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
 }
 
 .workspace-scm-column-list {
@@ -2657,15 +3069,18 @@ button {
 }
 
 .workspace-scm-column-detail {
-  padding-left: 12px;
-  border-left: 1px solid rgba(255, 255, 255, 0.04);
+  position: relative;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.045);
 }
 
 .workspace-scm-commit {
   display: grid;
   gap: 7px;
-  padding: 0 0 10px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  background: rgba(0, 0, 0, 0.08);
 }
 
 .workspace-scm-commit-head {
@@ -2676,14 +3091,14 @@ button {
 }
 
 .workspace-scm-commit-head strong {
-  font-size: 0.72rem;
+  font-size: 0.64rem;
   font-weight: 600;
 }
 
 .workspace-scm-commit-head span,
 .workspace-scm-commit-hint {
   color: var(--surface-soft-text);
-  font-size: 0.61rem;
+  font-size: 0.55rem;
   line-height: 1.4;
 }
 
@@ -2696,7 +3111,7 @@ button {
   background: rgba(0, 0, 0, 0.12);
   color: var(--text);
   font: inherit;
-  font-size: 0.67rem;
+  font-size: 0.59rem;
   line-height: 1.5;
   outline: none;
   transition:
@@ -2705,13 +3120,13 @@ button {
 }
 
 .workspace-scm-commit-input {
-  min-height: 76px;
+  min-height: 68px;
   padding: 9px 10px;
   resize: vertical;
 }
 
 .workspace-scm-input {
-  min-height: 30px;
+  min-height: 28px;
   padding: 0 9px;
 }
 
@@ -2734,8 +3149,17 @@ button {
   justify-content: space-between;
 }
 
+.workspace-scm-commit-hint {
+  margin: 0;
+}
+
+.workspace-scm-commit-hint code {
+  font: inherit;
+  color: var(--text);
+}
+
 .workspace-scm-count-badge {
-  min-height: 18px;
+  min-height: 17px;
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -2743,11 +3167,11 @@ button {
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.025);
   color: var(--surface-soft-text);
-  font-size: 0.58rem;
+  font-size: 0.52rem;
 }
 
 .workspace-scm-count-badge strong {
-  font-size: 0.62rem;
+  font-size: 0.55rem;
 }
 
 .workspace-scm-count-badge.is-staged strong {
@@ -2771,12 +3195,17 @@ button {
 .workspace-scm-section-list,
 .workspace-scm-branch-groups {
   display: grid;
-  gap: 12px;
+  gap: 10px;
+}
+
+.workspace-scm-branch-groups {
+  grid-template-columns: 1fr;
 }
 
 .workspace-scm-section {
   display: grid;
   gap: 5px;
+  padding: 2px 0 0;
 }
 
 .workspace-scm-section-header {
@@ -2784,6 +3213,8 @@ button {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
 }
 
 .workspace-scm-section-title {
@@ -2793,7 +3224,7 @@ button {
 }
 
 .workspace-scm-section-title strong {
-  font-size: 0.62rem;
+  font-size: 0.55rem;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -2801,7 +3232,7 @@ button {
 
 .workspace-scm-section-title span {
   color: var(--surface-soft-text);
-  font-size: 0.6rem;
+  font-size: 0.54rem;
 }
 
 .workspace-scm-section-actions,
@@ -2815,7 +3246,7 @@ button {
 }
 
 .workspace-scm-inline-action {
-  min-height: 22px;
+  min-height: 20px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -2824,7 +3255,7 @@ button {
   border: 1px solid rgba(255, 255, 255, 0.055);
   background: transparent;
   color: var(--surface-soft-text);
-  font-size: 0.58rem;
+  font-size: 0.52rem;
   font-weight: 600;
   transition:
     border-color 140ms ease,
@@ -2841,7 +3272,7 @@ button {
 .workspace-scm-graph-list,
 .workspace-scm-commit-files {
   display: grid;
-  gap: 0;
+  gap: 4px;
 }
 
 .workspace-scm-file-row,
@@ -2853,17 +3284,23 @@ button {
   gap: 8px;
   padding: 6px 8px;
   border-radius: 10px;
-  border-bottom: 0;
-  transition: background 140ms ease;
+  border: 1px solid transparent;
+  transition:
+    border-color 140ms ease,
+    background 140ms ease;
+  position: relative;
 }
 
 .workspace-scm-file-row:hover,
 .workspace-scm-branch-row:hover {
+  border-color: rgba(255, 255, 255, 0.05);
   background: rgba(255, 255, 255, 0.025);
 }
 
 .workspace-scm-file-row.is-selected {
-  background: rgba(255, 255, 255, 0.045);
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.05);
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent) 70%, transparent);
 }
 
 .workspace-scm-file-row:last-child,
@@ -2895,7 +3332,7 @@ button {
   align-items: center;
   justify-content: center;
   color: var(--surface-soft-text);
-  font-size: 0.64rem;
+  font-size: 0.56rem;
   font-weight: 700;
 }
 
@@ -2945,7 +3382,7 @@ button {
 .workspace-scm-branch-head strong,
 .workspace-scm-graph-copy strong,
 .workspace-scm-detail-header strong {
-  font-size: 0.72rem;
+  font-size: 0.64rem;
   font-weight: 600;
   color: var(--text);
 }
@@ -2956,7 +3393,7 @@ button {
 .workspace-scm-detail-header span,
 .workspace-scm-task-header span {
   color: var(--surface-soft-text);
-  font-size: 0.6rem;
+  font-size: 0.54rem;
   line-height: 1.4;
 }
 
@@ -2969,7 +3406,9 @@ button {
 
 .workspace-scm-file-row:hover .workspace-scm-file-actions,
 .workspace-scm-file-row.is-selected .workspace-scm-file-actions,
-.workspace-scm-branch-row:hover .workspace-scm-branch-actions {
+.workspace-scm-branch-row:hover .workspace-scm-branch-actions,
+.workspace-scm-file-row:focus-within .workspace-scm-file-actions,
+.workspace-scm-branch-row:focus-within .workspace-scm-branch-actions {
   opacity: 1;
   pointer-events: auto;
 }
@@ -2986,12 +3425,14 @@ button {
   align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
 }
 
 .workspace-scm-detail-kicker {
   margin: 0 0 4px;
   color: var(--surface-soft-text);
-  font-size: 0.56rem;
+  font-size: 0.5rem;
   font-weight: 600;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -3009,7 +3450,7 @@ button {
   border: 1px solid rgba(255, 255, 255, 0.055);
   background: transparent;
   color: var(--surface-soft-text);
-  font-size: 0.58rem;
+  font-size: 0.52rem;
   font-weight: 600;
 }
 
@@ -3022,6 +3463,7 @@ button {
 .workspace-scm-diff-shell {
   display: grid;
   gap: 8px;
+  min-height: 0;
 }
 
 .workspace-scm-diff,
@@ -3034,7 +3476,7 @@ button {
   background: rgba(0, 0, 0, 0.16);
   color: color-mix(in srgb, var(--text) 88%, white 12%);
   font-family: "SF Mono", "Menlo", monospace;
-  font-size: 0.61rem;
+  font-size: 0.55rem;
   line-height: 1.58;
   white-space: pre-wrap;
   word-break: break-word;
@@ -3043,6 +3485,8 @@ button {
 .workspace-scm-diff,
 .workspace-scm-task-output {
   padding: 10px 11px;
+  min-height: 220px;
+  max-height: 320px;
 }
 
 .workspace-scm-commit-body {
@@ -3053,12 +3497,16 @@ button {
 .workspace-scm-task-command {
   margin: 0;
   color: var(--surface-soft-text);
-  font-size: 0.58rem;
+  font-size: 0.52rem;
 }
 
 .workspace-scm-branches-head {
   display: grid;
   gap: 8px;
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  background: rgba(0, 0, 0, 0.08);
   padding-bottom: 10px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.04);
 }
@@ -3069,13 +3517,13 @@ button {
 }
 
 .workspace-scm-branch-summary strong {
-  font-size: 0.72rem;
+  font-size: 0.64rem;
   font-weight: 600;
 }
 
 .workspace-scm-branch-summary span {
   color: var(--surface-soft-text);
-  font-size: 0.61rem;
+  font-size: 0.55rem;
 }
 
 .workspace-scm-branch-form,
@@ -3103,7 +3551,7 @@ button {
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.04);
   color: var(--surface-soft-text);
-  font-size: 0.54rem;
+  font-size: 0.48rem;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -3116,26 +3564,31 @@ button {
   gap: 8px;
   padding: 6px 8px;
   border-radius: 10px;
-  border: 0;
+  border: 1px solid transparent;
   background: transparent;
   color: inherit;
   text-align: left;
-  transition: background 140ms ease;
+  transition:
+    border-color 140ms ease,
+    background 140ms ease;
 }
 
 .workspace-scm-graph-row:hover {
+  border-color: rgba(255, 255, 255, 0.05);
   background: rgba(255, 255, 255, 0.025);
 }
 
 .workspace-scm-graph-row.is-selected {
-  background: rgba(255, 255, 255, 0.045);
+  border-color: rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.05);
+  box-shadow: inset 2px 0 0 color-mix(in srgb, var(--accent) 70%, transparent);
 }
 
 .workspace-scm-graph-prefix {
   width: 28px;
   color: var(--surface-soft-text);
   font-family: "SF Mono", "Menlo", monospace;
-  font-size: 0.62rem;
+  font-size: 0.55rem;
   line-height: 1.45;
   white-space: pre;
 }
@@ -3156,7 +3609,7 @@ button {
   border: 1px solid rgba(255, 255, 255, 0.055);
   background: rgba(255, 255, 255, 0.025);
   color: var(--surface-soft-text);
-  font-size: 0.54rem;
+  font-size: 0.48rem;
   font-weight: 600;
 }
 
@@ -3179,7 +3632,7 @@ button {
 .workspace-scm-task {
   display: grid;
   gap: 7px;
-  padding-top: 10px;
+  padding: 10px 0 0;
   border-top: 1px solid rgba(255, 255, 255, 0.04);
 }
 
@@ -3543,99 +3996,7 @@ button {
 
 .workspace-screen {
   height: 100%;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  gap: 10px;
   overflow: hidden;
-}
-
-.workspace-session-header {
-  min-width: 0;
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 12px 14px;
-  border-radius: 14px;
-  border: 1px solid var(--surface-card-border);
-  background:
-    linear-gradient(180deg, var(--overlay-panel-highlight), transparent 28%),
-    color-mix(in srgb, var(--surface-card-bg) 84%, var(--panel) 16%);
-  box-shadow: inset 0 1px 0 var(--overlay-panel-highlight);
-}
-
-.workspace-session-copy {
-  min-width: 0;
-  display: grid;
-  gap: 4px;
-}
-
-.workspace-session-mark {
-  margin: 0;
-  color: var(--muted);
-  font-size: 0.62rem;
-  font-weight: 700;
-  letter-spacing: 0.16em;
-  text-transform: uppercase;
-}
-
-.workspace-session-copy h1 {
-  margin: 0;
-  font-family: "SF Pro Display", "Avenir Next", sans-serif;
-  font-size: 1.08rem;
-  font-weight: 600;
-  letter-spacing: -0.03em;
-  line-height: 1.05;
-}
-
-.workspace-session-path {
-  min-width: 0;
-  max-width: min(100%, 72ch);
-  margin: 0;
-  color: var(--surface-soft-text);
-  font-size: 0.76rem;
-  line-height: 1.4;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.workspace-session-meta {
-  flex: 0 0 auto;
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 8px;
-}
-
-.workspace-session-chip {
-  min-height: 26px;
-  display: inline-flex;
-  align-items: center;
-  padding: 0 10px;
-  border-radius: 999px;
-  border: 1px solid var(--control-border);
-  background: var(--surface-pill-bg);
-  color: var(--surface-soft-text);
-  font-size: 0.7rem;
-  font-weight: 600;
-  letter-spacing: 0.01em;
-}
-
-.workspace-session-chip.is-clean {
-  border-color: color-mix(in srgb, #8fd7a2 34%, transparent);
-  color: #8fd7a2;
-}
-
-.workspace-session-chip.is-dirty {
-  border-color: color-mix(in srgb, #f2c36a 34%, transparent);
-  color: #f2c36a;
-}
-
-.workspace-session-chip.is-conflicted,
-.workspace-session-chip.is-error {
-  border-color: color-mix(in srgb, var(--danger) 34%, transparent);
-  color: color-mix(in srgb, var(--danger) 38%, var(--text) 62%);
 }
 
 .terminal-layout,
@@ -3648,6 +4009,7 @@ button {
 .terminal-layout {
   display: flex;
   flex: 1;
+  height: 100%;
   min-height: 0;
   overflow: hidden;
   padding: 1px;
@@ -3924,6 +4286,10 @@ button {
     grid-template-columns: 1fr;
   }
 
+  .settings-adjustment-grid {
+    grid-template-columns: 1fr;
+  }
+
   .settings-guide-header {
     flex-direction: column;
   }
@@ -3953,11 +4319,12 @@ button {
     grid-template-columns: 1fr;
   }
 
+  .workspace-scm-branch-groups {
+    grid-template-columns: 1fr;
+  }
+
   .workspace-scm-column-detail {
-    padding-left: 0;
-    border-left: 0;
-    padding-top: 10px;
-    border-top: 1px solid rgba(255, 255, 255, 0.04);
+    padding-top: 12px;
   }
 }
 
@@ -3991,21 +4358,6 @@ button {
     padding: 6px 10px 10px;
   }
 
-  .workspace-session-header {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 10px;
-    padding: 11px 12px;
-  }
-
-  .workspace-session-copy h1 {
-    font-size: 0.96rem;
-  }
-
-  .workspace-session-meta {
-    justify-content: flex-start;
-  }
-
   .workspace-activity-rail {
     top: calc(var(--chrome-height) + 12px);
     right: 10px;
@@ -4035,6 +4387,8 @@ button {
   }
 
   .workspace-git-backdrop {
+    top: 0;
+    bottom: 0;
     padding: 12px;
     background: rgba(8, 10, 14, 0.56);
   }
@@ -4042,6 +4396,7 @@ button {
   .workspace-git-panel {
     width: 100%;
     max-height: 100%;
+    border: 1px solid color-mix(in srgb, var(--overlay-panel-border) 84%, transparent);
     border-radius: 20px;
   }
 
@@ -4076,6 +4431,12 @@ button {
     grid-template-columns: 1fr;
   }
 
+  .workspace-scm-column-list,
+  .workspace-scm-column-detail,
+  .workspace-scm-main-branches {
+    padding: 10px;
+  }
+
   .workspace-modal-backdrop {
     padding: 16px;
   }
@@ -4091,7 +4452,13 @@ button {
   }
 
   .settings-sheet-header,
-  .settings-panel-intro {
+  .settings-panel-intro,
+  .settings-sheet-footer {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .settings-adjustment-head {
     flex-direction: column;
     align-items: stretch;
   }
@@ -4100,6 +4467,10 @@ button {
   .settings-panel {
     padding: 14px;
     border-radius: 18px;
+  }
+
+  .settings-sheet-actions {
+    justify-content: flex-start;
   }
 
   .workspace-modal {

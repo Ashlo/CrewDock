@@ -23,6 +23,12 @@ const MAX_WORKSPACE_ATTENTION_COUNT = 99;
 const LAUNCHER_CARD_TRANSITION_MS = 360;
 const GIT_REFRESH_INTERVAL_MS = 3000;
 const DEFAULT_THEME_ID = "one-dark";
+const DEFAULT_INTERFACE_TEXT_SCALE = 1;
+const MIN_INTERFACE_TEXT_SCALE = 0.85;
+const MAX_INTERFACE_TEXT_SCALE = 1.2;
+const DEFAULT_TERMINAL_FONT_SIZE = 13.5;
+const MIN_TERMINAL_FONT_SIZE = 11;
+const MAX_TERMINAL_FONT_SIZE = 18;
 const COMPACT_PANE_HEIGHT = 420;
 const LAUNCHER_COMMANDS = Object.freeze(["help", "pwd", "ls", "cd", "open", "clear"]);
 const PATH_AWARE_LAUNCHER_COMMANDS = new Set(["ls", "cd", "open"]);
@@ -585,12 +591,12 @@ async function init() {
   document.body.dataset.platform = detectPlatform();
   uiState.snapshot = await bridge.getAppSnapshot();
   hydrateRuntimeActivityFromSnapshot(uiState.snapshot);
-  applyActiveTheme(getActiveThemeId(uiState.snapshot));
+  applySnapshotSettings(uiState.snapshot);
 
   if (bridge.listenState) {
     await bridge.listenState((snapshot) => {
       uiState.snapshot = snapshot;
-      applyActiveTheme(getActiveThemeId(snapshot));
+      applySnapshotSettings(snapshot);
       render();
     });
   }
@@ -793,6 +799,90 @@ function getActiveThemeId(snapshot = uiState.snapshot) {
   return normalizeThemeId(snapshot?.settings?.themeId);
 }
 
+function normalizeInterfaceTextScale(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) {
+    return DEFAULT_INTERFACE_TEXT_SCALE;
+  }
+
+  return Math.min(MAX_INTERFACE_TEXT_SCALE, Math.max(MIN_INTERFACE_TEXT_SCALE, numericValue));
+}
+
+function normalizeTerminalFontSize(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue)) {
+    return DEFAULT_TERMINAL_FONT_SIZE;
+  }
+
+  return Math.min(MAX_TERMINAL_FONT_SIZE, Math.max(MIN_TERMINAL_FONT_SIZE, numericValue));
+}
+
+function getInterfaceTextScale(snapshot = uiState.snapshot) {
+  return normalizeInterfaceTextScale(snapshot?.settings?.interfaceTextScale);
+}
+
+function getTerminalFontSize(snapshot = uiState.snapshot) {
+  return normalizeTerminalFontSize(snapshot?.settings?.terminalFontSize);
+}
+
+function hasStoredOpenAiApiKey(snapshot = uiState.snapshot) {
+  return Boolean(snapshot?.settings?.hasStoredOpenAiApiKey);
+}
+
+function hasEnvironmentOpenAiApiKey(snapshot = uiState.snapshot) {
+  return Boolean(snapshot?.settings?.hasEnvironmentOpenAiApiKey);
+}
+
+function createSettingsDraft(snapshot = uiState.snapshot) {
+  return {
+    themeId: getActiveThemeId(snapshot),
+    interfaceTextScale: getInterfaceTextScale(snapshot),
+    terminalFontSize: getTerminalFontSize(snapshot),
+    openAiApiKey: "",
+    hasStoredOpenAiApiKey: hasStoredOpenAiApiKey(snapshot),
+    hasEnvironmentOpenAiApiKey: hasEnvironmentOpenAiApiKey(snapshot),
+    savingOpenAiApiKey: false,
+    applyingAppearance: false,
+  };
+}
+
+function syncSettingsDraftFromSnapshot(snapshot = uiState.snapshot) {
+  uiState.settingsDraft = createSettingsDraft(snapshot);
+  return uiState.settingsDraft;
+}
+
+function getDraftThemeId(snapshot = uiState.snapshot) {
+  return normalizeThemeId(uiState.settingsDraft?.themeId ?? snapshot?.settings?.themeId);
+}
+
+function getDraftInterfaceTextScale(snapshot = uiState.snapshot) {
+  return normalizeInterfaceTextScale(
+    uiState.settingsDraft?.interfaceTextScale ?? snapshot?.settings?.interfaceTextScale,
+  );
+}
+
+function getDraftTerminalFontSize(snapshot = uiState.snapshot) {
+  return normalizeTerminalFontSize(
+    uiState.settingsDraft?.terminalFontSize ?? snapshot?.settings?.terminalFontSize,
+  );
+}
+
+function getDraftOpenAiApiKey() {
+  return uiState.settingsDraft?.openAiApiKey ?? "";
+}
+
+function getDraftHasStoredOpenAiApiKey(snapshot = uiState.snapshot) {
+  return Boolean(
+    uiState.settingsDraft?.hasStoredOpenAiApiKey ?? hasStoredOpenAiApiKey(snapshot),
+  );
+}
+
+function getDraftHasEnvironmentOpenAiApiKey(snapshot = uiState.snapshot) {
+  return Boolean(
+    uiState.settingsDraft?.hasEnvironmentOpenAiApiKey ?? hasEnvironmentOpenAiApiKey(snapshot),
+  );
+}
+
 function getCurrentThemeDefinition() {
   return getThemeDefinition(getActiveThemeId());
 }
@@ -812,16 +902,521 @@ function applyActiveTheme(themeId) {
 
   root.style.colorScheme = theme.colorScheme || "dark";
   document.body.dataset.theme = theme.id;
-  if (uiState.appliedThemeId !== theme.id) {
-    uiState.appliedThemeId = theme.id;
-    syncMountedTerminalThemes(theme);
+}
+
+function applyInterfaceTextScale(interfaceTextScale) {
+  const root = document.documentElement;
+  root.style.setProperty("--ui-text-scale", String(interfaceTextScale));
+}
+
+function applySettingsAppearance(themeId, interfaceTextScale, terminalFontSize) {
+  applyActiveTheme(themeId);
+  applyInterfaceTextScale(interfaceTextScale);
+
+  if (
+    uiState.appliedThemeId !== themeId
+    || uiState.appliedTerminalFontSize !== terminalFontSize
+  ) {
+    syncMountedTerminalAppearance(getThemeDefinition(themeId), terminalFontSize);
+    uiState.appliedThemeId = themeId;
+    uiState.appliedTerminalFontSize = terminalFontSize;
+  }
+
+  uiState.appliedInterfaceTextScale = interfaceTextScale;
+}
+
+function applySnapshotSettings(snapshot = uiState.snapshot) {
+  applySettingsAppearance(
+    getActiveThemeId(snapshot),
+    getInterfaceTextScale(snapshot),
+    getTerminalFontSize(snapshot),
+  );
+}
+
+function applyRenderedSettings(snapshot = uiState.snapshot) {
+  const useDraft = uiState.settingsVisible && uiState.settingsDraft;
+  applySettingsAppearance(
+    useDraft ? getDraftThemeId(snapshot) : getActiveThemeId(snapshot),
+    useDraft ? getDraftInterfaceTextScale(snapshot) : getInterfaceTextScale(snapshot),
+    getTerminalFontSize(snapshot),
+  );
+}
+
+function clearSettingsDraft({ restoreSnapshot = false } = {}) {
+  uiState.settingsDraft = null;
+  if (restoreSnapshot) {
+    applySnapshotSettings(uiState.snapshot);
   }
 }
 
-function syncMountedTerminalThemes(theme = getCurrentThemeDefinition()) {
-  for (const state of paneTerminals.values()) {
-    state.terminal.setOption("theme", { ...theme.terminalTheme });
-    state.themeId = theme.id;
+function hideSettingsSheet({ restoreSnapshot = true } = {}) {
+  if (!uiState.settingsVisible && !uiState.settingsDraft) {
+    return;
+  }
+
+  uiState.settingsVisible = false;
+  clearSettingsDraft({ restoreSnapshot });
+}
+
+function closeSettingsSheet({ restoreSnapshot = true } = {}) {
+  if (uiState.settingsDraft?.applyingAppearance) {
+    return;
+  }
+
+  hideSettingsSheet({ restoreSnapshot });
+  render();
+}
+
+function hasSettingsAppearanceChanges(snapshot = uiState.snapshot) {
+  if (!uiState.settingsDraft) {
+    return false;
+  }
+
+  return (
+    getDraftThemeId(snapshot) !== getActiveThemeId(snapshot)
+    || getDraftInterfaceTextScale(snapshot) !== getInterfaceTextScale(snapshot)
+    || getDraftTerminalFontSize(snapshot) !== getTerminalFontSize(snapshot)
+  );
+}
+
+function syncSettingsActionDom(root = document) {
+  const sheet = root.querySelector(".settings-sheet");
+  if (!(sheet instanceof HTMLElement) || !uiState.settingsVisible || !uiState.settingsDraft) {
+    return;
+  }
+
+  const isApplying = Boolean(uiState.settingsDraft.applyingAppearance);
+  const hasChanges = hasSettingsAppearanceChanges();
+  const applyButton = sheet.querySelector("[data-settings-apply]");
+  if (applyButton instanceof HTMLButtonElement) {
+    applyButton.disabled = isApplying || !hasChanges;
+    applyButton.textContent = isApplying ? "Applying..." : "Apply changes";
+  }
+
+  const closeButtons = sheet.querySelectorAll("[data-settings-close]");
+  for (const button of closeButtons) {
+    if (button instanceof HTMLButtonElement) {
+      button.disabled = isApplying;
+    }
+  }
+}
+
+function previewTheme(themeId) {
+  if (!uiState.settingsVisible) {
+    return;
+  }
+
+  if (!uiState.settingsDraft) {
+    syncSettingsDraftFromSnapshot();
+  }
+
+  uiState.settingsDraft.themeId = normalizeThemeId(themeId);
+  render();
+}
+
+function formatInterfaceTextScaleLabel(value) {
+  return `${Math.round(normalizeInterfaceTextScale(value) * 100)}%`;
+}
+
+function formatTerminalFontSizeLabel(value) {
+  return `${formatSettingNumber(normalizeTerminalFontSize(value))}px`;
+}
+
+function calculateRangeProgress(value, min, max) {
+  if (!(max > min)) {
+    return 0;
+  }
+
+  const progress = ((value - min) / (max - min)) * 100;
+  return Math.min(100, Math.max(0, progress));
+}
+
+function syncSettingsPreviewDom(root = document) {
+  const sheet = root.querySelector(".settings-sheet");
+  if (!(sheet instanceof HTMLElement) || !uiState.settingsVisible || !uiState.settingsDraft) {
+    return;
+  }
+
+  const interfaceTextScale = getDraftInterfaceTextScale();
+  const terminalFontSize = getDraftTerminalFontSize();
+
+  const interfaceValue = sheet.querySelector("[data-settings-interface-value]");
+  if (interfaceValue) {
+    interfaceValue.textContent = formatInterfaceTextScaleLabel(interfaceTextScale);
+  }
+
+  const terminalValue = sheet.querySelector("[data-settings-terminal-value]");
+  if (terminalValue) {
+    terminalValue.textContent = formatTerminalFontSizeLabel(terminalFontSize);
+  }
+
+  const interfaceRangeShell = sheet.querySelector("[data-settings-interface-range-shell]");
+  if (interfaceRangeShell instanceof HTMLElement) {
+    interfaceRangeShell.style.setProperty(
+      "--settings-adjustment-progress",
+      `${calculateRangeProgress(interfaceTextScale, MIN_INTERFACE_TEXT_SCALE, MAX_INTERFACE_TEXT_SCALE)}%`,
+    );
+  }
+  const interfaceRange = sheet.querySelector("[data-settings-interface-range]");
+  if (interfaceRange instanceof HTMLElement) {
+    interfaceRange.style.setProperty(
+      "--settings-adjustment-progress",
+      `${calculateRangeProgress(interfaceTextScale, MIN_INTERFACE_TEXT_SCALE, MAX_INTERFACE_TEXT_SCALE)}%`,
+    );
+  }
+
+  const terminalRangeShell = sheet.querySelector("[data-settings-terminal-range-shell]");
+  if (terminalRangeShell instanceof HTMLElement) {
+    terminalRangeShell.style.setProperty(
+      "--settings-adjustment-progress",
+      `${calculateRangeProgress(terminalFontSize, MIN_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE)}%`,
+    );
+  }
+  const terminalRange = sheet.querySelector("[data-settings-terminal-range]");
+  if (terminalRange instanceof HTMLElement) {
+    terminalRange.style.setProperty(
+      "--settings-adjustment-progress",
+      `${calculateRangeProgress(terminalFontSize, MIN_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE)}%`,
+    );
+  }
+
+  const interfacePreview = sheet.querySelector("[data-settings-interface-preview]");
+  if (interfacePreview instanceof HTMLElement) {
+    interfacePreview.style.fontSize = `${0.82 * interfaceTextScale}rem`;
+    interfacePreview.style.setProperty(
+      "--settings-preview-interface-scale",
+      String(interfaceTextScale),
+    );
+  }
+
+  const terminalPreview = sheet.querySelector("[data-settings-terminal-preview]");
+  if (terminalPreview instanceof HTMLElement) {
+    terminalPreview.style.fontSize = `${terminalFontSize}px`;
+    terminalPreview.style.setProperty(
+      "--settings-preview-terminal-size",
+      String(terminalFontSize),
+    );
+  }
+}
+
+function previewInterfaceTextScale(value) {
+  if (!uiState.settingsVisible) {
+    return;
+  }
+
+  if (!uiState.settingsDraft) {
+    syncSettingsDraftFromSnapshot();
+  }
+
+  uiState.settingsDraft.interfaceTextScale = normalizeInterfaceTextScale(value);
+  applyRenderedSettings(uiState.snapshot);
+  syncSettingsPreviewDom(document);
+  syncSettingsActionDom(document);
+}
+
+function previewTerminalFontSize(value) {
+  if (!uiState.settingsVisible) {
+    return;
+  }
+
+  if (!uiState.settingsDraft) {
+    syncSettingsDraftFromSnapshot();
+  }
+
+  uiState.settingsDraft.terminalFontSize = normalizeTerminalFontSize(value);
+  syncSettingsPreviewDom(document);
+  syncSettingsActionDom(document);
+}
+
+async function applySettingsDraft() {
+  if (!uiState.settingsVisible) {
+    return;
+  }
+
+  if (!uiState.settingsDraft) {
+    syncSettingsDraftFromSnapshot();
+  }
+
+  if (!hasSettingsAppearanceChanges(uiState.snapshot)) {
+    return;
+  }
+
+  uiState.settingsDraft.applyingAppearance = true;
+  syncSettingsActionDom(document);
+
+  try {
+    if (bridge.setSettings) {
+      uiState.snapshot = await bridge.setSettings(
+        getDraftThemeId(uiState.snapshot),
+        getDraftInterfaceTextScale(uiState.snapshot),
+        getDraftTerminalFontSize(uiState.snapshot),
+      );
+    } else {
+      if (getDraftThemeId(uiState.snapshot) !== getActiveThemeId(uiState.snapshot)) {
+        uiState.snapshot = await bridge.setTheme(getDraftThemeId(uiState.snapshot));
+      }
+      if (getDraftInterfaceTextScale(uiState.snapshot) !== getInterfaceTextScale(uiState.snapshot)) {
+        uiState.snapshot = await bridge.setInterfaceTextScale(getDraftInterfaceTextScale(uiState.snapshot));
+      }
+      if (getDraftTerminalFontSize(uiState.snapshot) !== getTerminalFontSize(uiState.snapshot)) {
+        uiState.snapshot = await bridge.setTerminalFontSize(getDraftTerminalFontSize(uiState.snapshot));
+      }
+    }
+
+    syncSettingsDraftFromSnapshot(uiState.snapshot);
+    applySnapshotSettings(uiState.snapshot);
+  } catch (error) {
+    reportSourceControlError(error);
+  } finally {
+    if (uiState.settingsDraft) {
+      uiState.settingsDraft.applyingAppearance = false;
+    }
+    render();
+  }
+}
+
+async function commitOpenAiApiKey() {
+  if (!bridge.setOpenAiApiKey || !uiState.settingsVisible) {
+    return;
+  }
+
+  if (!uiState.settingsDraft) {
+    syncSettingsDraftFromSnapshot();
+  }
+
+  const nextKey = getDraftOpenAiApiKey().trim();
+  if (!nextKey) {
+    window.alert("Paste an OpenAI API key first, or use Remove to clear the stored one.");
+    return;
+  }
+
+  uiState.settingsDraft.savingOpenAiApiKey = true;
+  render();
+
+  try {
+    uiState.snapshot = await bridge.setOpenAiApiKey(nextKey);
+    syncSettingsDraftFromSnapshot(uiState.snapshot);
+    applySnapshotSettings(uiState.snapshot);
+  } catch (error) {
+    reportSourceControlError(error);
+  } finally {
+    if (uiState.settingsDraft) {
+      uiState.settingsDraft.savingOpenAiApiKey = false;
+    }
+    render();
+  }
+}
+
+async function clearStoredOpenAiApiKey() {
+  if (!bridge.setOpenAiApiKey || !uiState.settingsVisible) {
+    return;
+  }
+
+  const hasStoredKey = getDraftHasStoredOpenAiApiKey();
+  if (!hasStoredKey) {
+    if (uiState.settingsDraft) {
+      uiState.settingsDraft.openAiApiKey = "";
+    }
+    render();
+    return;
+  }
+
+  if (!window.confirm("Remove the stored OpenAI API key from CrewDock settings?")) {
+    return;
+  }
+
+  if (!uiState.settingsDraft) {
+    syncSettingsDraftFromSnapshot();
+  }
+
+  uiState.settingsDraft.savingOpenAiApiKey = true;
+  render();
+
+  try {
+    uiState.snapshot = await bridge.setOpenAiApiKey(null);
+    syncSettingsDraftFromSnapshot(uiState.snapshot);
+    applySnapshotSettings(uiState.snapshot);
+  } catch (error) {
+    reportSourceControlError(error);
+  } finally {
+    if (uiState.settingsDraft) {
+      uiState.settingsDraft.savingOpenAiApiKey = false;
+    }
+    render();
+  }
+}
+
+function bindSettingsSheetControls(root = document) {
+  const settingsBackdrop = root.querySelector(".settings-sheet-backdrop");
+  if (settingsBackdrop instanceof HTMLElement) {
+    settingsBackdrop.addEventListener("click", (event) => {
+      if (event.target !== settingsBackdrop) {
+        return;
+      }
+
+      event.preventDefault();
+      closeSettingsSheet();
+    });
+  }
+
+  const settingsCloseButton = root.querySelector(".settings-sheet-close");
+  if (settingsCloseButton instanceof HTMLButtonElement) {
+    settingsCloseButton.type = "button";
+    settingsCloseButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      closeSettingsSheet();
+    });
+  }
+
+  const interfaceRange = root.querySelector("[data-settings-interface-range]");
+  if (interfaceRange instanceof HTMLInputElement) {
+    interfaceRange.addEventListener("input", (event) => {
+      event.stopPropagation();
+      previewInterfaceTextScale(interfaceRange.value);
+    });
+  }
+
+  const terminalRange = root.querySelector("[data-settings-terminal-range]");
+  if (terminalRange instanceof HTMLInputElement) {
+    terminalRange.addEventListener("input", (event) => {
+      event.stopPropagation();
+      previewTerminalFontSize(terminalRange.value);
+    });
+  }
+
+  const openAiInput = root.querySelector("[data-settings-openai-api-key-input]");
+  if (openAiInput instanceof HTMLInputElement) {
+    openAiInput.addEventListener("input", (event) => {
+      event.stopPropagation();
+      if (!uiState.settingsDraft) {
+        syncSettingsDraftFromSnapshot();
+      }
+      uiState.settingsDraft.openAiApiKey = openAiInput.value;
+    });
+    openAiInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      void commitOpenAiApiKey();
+    });
+  }
+
+  const openAiSaveButton = root.querySelector("[data-settings-openai-save]");
+  if (openAiSaveButton instanceof HTMLButtonElement) {
+    openAiSaveButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void commitOpenAiApiKey();
+    });
+  }
+
+  const openAiClearButton = root.querySelector("[data-settings-openai-clear]");
+  if (openAiClearButton instanceof HTMLButtonElement) {
+    openAiClearButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void clearStoredOpenAiApiKey();
+    });
+  }
+}
+
+function bindModalLayerControls(root = document) {
+  if (!(root instanceof HTMLElement) || root.dataset.modalLayerBound === "true") {
+    return;
+  }
+
+  root.dataset.modalLayerBound = "true";
+  root.addEventListener("click", (event) => {
+    const clickedElement = event.target instanceof Element ? event.target : null;
+    if (!clickedElement) {
+      return;
+    }
+
+    const settingsCloseButton = clickedElement.closest(".settings-sheet-close");
+    if (settingsCloseButton) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeSettingsSheet();
+      return;
+    }
+
+    if (clickedElement.classList.contains("settings-sheet-backdrop")) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeSettingsSheet();
+      return;
+    }
+
+    const gitCloseButton = clickedElement.closest('.workspace-git-panel-button[data-action="close-git-panel"]');
+    if (gitCloseButton) {
+      event.preventDefault();
+      event.stopPropagation();
+      uiState.gitPanelVisible = false;
+      render();
+      return;
+    }
+
+    if (clickedElement.classList.contains("workspace-git-backdrop")) {
+      event.preventDefault();
+      event.stopPropagation();
+      uiState.gitPanelVisible = false;
+      render();
+      return;
+    }
+
+    const quickSwitcherCloseButton = clickedElement.closest(".workspace-quick-switcher-close");
+    if (quickSwitcherCloseButton) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeQuickSwitcher();
+      render();
+      return;
+    }
+
+    if (clickedElement.classList.contains("workspace-quick-switcher-backdrop")) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeQuickSwitcher();
+      render();
+    }
+  });
+}
+
+function syncMountedTerminalAppearance(
+  theme = getCurrentThemeDefinition(),
+  terminalFontSize = getTerminalFontSize(),
+) {
+  for (const [paneId, state] of paneTerminals.entries()) {
+    let shouldRefit = false;
+    let shouldRefresh = false;
+    if (state.themeId !== theme.id) {
+      state.terminal.setOption("theme", { ...theme.terminalTheme });
+      state.themeId = theme.id;
+      shouldRefresh = true;
+    }
+    if (state.fontSize !== terminalFontSize) {
+      state.terminal.setOption("fontSize", terminalFontSize);
+      state.fontSize = terminalFontSize;
+      shouldRefit = true;
+      shouldRefresh = true;
+    }
+    if (shouldRefit || shouldRefresh) {
+      requestAnimationFrame(() => {
+        if (shouldRefit) {
+          state.fitAddon.fit();
+          state.size = { cols: 0, rows: 0 };
+          fitTerminal(paneId);
+        }
+        if (shouldRefresh) {
+          state.terminal.clearTextureAtlas();
+          state.terminal.refresh(0, Math.max(0, state.terminal.rows - 1));
+        }
+      });
+    }
   }
 }
 
@@ -832,15 +1427,27 @@ async function handleClick(event) {
     return;
   }
 
-  if (target.dataset.action === "close-settings" && clickedElement?.closest(".settings-sheet")) {
+  if (
+    target.dataset.action === "close-settings"
+    && target.classList.contains("settings-sheet-backdrop")
+    && clickedElement?.closest(".settings-sheet")
+  ) {
     return;
   }
 
-  if (target.dataset.action === "close-git-panel" && clickedElement?.closest(".workspace-git-panel")) {
+  if (
+    target.dataset.action === "close-git-panel"
+    && target.classList.contains("workspace-git-backdrop")
+    && clickedElement?.closest(".workspace-git-panel")
+  ) {
     return;
   }
 
-  if (target.dataset.action === "close-quick-switcher" && clickedElement?.closest(".workspace-quick-switcher")) {
+  if (
+    target.dataset.action === "close-quick-switcher"
+    && target.classList.contains("workspace-quick-switcher-backdrop")
+    && clickedElement?.closest(".workspace-quick-switcher")
+  ) {
     return;
   }
 
@@ -867,8 +1474,7 @@ async function handleClick(event) {
   }
 
   if (target.dataset.action === "close-settings") {
-    uiState.settingsVisible = false;
-    render();
+    closeSettingsSheet();
     return;
   }
 
@@ -883,7 +1489,7 @@ async function handleClick(event) {
 
   if (target.dataset.action === "show-launcher") {
     uiState.launcherVisible = true;
-    uiState.settingsVisible = false;
+    hideSettingsSheet();
     uiState.gitPanelVisible = false;
     uiState.activityRailVisible = false;
     closeQuickSwitcher();
@@ -975,7 +1581,7 @@ async function handleClick(event) {
   }
 
   if (target.dataset.action === "open-workspace") {
-    uiState.settingsVisible = false;
+    hideSettingsSheet();
     uiState.gitPanelVisible = false;
     uiState.activityRailVisible = false;
     closeQuickSwitcher();
@@ -1008,12 +1614,31 @@ async function handleClick(event) {
 
   if (target.dataset.action === "set-theme") {
     const themeId = target.dataset.themeId;
-    if (!themeId || themeId === getActiveThemeId()) {
+    if (!themeId) {
+      return;
+    }
+
+    if (uiState.settingsVisible) {
+      if (normalizeThemeId(themeId) === getDraftThemeId()) {
+        return;
+      }
+
+      previewTheme(themeId);
+      return;
+    }
+
+    if (themeId === getActiveThemeId()) {
       return;
     }
 
     uiState.snapshot = await bridge.setTheme(themeId);
+    applySnapshotSettings(uiState.snapshot);
     render();
+    return;
+  }
+
+  if (target.dataset.action === "apply-settings") {
+    await applySettingsDraft();
     return;
   }
 
@@ -1054,7 +1679,7 @@ async function handleClick(event) {
       uiState.pendingWorkspaceDraft.paneCount,
     );
     uiState.launcherVisible = false;
-    uiState.settingsVisible = false;
+    hideSettingsSheet();
     uiState.gitPanelVisible = false;
     closeQuickSwitcher();
     uiState.pendingWorkspaceDraft = null;
@@ -1068,7 +1693,7 @@ async function handleClick(event) {
     const workspaceId = target.dataset.workspaceId;
     if (!workspaceId || workspaceId === uiState.snapshot?.activeWorkspaceId) {
       uiState.launcherVisible = false;
-      uiState.settingsVisible = false;
+      hideSettingsSheet();
       markWorkspaceAttentionSeen(workspaceId || null);
       closeQuickSwitcher();
       render();
@@ -1341,7 +1966,7 @@ function handleInput(event) {
   }
 }
 
-function handleChange(event) {
+async function handleChange(event) {
   const countInput = event.target.closest("[data-terminal-count-input]");
   if (!countInput || !uiState.pendingWorkspaceDraft) {
     return;
@@ -1450,8 +2075,7 @@ async function handleKeyDown(event) {
 
   if (uiState.settingsVisible && event.key === "Escape") {
     event.preventDefault();
-    uiState.settingsVisible = false;
-    render();
+    closeSettingsSheet();
     return;
   }
 
@@ -1593,7 +2217,7 @@ async function activateWorkspace(workspaceId) {
   }
 
   uiState.launcherVisible = false;
-  uiState.settingsVisible = false;
+  hideSettingsSheet();
   uiState.gitPanelVisible = keepSourceControlOpen;
   uiState.pendingWorkspaceDraft = null;
   uiState.contextMenu = null;
@@ -1620,7 +2244,7 @@ function openQuickSwitcher() {
     uiState.snapshot.workspaces.findIndex((workspace) => workspace.id === uiState.snapshot?.activeWorkspaceId),
   );
   uiState.quickSwitcherShouldFocus = true;
-  uiState.settingsVisible = false;
+  hideSettingsSheet();
   uiState.gitPanelVisible = false;
   uiState.pendingWorkspaceDraft = null;
   uiState.contextMenu = null;
@@ -1663,6 +2287,38 @@ function captureSourceControlFocusState(root = document) {
   };
 }
 
+function captureSourceControlScrollState(root = document) {
+  const panel = root.querySelector(".workspace-git-panel");
+  if (!(panel instanceof HTMLElement)) {
+    return [];
+  }
+
+  const selectors = [
+    ".workspace-git-panel-body",
+    ".workspace-scm-column-list",
+    ".workspace-scm-column-detail",
+    ".workspace-scm-diff",
+    ".workspace-scm-task-output",
+    ".workspace-scm-commit-body",
+  ];
+
+  return selectors.flatMap((selector) => Array
+    .from(panel.querySelectorAll(selector))
+    .map((element, index) => {
+      if (!(element instanceof HTMLElement)) {
+        return null;
+      }
+
+      return {
+        selector,
+        index,
+        scrollTop: element.scrollTop,
+        scrollLeft: element.scrollLeft,
+      };
+    })
+    .filter(Boolean));
+}
+
 function restoreSourceControlFocusState(state, root = document) {
   if (!state?.selector) {
     return;
@@ -1689,6 +2345,35 @@ function restoreSourceControlFocusState(state, root = document) {
 
   if (typeof state.scrollTop === "number" && "scrollTop" in input) {
     input.scrollTop = state.scrollTop;
+  }
+}
+
+function restoreSourceControlScrollState(states, root = document) {
+  if (!Array.isArray(states) || states.length === 0) {
+    return;
+  }
+
+  const panel = root.querySelector(".workspace-git-panel");
+  if (!(panel instanceof HTMLElement)) {
+    return;
+  }
+
+  for (const state of states) {
+    if (!state?.selector) {
+      continue;
+    }
+
+    const element = panel.querySelectorAll(state.selector)[state.index];
+    if (!(element instanceof HTMLElement)) {
+      continue;
+    }
+
+    if (typeof state.scrollTop === "number") {
+      element.scrollTop = state.scrollTop;
+    }
+    if (typeof state.scrollLeft === "number") {
+      element.scrollLeft = state.scrollLeft;
+    }
   }
 }
 
@@ -1719,7 +2404,7 @@ async function openSourceControlPanel({ force = false } = {}) {
     && uiState.sourceControl.snapshot;
 
   uiState.gitPanelVisible = true;
-  uiState.settingsVisible = false;
+  hideSettingsSheet();
   uiState.activityRailVisible = false;
   closeQuickSwitcher();
   uiState.pendingWorkspaceDraft = null;
@@ -1748,6 +2433,7 @@ function resetSourceControlState({ keepTab = true } = {}) {
     graphLoadingMore: false,
     createBranchName: "",
     createBranchStartPoint: "",
+    generatingCommitMessage: false,
     taskInput: "",
     submitting: false,
     lastLoadedWorkspaceId: "",
@@ -2052,11 +2738,51 @@ async function submitSourceControlCommit({ commitAll = false } = {}) {
     return;
   }
 
-  await runSourceControlMutation(() => bridge.gitCommit(workspaceId, message, commitAll), {
+  const snapshot = await runSourceControlMutation(() => bridge.gitCommit(workspaceId, message, commitAll), {
     resetGraphSelection: true,
   });
-  uiState.sourceControl.commitMessage = "";
+  if (snapshot) {
+    uiState.sourceControl.commitMessage = "";
+    render();
+  }
+}
+
+async function generateSourceControlCommitMessage() {
+  const workspaceId = getSourceControlWorkspaceId();
+  if (!workspaceId || !bridge.generateGitCommitMessage || uiState.sourceControl.generatingCommitMessage) {
+    return;
+  }
+
+  const existingMessage = uiState.sourceControl.commitMessage.trim();
+  if (
+    existingMessage
+    && !window.confirm("Replace the current commit message with an AI suggestion?")
+  ) {
+    return;
+  }
+
+  const initialMessage = uiState.sourceControl.commitMessage;
+  uiState.sourceControl.generatingCommitMessage = true;
   render();
+
+  try {
+    const suggestion = await bridge.generateGitCommitMessage(workspaceId);
+    const currentMessage = uiState.sourceControl.commitMessage;
+    if (
+      currentMessage.trim()
+      && currentMessage.trim() !== initialMessage.trim()
+      && !window.confirm("Replace the current commit message with the AI suggestion?")
+    ) {
+      return;
+    }
+
+    uiState.sourceControl.commitMessage = String(suggestion || "").trim();
+  } catch (error) {
+    reportSourceControlError(error);
+  } finally {
+    uiState.sourceControl.generatingCommitMessage = false;
+    render();
+  }
 }
 
 async function submitSourceControlCreateBranch() {
@@ -2072,13 +2798,15 @@ async function submitSourceControlCreateBranch() {
     return;
   }
 
-  await runSourceControlMutation(
+  const snapshot = await runSourceControlMutation(
     () => bridge.gitCreateBranch(workspaceId, branchName, startPoint || null),
     { resetGraphSelection: true },
   );
-  uiState.sourceControl.createBranchName = "";
-  uiState.sourceControl.createBranchStartPoint = "";
-  render();
+  if (snapshot) {
+    uiState.sourceControl.createBranchName = "";
+    uiState.sourceControl.createBranchStartPoint = "";
+    render();
+  }
 }
 
 async function submitSourceControlTaskInput() {
@@ -2190,6 +2918,9 @@ async function handleSourceControlAction(target) {
       return;
     case "scm-commit-all":
       await submitSourceControlCommit({ commitAll: true });
+      return;
+    case "scm-generate-commit-message":
+      await generateSourceControlCommitMessage();
       return;
     case "scm-fetch":
       await runSourceControlMutation(() => bridge.gitFetch(workspaceId), { resetGraphSelection: true });
@@ -2390,7 +3121,7 @@ function toggleActivityRail(forceVisible = !uiState.activityRailVisible) {
 
   uiState.activityRailVisible = true;
   uiState.activityRailScope = normalizeActivityScope(uiState.activityRailScope);
-  uiState.settingsVisible = false;
+  hideSettingsSheet();
   uiState.gitPanelVisible = false;
   closeQuickSwitcher();
   uiState.pendingWorkspaceDraft = null;
@@ -2602,7 +3333,7 @@ function startWorkspaceRename(workspaceId) {
   uiState.workspaceRenameShouldFocus = true;
   uiState.workspaceRenameSaving = false;
   uiState.launcherVisible = false;
-  uiState.settingsVisible = false;
+  hideSettingsSheet();
   uiState.gitPanelVisible = false;
   uiState.activityRailVisible = false;
   uiState.contextMenu = null;
@@ -2668,11 +3399,10 @@ function ensureFrame() {
 
 function createWorkspaceScreenElement(
   workspace,
-  windowSummary,
   layoutSignature = workspaceLayoutSignature(workspace),
 ) {
   const template = document.createElement("template");
-  template.innerHTML = renderWorkspace(workspace, windowSummary).trim();
+  template.innerHTML = renderWorkspace(workspace).trim();
   const screen = template.content.firstElementChild;
   if (!(screen instanceof HTMLElement)) {
     throw new Error("failed to create workspace screen");
@@ -2735,11 +3465,17 @@ function render() {
     return;
   }
 
-  applyActiveTheme(getActiveThemeId(uiState.snapshot));
-  syncRuntimeActivityState(uiState.snapshot);
+  const snapshot = uiState.snapshot;
+  if (!uiState.settingsVisible && uiState.settingsDraft) {
+    clearSettingsDraft();
+  } else if (uiState.settingsVisible && !uiState.settingsDraft) {
+    syncSettingsDraftFromSnapshot(snapshot);
+  }
+
+  applyRenderedSettings(snapshot);
+  syncRuntimeActivityState(snapshot);
   ensureFrame();
 
-  const snapshot = uiState.snapshot;
   const activeWorkspace = snapshot.activeWorkspace;
   const shouldShowLauncher = uiState.launcherVisible || !activeWorkspace;
 
@@ -2784,8 +3520,12 @@ function render() {
   const activityRegion = app.querySelector('[data-region="activity"]');
   const contextRegion = app.querySelector('[data-region="context"]');
   const modalRegion = app.querySelector('[data-region="modal"]');
+  bindModalLayerControls(modalRegion);
   const sourceControlFocusState = uiState.gitPanelVisible
     ? captureSourceControlFocusState(modalRegion)
+    : null;
+  const sourceControlScrollState = uiState.gitPanelVisible
+    ? captureSourceControlScrollState(modalRegion)
     : null;
 
   stripRegion.innerHTML = renderWorkspaceStrip({
@@ -2826,6 +3566,23 @@ function render() {
         : uiState.gitPanelVisible && activeWorkspace
           ? renderGitPanel(activeWorkspace)
           : "";
+  modalRegion.classList.toggle(
+    "is-active",
+    Boolean(
+      uiState.quickSwitcherVisible
+      || uiState.settingsVisible
+      || uiState.pendingWorkspaceDraft
+      || (uiState.gitPanelVisible && activeWorkspace),
+    ),
+  );
+  if (uiState.settingsVisible) {
+    syncSettingsPreviewDom(modalRegion);
+    bindSettingsSheetControls(modalRegion);
+    syncSettingsActionDom(modalRegion);
+  }
+  if (sourceControlScrollState && uiState.gitPanelVisible) {
+    restoreSourceControlScrollState(sourceControlScrollState, modalRegion);
+  }
   if (sourceControlFocusState && uiState.gitPanelVisible) {
     restoreSourceControlFocusState(sourceControlFocusState, modalRegion);
   }
@@ -2906,7 +3663,7 @@ function render() {
       workspaceScreens.delete(activeWorkspace.id);
     } else {
       discardCachedWorkspaceScreen(activeWorkspace.id);
-      const screen = createWorkspaceScreenElement(activeWorkspace, snapshot.window, nextLayoutSignature);
+      const screen = createWorkspaceScreenElement(activeWorkspace, nextLayoutSignature);
       stageRegion.appendChild(screen);
       mountWorkspaceTerminals(activeWorkspace, screen);
     }
@@ -3353,7 +4110,13 @@ function normalizeWheelDelta(event, tabs) {
 }
 
 function renderSettingsSheet(snapshot) {
-  const activeThemeId = getActiveThemeId(snapshot);
+  const activeThemeId = getDraftThemeId(snapshot);
+  const interfaceTextScale = getDraftInterfaceTextScale(snapshot);
+  const terminalFontSize = getDraftTerminalFontSize(snapshot);
+  const hasStoredKey = getDraftHasStoredOpenAiApiKey(snapshot);
+  const hasEnvironmentKey = getDraftHasEnvironmentOpenAiApiKey(snapshot);
+  const hasAppearanceChanges = hasSettingsAppearanceChanges(snapshot);
+  const isApplyingAppearance = Boolean(uiState.settingsDraft?.applyingAppearance);
   const themes = Object.values(THEME_REGISTRY);
   const primaryModifier = getPrimaryModifierLabel();
   const activeSection = normalizeSettingsSection(uiState.settingsSection);
@@ -3372,7 +4135,7 @@ function renderSettingsSheet(snapshot) {
             <h2 id="settings-title">${sectionTitle}</h2>
             <p class="settings-sheet-copy">${sectionCopy}</p>
           </div>
-          <button class="settings-sheet-close" data-action="close-settings" aria-label="Close settings">
+          <button class="settings-sheet-close" type="button" data-action="close-settings" data-settings-close aria-label="Close settings">
             ${renderCloseIcon()}
           </button>
         </header>
@@ -3409,6 +4172,34 @@ function renderSettingsSheet(snapshot) {
                   </div>
                   <p class="settings-panel-copy">Pick a palette and CrewDock updates the launcher, chrome, menus, panes, and xterm colors in place.</p>
                 </div>
+                <div class="settings-adjustment-grid">
+                  ${renderSettingsSliderCard({
+                    kind: "interface",
+                    title: "Interface text",
+                    copy: "Scales the chrome, panels, menus, and settings UI across CrewDock.",
+                    valueLabel: formatInterfaceTextScaleLabel(interfaceTextScale),
+                    min: MIN_INTERFACE_TEXT_SCALE,
+                    max: MAX_INTERFACE_TEXT_SCALE,
+                    step: 0.0125,
+                    value: interfaceTextScale,
+                    preview: renderInterfaceTextPreview(),
+                  })}
+                  ${renderSettingsSliderCard({
+                    kind: "terminal",
+                    title: "Terminal text",
+                    copy: "Updates xterm font sizing for every mounted pane and future sessions.",
+                    valueLabel: formatTerminalFontSizeLabel(terminalFontSize),
+                    min: MIN_TERMINAL_FONT_SIZE,
+                    max: MAX_TERMINAL_FONT_SIZE,
+                    step: 0.25,
+                    value: terminalFontSize,
+                    preview: renderTerminalTextPreview(),
+                  })}
+                </div>
+                ${renderSettingsAiCard({
+                  hasStoredKey,
+                  hasEnvironmentKey,
+                })}
                 <div class="settings-theme-grid">
                   ${themes.map((theme) => renderThemeCard(theme, activeThemeId)).join("")}
                 </div>
@@ -3420,6 +4211,31 @@ function renderSettingsSheet(snapshot) {
               </section>
             `}
         </div>
+        <footer class="settings-sheet-footer">
+          <p class="settings-sheet-footer-copy">
+            Preview workbench changes here. Apply keeps them, and close discards anything still in draft.
+          </p>
+          <div class="settings-sheet-actions">
+            <button
+              class="settings-ai-button"
+              type="button"
+              data-action="close-settings"
+              data-settings-close
+              ${isApplyingAppearance ? "disabled" : ""}
+            >
+              Cancel
+            </button>
+            <button
+              class="settings-ai-button settings-ai-button-primary"
+              type="button"
+              data-action="apply-settings"
+              data-settings-apply
+              ${(!hasAppearanceChanges || isApplyingAppearance) ? "disabled" : ""}
+            >
+              ${isApplyingAppearance ? "Applying..." : "Apply changes"}
+            </button>
+          </div>
+        </footer>
       </section>
     </div>
   `;
@@ -3570,6 +4386,149 @@ function renderCloseIcon() {
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
       <path d="M6.7 5.3 12 10.6l5.3-5.3 1.4 1.4L13.4 12l5.3 5.3-1.4 1.4L12 13.4l-5.3 5.3-1.4-1.4L10.6 12 5.3 6.7l1.4-1.4Z" fill="currentColor"></path>
     </svg>
+  `;
+}
+
+function formatSettingNumber(value) {
+  return Number(value).toFixed(2).replace(/\.?0+$/, "");
+}
+
+function renderSettingsSliderCard({
+  kind,
+  title,
+  copy,
+  valueLabel,
+  min,
+  max,
+  step,
+  value,
+  preview,
+}) {
+  const progress = calculateRangeProgress(value, min, max);
+  return `
+    <section class="settings-adjustment-card">
+      <div class="settings-adjustment-head">
+        <div>
+          <h4 class="settings-adjustment-title">${escapeHtml(title)}</h4>
+          <p class="settings-adjustment-copy">${escapeHtml(copy)}</p>
+        </div>
+        <span class="settings-adjustment-value" data-settings-${escapeHtml(kind)}-value>${escapeHtml(valueLabel)}</span>
+      </div>
+      <div
+        class="settings-adjustment-range-shell"
+        data-settings-${escapeHtml(kind)}-range-shell
+        style="--settings-adjustment-progress:${escapeHtml(`${progress}%`)}"
+      >
+        <input
+          class="settings-adjustment-range"
+          type="range"
+          min="${escapeHtml(String(min))}"
+          max="${escapeHtml(String(max))}"
+          step="${escapeHtml(String(step))}"
+          value="${escapeHtml(String(value))}"
+          data-settings-${escapeHtml(kind)}-range
+          aria-label="${escapeHtml(title)}"
+        />
+        <div class="settings-adjustment-range-labels" aria-hidden="true">
+          <span>Smaller</span>
+          <span>Larger</span>
+        </div>
+      </div>
+      ${preview}
+    </section>
+  `;
+}
+
+function renderInterfaceTextPreview() {
+  return `
+    <div class="settings-adjustment-preview settings-adjustment-preview-interface" data-settings-interface-preview>
+      <div class="settings-preview-interface-rail">
+        <span class="settings-preview-interface-tab is-active">Workspace</span>
+        <span class="settings-preview-interface-pill">Dirty</span>
+      </div>
+      <div class="settings-preview-interface-card">
+        <strong>Source Control</strong>
+        <span>Branch, changes, and quick actions stay readable without crowding the workbench.</span>
+      </div>
+      <div class="settings-preview-interface-meta">Status bar · quick switch · settings</div>
+    </div>
+  `;
+}
+
+function renderTerminalTextPreview() {
+  return `
+    <div class="settings-adjustment-preview settings-adjustment-preview-terminal" data-settings-terminal-preview>
+      <div class="settings-preview-terminal-line">
+        <span class="settings-preview-terminal-prompt">~/crewdock</span>
+        <span>git status</span>
+      </div>
+      <div class="settings-preview-terminal-line is-muted">On branch main</div>
+      <div class="settings-preview-terminal-line is-accent">modified: src-web/app.js</div>
+    </div>
+  `;
+}
+
+function renderSettingsAiCard({ hasStoredKey, hasEnvironmentKey }) {
+  const draftValue = getDraftOpenAiApiKey();
+  const isSaving = Boolean(uiState.settingsDraft?.savingOpenAiApiKey);
+  const statusLabel = hasStoredKey
+    ? "Saved locally"
+    : hasEnvironmentKey
+      ? "Using env"
+      : "Not set";
+  const statusTone = hasStoredKey || hasEnvironmentKey ? "is-active" : "";
+  const saveDisabled = isSaving || !draftValue.trim();
+  const clearDisabled = isSaving || !hasStoredKey;
+  const placeholder = hasStoredKey
+    ? "Stored locally. Paste a new key to replace it."
+    : "Paste OpenAI API key";
+  const note = hasStoredKey
+    ? "CrewDock will use the key saved here for AI commit messages."
+    : hasEnvironmentKey
+      ? "CrewDock is currently falling back to OPENAI_API_KEY from the launch environment."
+      : "Used for AI commit message generation in Source Control. Stored locally on this machine.";
+
+  return `
+    <section class="settings-ai-card">
+      <div class="settings-ai-head">
+        <div>
+          <p class="settings-panel-kicker">AI commit messages</p>
+          <h4 class="settings-adjustment-title">OpenAI API key</h4>
+          <p class="settings-adjustment-copy">${escapeHtml(note)}</p>
+        </div>
+        <span class="settings-ai-status ${statusTone}">${escapeHtml(statusLabel)}</span>
+      </div>
+      <div class="settings-ai-controls">
+        <input
+          class="settings-ai-input"
+          type="password"
+          value="${escapeHtml(draftValue)}"
+          data-settings-openai-api-key-input
+          placeholder="${escapeHtml(placeholder)}"
+          autocomplete="off"
+          autocapitalize="off"
+          spellcheck="false"
+        />
+        <div class="settings-ai-actions">
+          <button
+            type="button"
+            class="settings-ai-button settings-ai-button-primary"
+            data-settings-openai-save
+            ${saveDisabled ? "disabled" : ""}
+          >
+            ${isSaving ? "Saving..." : "Save key"}
+          </button>
+          <button
+            type="button"
+            class="settings-ai-button"
+            data-settings-openai-clear
+            ${clearDisabled ? "disabled" : ""}
+          >
+            Remove
+          </button>
+        </div>
+      </div>
+    </section>
   `;
 }
 
@@ -3794,6 +4753,7 @@ function renderSourceControlChangesTab(snapshot) {
   const stagedPaths = getSourceControlSectionPaths("staged", snapshot);
   const commitDisabled = !hasStagedSourceControlChanges(snapshot) || uiState.sourceControl.submitting;
   const commitAllDisabled = hasStagedSourceControlChanges(snapshot) || !hasPendingSourceControlChanges(snapshot) || uiState.sourceControl.submitting;
+  const generateDisabled = !hasPendingSourceControlChanges(snapshot) || uiState.sourceControl.generatingCommitMessage;
 
   return `
     <div class="workspace-scm-main workspace-scm-main-changes">
@@ -3819,6 +4779,15 @@ function renderSourceControlChangesTab(snapshot) {
               ${renderSourceControlCountBadges(snapshot.summary)}
             </div>
             <div class="workspace-scm-action-row">
+              <button
+                type="button"
+                class="workspace-scm-ghost-button"
+                data-action="scm-generate-commit-message"
+                title="Generate with AI from staged changes when present, otherwise all pending changes."
+                ${generateDisabled ? "disabled" : ""}
+              >
+                ${uiState.sourceControl.generatingCommitMessage ? "Generating..." : "Generate"}
+              </button>
               <button
                 type="button"
                 class="workspace-scm-primary-button"
@@ -3851,7 +4820,7 @@ function renderSourceControlChangesTab(snapshot) {
               }
             </div>
           </div>
-          <p class="workspace-scm-commit-hint">${escapeHtml(getPrimaryModifierLabel())}+Enter commits staged changes.</p>
+          <p class="workspace-scm-commit-hint">${escapeHtml(getPrimaryModifierLabel())}+Enter commits staged changes. AI generation uses <code>OPENAI_API_KEY</code> and staged changes when present.</p>
         </div>
         <div class="workspace-scm-section-list">
           ${
@@ -4872,37 +5841,14 @@ function relabelMockPanes(panes) {
   });
 }
 
-function renderWorkspace(workspace, windowSummary = null) {
+function renderWorkspace(workspace) {
   const paneLayout = resolveWorkspacePaneLayout(workspace);
   const maximizedPane = uiState.maximizedPaneId
     ? workspace.panes.find((pane) => pane.id === uiState.maximizedPaneId) || null
     : null;
   const paneIndexById = new Map(workspace.panes.map((pane, index) => [pane.id, index]));
-  const paneCount = workspace.panes.length;
-  const gitSummary = workspace.gitDetail?.summary || null;
-  const gitBranchLabel = gitSummary && gitSummary.state !== "not-repo" && gitSummary.state !== "error"
-    ? formatGitBranchLabel(gitSummary)
-    : null;
-  const windowLabel = `${windowSummary?.label || "Primary"} window`;
   return `
     <main class="workspace-screen ${maximizedPane ? "is-maximized" : ""}">
-      <header class="workspace-session-header">
-        <div class="workspace-session-copy">
-          <p class="workspace-session-mark">Workspace Session</p>
-          <h1>${escapeHtml(workspace.name)}</h1>
-          <p class="workspace-session-path" title="${escapeHtml(workspace.path)}">${escapeHtml(workspace.path)}</p>
-        </div>
-        <div class="workspace-session-meta">
-          <span class="workspace-session-chip">${escapeHtml(windowLabel)}</span>
-          <span class="workspace-session-chip">${escapeHtml(`${paneCount} ${paneCount === 1 ? "pane" : "panes"}`)}</span>
-          <span class="workspace-session-chip">${escapeHtml(workspace.layout?.label || "Custom layout")}</span>
-          ${
-            gitBranchLabel
-              ? `<span class="workspace-session-chip is-${escapeHtml(getGitTone(gitSummary))}">${escapeHtml(gitBranchLabel)}</span>`
-              : ""
-          }
-        </div>
-      </header>
       <section class="terminal-layout">
         ${
           maximizedPane
@@ -5146,6 +6092,7 @@ async function handleContextMenuAction(target) {
 
 function mountWorkspaceTerminals(workspace, root = document) {
   const theme = getCurrentThemeDefinition();
+  const terminalFontSize = getTerminalFontSize();
 
   for (const pane of workspace.panes) {
     const host = root.querySelector(`[data-terminal-host="${pane.id}"]`);
@@ -5158,7 +6105,7 @@ function mountWorkspaceTerminals(workspace, root = document) {
       cursorBlink: true,
       convertEol: true,
       fontFamily: '"SF Mono", "SFMono-Regular", "Menlo", monospace',
-      fontSize: 13.5,
+      fontSize: terminalFontSize,
       fontWeight: "450",
       lineHeight: 1.18,
       scrollback: 8000,
@@ -5174,6 +6121,7 @@ function mountWorkspaceTerminals(workspace, root = document) {
       observer: new ResizeObserver(() => fitTerminal(pane.id)),
       size: { cols: 0, rows: 0 },
       themeId: theme.id,
+      fontSize: terminalFontSize,
       element: host.closest(".terminal-pane"),
     };
 
@@ -5207,6 +6155,7 @@ function mountWorkspaceTerminals(workspace, root = document) {
 
 function syncWorkspace(workspace) {
   const theme = getCurrentThemeDefinition();
+  const terminalFontSize = getTerminalFontSize();
   const nextPaneIds = workspace.panes.map((pane) => pane.id);
   const previousPaneIds = workspacePaneIds.get(workspace.id) || [];
 
@@ -5217,12 +6166,7 @@ function syncWorkspace(workspace) {
     }
   }
 
-  for (const [paneId, paneState] of paneTerminals.entries()) {
-    if (paneState.themeId !== theme.id) {
-      paneState.terminal.setOption("theme", { ...theme.terminalTheme });
-      paneState.themeId = theme.id;
-    }
-  }
+  syncMountedTerminalAppearance(theme, terminalFontSize);
 
   for (const paneId of previousPaneIds) {
     if (!nextPaneIds.includes(paneId)) {
@@ -5434,7 +6378,7 @@ async function executeLauncherCommand(rawValue) {
     uiState.launcherCommandValue = "";
     if (result.openPath) {
       uiState.launcherVisible = true;
-      uiState.settingsVisible = false;
+      hideSettingsSheet();
       uiState.pendingWorkspaceDraft = createPendingWorkspaceDraft(
         result.openPath,
         uiState.snapshot?.launcher?.presets,
