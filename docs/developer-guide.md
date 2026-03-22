@@ -27,6 +27,7 @@ The app model is simple:
 ```text
 src-web/
   app.js              Main frontend runtime and render loop
+  activity-rail.js    Activity rail rendering helpers
   bridge.js           Tauri bridge plus browser/mock fallback
   launcher.js         Launcher helpers and layout-picker rendering
   store.js            UI and runtime store factories
@@ -37,10 +38,15 @@ src-web/
 
 src-tauri/
   src/main.rs         Thin binary entrypoint
-  src/lib.rs          Main Tauri runtime, state, commands, persistence, git
+  src/lib.rs          Main Tauri runtime, state, commands, helpers, and tests
   src/events.rs       Event names and emit helpers
+  src/persistence.rs  Snapshot persistence and runtime activity helpers
   src/session_manager.rs
                       PTY spawn, stream, close, and failure handling
+  src/source_control.rs
+                      Git status, diffs, branches, graph loading, and Git task helpers
+  src/workspace_manager.rs
+                      Workspace lifecycle helpers for create, switch, rename, split, and close
   Cargo.toml          Rust dependencies and crate metadata
   tauri.conf.json     Tauri app configuration
 
@@ -61,9 +67,13 @@ The key pieces are:
 
 - `app.js`
   Owns app bootstrap, global event handlers, render orchestration, theme
-  application, workspace rendering, pane rendering, `xterm.js` lifecycle, git
-  panel rendering, quick switcher behavior, launcher behavior, and various
+  application, workspace rendering, pane rendering, `xterm.js` lifecycle,
+  source control panel rendering, quick switcher behavior, activity rail
+  behavior, launcher behavior, drag-and-drop handling, and various
   frontend-only helpers.
+- `activity-rail.js`
+  Renders the activity feed shown in the footer-driven rail. `app.js` owns the
+  surrounding state and interactions.
 - `bridge.js`
   Wraps Tauri `invoke` calls and event listeners when running inside the real
   desktop app. It also exposes a mock bridge when the Tauri APIs are missing,
@@ -90,9 +100,17 @@ The Tauri backend is stateful and command-driven.
   Defines the app state, serializable snapshots, Tauri command handlers,
   launcher command execution, pane layout helpers, persistence, git inspection,
   and the `run()` function that wires everything together.
+- `persistence.rs`
+  Owns JSON serialization, restore logic, and activity event persistence.
 - `session_manager.rs`
   Creates PTYs, spawns shells, stores pane writers and masters, streams shell
   output back to the frontend, and marks panes as ready, closed, or failed.
+- `source_control.rs`
+  Owns repository inspection, diff loading, commit graph and branch listing,
+  stage / unstage / discard helpers, AI commit message request building, and
+  PTY-backed Git task orchestration.
+- `workspace_manager.rs`
+  Keeps workspace lifecycle mutations out of `lib.rs`.
 - `events.rs`
   Defines the custom Tauri event channels used by the frontend:
   `crewdock://state-changed`, `crewdock://terminal-data`, and
@@ -114,8 +132,9 @@ On application startup:
 7. `render()` chooses between:
    - the launcher / empty state
    - the active workspace grid
-   - modal layers such as settings, git panel, layout picker, or quick
-     switcher
+   - modal layers such as settings, the source control drawer, layout picker,
+     or quick switcher
+   - footer-driven activity views and attention badges
 
 Two important details:
 
@@ -133,10 +152,13 @@ Two important details:
 - `next_id` for workspace and pane identifiers
 - `shell` resolved from `SHELL` or defaulting to `/bin/zsh`
 - `launcher` state including layout presets and current base path
-- `settings` including the active theme id
+- `settings` including theme, interface text scale, terminal font size, and an
+  optional stored OpenAI API key
 - `workspaces`
 - `active_workspace_id`
+- `activity_history`
 - `sessions` which map pane ids to live PTY session handles
+- `git_tasks` for long-running Git commands routed through PTYs
 - `persistence_path`
 
 The backend exposes state to the frontend as an `AppSnapshot`.
@@ -146,6 +168,7 @@ The backend exposes state to the frontend as an `AppSnapshot`.
 `createUiState()` in `src-web/store.js` tracks view-only concerns such as:
 
 - Whether the launcher, settings, git panel, or quick switcher is visible
+- Which settings section and source control tab are active
 - Pending workspace creation state
 - Rename state for workspace tabs
 - Runtime activity and attention badges
@@ -188,21 +211,23 @@ Pane lifecycle events are also separate:
 
 These commands are the main frontend-backend boundary today:
 
-- `get_app_snapshot`
-- `reset_to_launcher`
-- `create_workspace`
-- `rename_workspace`
-- `switch_workspace`
-- `close_workspace`
-- `split_pane`
-- `close_pane`
-- `show_in_finder`
-- `run_launcher_command`
-- `complete_launcher_input`
-- `set_theme`
-- `refresh_workspace_git_status`
-- `write_to_pane`
-- `resize_pane`
+- App and settings:
+  `get_app_snapshot`, `reset_to_launcher`, `set_theme`, `set_settings`,
+  `set_interface_text_scale`, `set_terminal_font_size`, `set_openai_api_key`
+- Workspace and panes:
+  `create_workspace`, `rename_workspace`, `switch_workspace`,
+  `close_workspace`, `split_pane`, `close_pane`
+- Launcher and shell plumbing:
+  `run_launcher_command`, `complete_launcher_input`, `write_to_pane`,
+  `resize_pane`, `show_in_finder`
+- Source control:
+  `refresh_workspace_git_status`, `load_workspace_source_control`,
+  `load_workspace_git_diff`, `load_workspace_git_commit_detail`,
+  `git_stage_paths`, `git_unstage_paths`, `git_discard_paths`,
+  `generate_git_commit_message`, `git_commit`, `git_checkout_branch`,
+  `git_create_branch`, `git_rename_branch`, `git_delete_branch`, `git_fetch`,
+  `git_pull`, `git_push`, `git_publish_branch`, `git_set_upstream`,
+  `git_task_write_stdin`
 
 If you are adding a feature that changes persisted or runtime state, this is
 usually where the implementation starts on the backend.
@@ -253,11 +278,15 @@ Workspace persistence is file-based JSON.
 Persisted data includes:
 
 - Theme id
+- Interface text scale
+- Terminal font size
+- Stored OpenAI API key
 - Workspace path
 - Workspace name
 - Pane count
 - Pane layout tree
 - Active workspace selection
+- Recent runtime activity associated with persisted workspaces
 
 Live PTY sessions are not persisted. On relaunch, CrewDock restores workspace
 metadata and starts fresh shell sessions for the active workspace.
@@ -310,22 +339,35 @@ Implementation details:
 - Frontend mock completion and mock navigation logic exist in `app.js` so the
   browser fallback can behave similarly
 
-## Git Status Implementation
+## Source Control Implementation
 
-Git status is resolved in the backend, not in the frontend.
+Source control is resolved in the backend, not in the frontend.
 
 The flow is:
 
-1. The frontend asks for a refresh via `refresh_workspace_git_status`.
-2. The backend runs:
+1. The frontend asks for a refresh via `refresh_workspace_git_status` or a full
+   drawer snapshot via `load_workspace_source_control`.
+2. `src-tauri/src/source_control.rs` runs Git commands such as:
    - `git rev-parse --show-toplevel`
    - `git status --porcelain=v2 --branch`
-3. `lib.rs` parses branch metadata, ahead/behind counts, and changed files into
-   serializable snapshots.
+   - `git diff`
+   - `git for-each-ref`
+   - `git log --graph`
+   - `git show`
+3. The backend parses branch metadata, ahead/behind counts, changed files,
+   diff text, branch lists, and graph history into serializable snapshots.
 4. The frontend renders:
    - workspace strip git dots
-   - status bar git summary
-   - the detailed git panel
+   - footer git summary
+   - the detailed source control drawer with Changes, Branches, and Graph tabs
+
+Two extra details matter here:
+
+- Mutating actions such as stage, unstage, discard, commit, fetch, pull, push,
+  branch publish, and upstream wiring all go through backend helpers so the
+  frontend never shells out directly.
+- Long-running Git actions run through PTY-backed Git tasks so the UI can show
+  streamed output and prompt for stdin when Git requires it.
 
 The refresh loop is frontend-driven and currently polls the active workspace
 every few seconds.
@@ -341,6 +383,9 @@ Each theme contains:
 - Optional `colorScheme` metadata for light mode behavior
 
 Theme selection is persisted by the backend and re-applied on launch.
+
+Settings currently also persist interface text scale, terminal font size, and a
+locally stored OpenAI API key used for AI commit message generation.
 
 ## Browser / Mock Mode
 
@@ -391,6 +436,9 @@ They currently cover areas such as:
 - persistence restoration
 - theme parsing
 - git status parsing
+- Git task flows such as branch rename / delete, publish / fetch / pull, and
+  stdin-backed commands
+- AI commit message request shaping and OpenAI response extraction
 
 There is not yet a dedicated integration harness for end-to-end UI and PTY
 behavior.

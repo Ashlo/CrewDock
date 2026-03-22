@@ -15,8 +15,9 @@
 </p>
 
 CrewDock is a Tauri app that binds each workspace tab to a real local project
-folder and boots PTY-backed shell panes inside that workspace. It is built for
-the moment when you are juggling multiple repos, multiple shell layouts, and
+folder, boots PTY-backed shell panes inside that workspace, and keeps Git
+context close through a built-in source control drawer. It is built for the
+moment when you are juggling multiple repos, multiple shell layouts, and
 multiple contexts, but you still want everything to feel immediate.
 
 ## Why CrewDock
@@ -25,10 +26,11 @@ multiple contexts, but you still want everything to feel immediate.
 - Real shell sessions spawned by Rust with `portable-pty`
 - Multi-pane grids powered by `xterm.js`
 - Fast workspace switching without tearing down the current app-run sessions
-- Built-in source control visibility for branch status and changed files
-- Built-in launcher commands for opening and navigating folders quickly
-- Themeable desktop chrome with light and dark looks
-- Local persistence for tabs, layouts, active workspace, and theme choice
+- Quick switching, activity tracking, and attention badges across workspaces
+- Built-in source control for changes, branches, commit history, and sync
+- Built-in launcher commands with path completion for opening and navigating folders quickly
+- Themeable desktop chrome plus adjustable interface and terminal sizing
+- Local persistence for tabs, layouts, active workspace, theme, sizing, and AI settings
 
 ## Product Tour
 
@@ -84,14 +86,17 @@ flowchart TD
 
 ## Current Capabilities
 
-- Top workspace strip with folder-backed tabs
+- Top workspace strip with folder-backed tabs, rename actions, git state, and unread activity badges
 - Inline workspace rename in the tab bar
-- Workspace creation flow with 1 to 16 starting terminals
-- Real directional pane splitting
-- Per-pane shell input and resize wiring
-- Source control sidebar with branch, ahead/behind, dirty state, and changed files
-- Launcher commands for `help`, `pwd`, `ls`, `cd`, relative paths, absolute paths, `~`, and `open`
-- Local persistence across app relaunches
+- Workspace creation flow with launcher-based navigation, path completion, and 1 to 16 starting terminals
+- Real directional pane splitting, pane maximize / restore, and pane close actions
+- Per-pane shell input, resize wiring, and file-drop path insertion
+- Source control drawer with staged / modified / untracked / conflicted sections, diff preview, commit entry, branch actions, and commit graph history
+- Git actions for stage, unstage, discard, commit, commit-all, fetch, pull, push, publish, upstream wiring, and branch management
+- AI-assisted commit message generation using a saved key or `OPENAI_API_KEY`
+- Quick switcher and activity rail for moving between busy workspaces
+- Settings for theme, interface text scale, terminal font size, and OpenAI API key storage
+- Local persistence across app relaunches for workspaces, pane layouts, active workspace, settings, and recent activity context
 - Six built-in themes
 
 ## Getting Started
@@ -120,8 +125,10 @@ npm run dev
 3. Pick a folder and choose the starting terminal count.
 4. Switch workspaces from the top strip as you move between repos.
 5. Rename a workspace directly from the top bar when the default folder name is not enough.
-6. Use the pane context menu to split right, split down, maximize, or close a pane.
-7. Open settings with the gear icon or `Cmd+,` to switch themes.
+6. Use the pane context menu or keyboard shortcuts to split, maximize, or close panes.
+7. Open source control with the footer action or `Cmd/Ctrl+Shift+G` to review diffs, branches, and commit history.
+8. Use `Cmd/Ctrl+K` to quick-switch workspaces and `Cmd/Ctrl+Shift+A` to review unread activity.
+9. Open settings with the gear icon or `Cmd/Ctrl+,` to switch themes, adjust sizing, and manage the local OpenAI key used for AI commit messages.
 
 ## Launcher Commands
 
@@ -133,6 +140,37 @@ npm run dev
 | `ls ../another-folder` | List a different folder without switching into it |
 | `cd ..` | Move the launcher base path |
 | `open .` | Create a workspace from the current launcher path |
+| `clear` | Clear launcher output and command history from the current session |
+
+`Tab` completion is supported in the launcher for path-aware commands such as
+`ls`, `cd`, and `open`.
+
+## Keyboard Shortcuts
+
+| Shortcut | What it does |
+| --- | --- |
+| `Cmd/Ctrl+,` | Open settings |
+| `Cmd/Ctrl+K` | Open the quick switcher |
+| `Cmd/Ctrl+Shift+G` | Open source control for the active workspace |
+| `Cmd/Ctrl+Shift+A` | Toggle the activity rail |
+| `Tab` | Complete launcher paths |
+| `Cmd/Ctrl+D` | Split the active pane to the right |
+| `Cmd/Ctrl+Shift+D` | Split the active pane downward |
+| `Cmd/Ctrl+Shift+Enter` | Maximize or restore the active pane |
+| `Cmd/Ctrl+W` | Close the active pane |
+| `Esc` | Dismiss overlays, drawers, and inline rename state |
+
+## Source Control
+
+CrewDock's source control drawer is deeper than a simple status badge. The
+current implementation includes:
+
+- Change lists grouped by staged, modified, untracked, and conflicted files
+- Read-only diff previews for working tree and staged states
+- Commit entry with `Commit`, `Commit All`, and AI-assisted message generation
+- Branch search plus create, checkout, rename, delete, publish, and upstream actions
+- Commit graph browsing with detail inspection, ref labels, and branch-from-commit actions
+- Fetch, pull, and push controls that run through PTY-backed Git tasks
 
 ## Project Layout
 

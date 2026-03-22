@@ -86,7 +86,7 @@
   --chrome-height: 46px;
   --chrome-leading-space: 18px;
   --statusbar-height: 24px;
-  --scm-sidebar-width: 428px;
+  --scm-sidebar-width: 700px;
   --ui-text-scale: 1;
 }
 
@@ -3643,6 +3643,621 @@ button {
   gap: 10px;
 }
 
+.workspace-git-panel {
+  width: min(var(--scm-sidebar-width), calc(100vw - 16px));
+}
+
+.workspace-git-panel-header {
+  gap: 16px;
+  padding: 18px 18px 14px;
+}
+
+.workspace-git-panel-title-row {
+  gap: 10px;
+}
+
+.workspace-git-panel h2 {
+  font-size: 1.08rem;
+}
+
+.workspace-git-panel-state {
+  min-height: 22px;
+  padding: 0 8px;
+  font-size: 0.62rem;
+}
+
+.workspace-git-panel-copy {
+  font-size: 0.66rem;
+}
+
+.workspace-git-panel-actions {
+  gap: 8px;
+}
+
+.workspace-git-panel-button {
+  width: 30px;
+  height: 30px;
+}
+
+.workspace-git-panel-body {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  gap: 14px;
+  padding: 14px 16px 16px;
+  overflow: hidden;
+}
+
+.workspace-scm-shell {
+  min-height: 0;
+  align-content: stretch;
+  gap: 14px;
+}
+
+.workspace-scm-content {
+  min-height: 0;
+  overflow: hidden;
+  display: grid;
+}
+
+.workspace-scm-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  padding: 0 0 12px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.workspace-scm-toolbar-meta {
+  display: grid;
+  gap: 12px;
+}
+
+.workspace-scm-toolbar-hero {
+  display: grid;
+  gap: 8px;
+}
+
+.workspace-scm-toolbar-label {
+  color: var(--surface-soft-text);
+  font-size: 0.56rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.workspace-scm-toolbar-branch-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+.workspace-scm-toolbar-branch-chip,
+.workspace-scm-toolbar-state {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 11px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text);
+  font-size: 0.64rem;
+  font-weight: 600;
+}
+
+.workspace-scm-toolbar-branch-chip.is-clean,
+.workspace-scm-toolbar-state.is-clean,
+.workspace-scm-toolbar-stat.is-clean .workspace-scm-toolbar-stat-value {
+  color: #9bdbab;
+}
+
+.workspace-scm-toolbar-branch-chip.is-dirty,
+.workspace-scm-toolbar-state.is-dirty,
+.workspace-scm-toolbar-stat.is-dirty .workspace-scm-toolbar-stat-value {
+  color: #f0cf87;
+}
+
+.workspace-scm-toolbar-branch-chip.is-conflicted,
+.workspace-scm-toolbar-state.is-conflicted,
+.workspace-scm-toolbar-branch-chip.is-error,
+.workspace-scm-toolbar-state.is-error,
+.workspace-scm-toolbar-stat.is-conflicted .workspace-scm-toolbar-stat-value,
+.workspace-scm-toolbar-stat.is-error .workspace-scm-toolbar-stat-value {
+  color: color-mix(in srgb, var(--danger) 58%, var(--text) 42%);
+}
+
+.workspace-scm-toolbar-stats {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.workspace-scm-toolbar-stat {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  padding: 11px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.workspace-scm-toolbar-stat-label {
+  color: var(--surface-soft-text);
+  font-size: 0.54rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.workspace-scm-toolbar-stat-value {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.workspace-scm-toolbar-stat-copy {
+  color: var(--surface-soft-text);
+  font-size: 0.58rem;
+  line-height: 1.4;
+}
+
+.workspace-scm-toolbar-actions {
+  align-self: start;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.workspace-scm-toolbar-button,
+.workspace-scm-primary-button,
+.workspace-scm-secondary-button,
+.workspace-scm-ghost-button,
+.workspace-scm-load-more {
+  min-height: 30px;
+  padding: 0 12px;
+  border-radius: 10px;
+  font-size: 0.62rem;
+}
+
+.workspace-scm-tabs {
+  padding: 0 0 10px;
+}
+
+.workspace-scm-tab {
+  min-height: 30px;
+  padding: 0 12px;
+  border-radius: 9px;
+  font-size: 0.64rem;
+}
+
+.workspace-scm-main {
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.workspace-scm-main-changes,
+.workspace-scm-main-graph {
+  grid-template-columns: minmax(300px, 0.94fr) minmax(0, 1.06fr);
+  gap: 16px;
+}
+
+.workspace-scm-main-branches {
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 14px;
+  overflow: hidden;
+}
+
+.workspace-scm-column-list {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 12px;
+  overflow: hidden;
+  padding-right: 0;
+}
+
+.workspace-scm-column-list-graph {
+  grid-template-rows: minmax(0, 1fr) auto;
+}
+
+.workspace-scm-column-detail {
+  overflow: auto;
+  padding: 0 0 0 4px;
+  border-top: 0;
+}
+
+.workspace-scm-commit {
+  gap: 10px;
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 38%),
+    rgba(0, 0, 0, 0.1);
+}
+
+.workspace-scm-commit-head {
+  align-items: flex-start;
+}
+
+.workspace-scm-commit-head strong {
+  font-size: 0.82rem;
+}
+
+.workspace-scm-commit-summary {
+  max-width: 28ch;
+  text-align: right;
+  font-size: 0.62rem;
+}
+
+.workspace-scm-commit-input {
+  min-height: 90px;
+  padding: 11px 12px;
+  border-radius: 12px;
+  font-size: 0.67rem;
+}
+
+.workspace-scm-commit-actions {
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.workspace-scm-count-badge {
+  min-height: 21px;
+  padding: 0 8px;
+  font-size: 0.57rem;
+}
+
+.workspace-scm-count-badge strong {
+  font-size: 0.62rem;
+}
+
+.workspace-scm-commit-hint {
+  font-size: 0.58rem;
+}
+
+.workspace-scm-section-list,
+.workspace-scm-branch-groups,
+.workspace-scm-graph-list {
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.workspace-scm-section {
+  gap: 8px;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.045);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.workspace-scm-section-header {
+  padding-bottom: 8px;
+}
+
+.workspace-scm-section-title strong {
+  font-size: 0.6rem;
+}
+
+.workspace-scm-inline-action {
+  min-height: 24px;
+  padding: 0 8px;
+  font-size: 0.56rem;
+}
+
+.workspace-scm-file-row,
+.workspace-scm-branch-row,
+.workspace-scm-graph-row {
+  gap: 12px;
+  padding: 10px 10px;
+  border-radius: 12px;
+}
+
+.workspace-scm-graph-row {
+  align-items: start;
+}
+
+.workspace-scm-file-copy strong,
+.workspace-scm-branch-head strong,
+.workspace-scm-graph-copy strong,
+.workspace-scm-detail-header strong {
+  font-size: 0.74rem;
+}
+
+.workspace-scm-file-copy span,
+.workspace-scm-branch-copy span,
+.workspace-scm-graph-copy span,
+.workspace-scm-detail-header span,
+.workspace-scm-task-header span {
+  font-size: 0.59rem;
+}
+
+.workspace-scm-file-actions,
+.workspace-scm-branch-actions {
+  opacity: 1;
+  pointer-events: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: nowrap;
+}
+
+.workspace-scm-row-primary {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 10px;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--text);
+  font-size: 0.58rem;
+  font-weight: 600;
+}
+
+.workspace-scm-row-primary:hover {
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.workspace-scm-row-menu-shell {
+  position: relative;
+}
+
+.workspace-scm-row-menu-toggle {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--surface-soft-text);
+}
+
+.workspace-scm-row-menu-toggle:hover,
+.workspace-scm-row-menu-shell.is-open .workspace-scm-row-menu-toggle {
+  color: var(--text);
+  border-color: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.workspace-scm-row-menu-toggle svg {
+  width: 12px;
+  height: 12px;
+}
+
+.workspace-scm-row-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  min-width: 148px;
+  display: grid;
+  gap: 2px;
+  padding: 6px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in srgb, var(--overlay-panel-border) 84%, transparent);
+  background: color-mix(in srgb, var(--overlay-panel-bg) 96%, black 4%);
+  box-shadow: 0 18px 32px rgba(0, 0, 0, 0.28);
+  z-index: 6;
+}
+
+.workspace-scm-row-menu-item {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 0.58rem;
+  font-weight: 600;
+  text-align: left;
+}
+
+.workspace-scm-row-menu-item:hover {
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.workspace-scm-row-menu-item.is-danger {
+  color: color-mix(in srgb, var(--danger) 62%, var(--text) 38%);
+}
+
+.workspace-scm-detail-shell,
+.workspace-scm-branches-head {
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 42%),
+    rgba(0, 0, 0, 0.1);
+}
+
+.workspace-scm-detail-shell {
+  gap: 10px;
+}
+
+.workspace-scm-detail-header {
+  padding-bottom: 10px;
+}
+
+.workspace-scm-detail-kicker {
+  margin-bottom: 6px;
+  font-size: 0.54rem;
+}
+
+.workspace-scm-detail-toggle {
+  padding: 3px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.workspace-scm-toggle-button {
+  min-height: 26px;
+  padding: 0 10px;
+  border-radius: 8px;
+}
+
+.workspace-scm-diff,
+.workspace-scm-task-output,
+.workspace-scm-commit-body {
+  border-radius: 12px;
+  font-size: 0.61rem;
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.workspace-scm-diff,
+.workspace-scm-task-output {
+  min-height: 280px;
+  max-height: none;
+}
+
+.workspace-scm-branch-summary strong {
+  font-size: 0.86rem;
+}
+
+.workspace-scm-branch-summary span {
+  font-size: 0.6rem;
+}
+
+.workspace-scm-branch-form,
+.workspace-scm-task-form {
+  gap: 8px;
+}
+
+.workspace-scm-branch-badge {
+  min-height: 20px;
+  font-size: 0.5rem;
+}
+
+.workspace-scm-task {
+  display: none;
+}
+
+.workspace-scm-task-tray {
+  display: grid;
+  gap: 10px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.workspace-scm-task-tray-toggle {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.025);
+  color: var(--text);
+  text-align: left;
+}
+
+.workspace-scm-task-tray-toggle:hover {
+  border-color: rgba(255, 255, 255, 0.12);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.workspace-scm-task-tray-copy,
+.workspace-scm-task-tray-meta {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.workspace-scm-task-tray-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.workspace-scm-task-tray-copy strong {
+  font-size: 0.74rem;
+  color: var(--text);
+}
+
+.workspace-scm-task-tray-copy span,
+.workspace-scm-task-tray-meta span {
+  color: var(--surface-soft-text);
+  font-size: 0.58rem;
+  line-height: 1.4;
+}
+
+.workspace-scm-task-tray-meta {
+  justify-items: end;
+}
+
+.workspace-scm-task-command {
+  max-width: 34ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-scm-task-tray-status {
+  min-height: 20px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  font-size: 0.52rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.workspace-scm-task-tray-status.is-running {
+  color: #9dc6ff;
+}
+
+.workspace-scm-task-tray-status.is-succeeded {
+  color: #9bdbab;
+}
+
+.workspace-scm-task-tray-status.is-failed {
+  color: color-mix(in srgb, var(--danger) 62%, var(--text) 38%);
+}
+
+.workspace-scm-task-tray-caret {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.workspace-scm-task-tray-caret svg {
+  width: 14px;
+  height: 14px;
+}
+
+.workspace-scm-task-tray-body {
+  display: grid;
+  gap: 10px;
+}
+
+.workspace-scm-task-tray-output {
+  min-height: 110px;
+  max-height: 220px;
+}
+
+.workspace-scm-task-tray.is-failed .workspace-scm-task-tray-toggle {
+  border-color: color-mix(in srgb, var(--danger) 22%, rgba(255, 255, 255, 0.06));
+}
+
 .workspace-git-summary-shell {
   min-width: 0;
   display: grid;
@@ -4267,7 +4882,7 @@ button {
   }
 
   .workspace-git-panel {
-    width: min(720px, 100%);
+    width: min(820px, 100%);
   }
 
   .workspace-activity-rail {
@@ -4319,12 +4934,52 @@ button {
     grid-template-columns: 1fr;
   }
 
+  .workspace-git-panel-body {
+    overflow: hidden;
+  }
+
+  .workspace-scm-content {
+    overflow: auto;
+    padding-right: 2px;
+  }
+
+  .workspace-scm-toolbar {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace-scm-toolbar-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .workspace-scm-branch-groups {
     grid-template-columns: 1fr;
   }
 
+  .workspace-scm-column-list,
+  .workspace-scm-column-detail,
+  .workspace-scm-main-branches {
+    overflow: visible;
+    padding: 0;
+  }
+
+  .workspace-scm-column-list {
+    grid-template-rows: auto auto;
+  }
+
+  .workspace-scm-column-list-graph {
+    grid-template-rows: auto auto;
+  }
+
+  .workspace-scm-section-list,
+  .workspace-scm-branch-groups,
+  .workspace-scm-graph-list {
+    overflow: visible;
+    padding-right: 0;
+  }
+
   .workspace-scm-column-detail {
-    padding-top: 12px;
+    padding-top: 0;
+    padding-left: 0;
   }
 }
 
@@ -4400,6 +5055,12 @@ button {
     border-radius: 20px;
   }
 
+  .workspace-git-panel-body {
+    grid-template-rows: auto auto auto auto;
+    overflow: auto;
+    padding: 12px;
+  }
+
   .workspace-git-panel-header {
     flex-direction: column;
     align-items: stretch;
@@ -4421,10 +5082,27 @@ button {
     align-items: stretch;
   }
 
+  .workspace-scm-toolbar,
+  .workspace-scm-task-tray-toggle {
+    grid-template-columns: 1fr;
+  }
+
   .workspace-scm-toolbar-actions,
   .workspace-scm-detail-actions,
   .workspace-scm-section-actions {
     justify-content: flex-start;
+  }
+
+  .workspace-scm-content {
+    overflow: visible;
+  }
+
+  .workspace-scm-toolbar-stats {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace-scm-task-tray-meta {
+    justify-items: start;
   }
 
   .workspace-scm-branch-form {
@@ -4434,7 +5112,17 @@ button {
   .workspace-scm-column-list,
   .workspace-scm-column-detail,
   .workspace-scm-main-branches {
-    padding: 10px;
+    padding: 0;
+  }
+
+  .workspace-scm-file-actions,
+  .workspace-scm-branch-actions {
+    flex-wrap: wrap;
+  }
+
+  .workspace-scm-row-menu {
+    right: auto;
+    left: 0;
   }
 
   .workspace-modal-backdrop {

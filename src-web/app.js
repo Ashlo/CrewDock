@@ -1355,7 +1355,7 @@ function bindModalLayerControls(root = document) {
     if (gitCloseButton) {
       event.preventDefault();
       event.stopPropagation();
-      uiState.gitPanelVisible = false;
+      closeSourceControlPanel();
       render();
       return;
     }
@@ -1363,7 +1363,7 @@ function bindModalLayerControls(root = document) {
     if (clickedElement.classList.contains("workspace-git-backdrop")) {
       event.preventDefault();
       event.stopPropagation();
-      uiState.gitPanelVisible = false;
+      closeSourceControlPanel();
       render();
       return;
     }
@@ -1464,7 +1464,7 @@ async function handleClick(event) {
   if (target.dataset.action === "show-settings") {
     uiState.settingsVisible = true;
     uiState.settingsSection = "workbench";
-    uiState.gitPanelVisible = false;
+    closeSourceControlPanel();
     uiState.activityRailVisible = false;
     closeQuickSwitcher();
     uiState.pendingWorkspaceDraft = null;
@@ -1490,7 +1490,7 @@ async function handleClick(event) {
   if (target.dataset.action === "show-launcher") {
     uiState.launcherVisible = true;
     hideSettingsSheet();
-    uiState.gitPanelVisible = false;
+    closeSourceControlPanel();
     uiState.activityRailVisible = false;
     closeQuickSwitcher();
     uiState.pendingWorkspaceDraft = null;
@@ -1551,7 +1551,7 @@ async function handleClick(event) {
   }
 
   if (target.dataset.action === "close-git-panel") {
-    uiState.gitPanelVisible = false;
+    closeSourceControlPanel();
     render();
     return;
   }
@@ -1582,7 +1582,7 @@ async function handleClick(event) {
 
   if (target.dataset.action === "open-workspace") {
     hideSettingsSheet();
-    uiState.gitPanelVisible = false;
+    closeSourceControlPanel();
     uiState.activityRailVisible = false;
     closeQuickSwitcher();
     await beginWorkspaceCreation();
@@ -1774,23 +1774,27 @@ function handleMouseDown(event) {
 }
 
 function handlePointerDown(event) {
-  const paneId = event.target instanceof Element
-    ? event.target.closest("[data-pane-id]")?.dataset?.paneId || null
-    : null;
+  const target = event.target instanceof Element ? event.target : null;
+  const paneId = target?.closest("[data-pane-id]")?.dataset?.paneId || null;
   if (paneId) {
     setActivePaneId(paneId);
   }
 
-  if (!uiState.contextMenu) {
-    return;
+  let shouldRender = false;
+
+  if (uiState.sourceControl.activeRowMenuKey && !target?.closest("[data-scm-row-menu-shell]")) {
+    closeSourceControlRowMenu();
+    shouldRender = true;
   }
 
-  if (event.target.closest(".terminal-context-menu")) {
-    return;
+  if (uiState.contextMenu && !target?.closest(".terminal-context-menu")) {
+    uiState.contextMenu = null;
+    shouldRender = true;
   }
 
-  uiState.contextMenu = null;
-  render();
+  if (shouldRender) {
+    render();
+  }
 }
 
 function handleScroll(event) {
@@ -2032,7 +2036,7 @@ async function handleKeyDown(event) {
     event.preventDefault();
     uiState.settingsVisible = true;
     uiState.settingsSection = "workbench";
-    uiState.gitPanelVisible = false;
+    closeSourceControlPanel();
     uiState.activityRailVisible = false;
     closeQuickSwitcher();
     uiState.pendingWorkspaceDraft = null;
@@ -2058,7 +2062,7 @@ async function handleKeyDown(event) {
   if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "g") {
     event.preventDefault();
     if (uiState.gitPanelVisible) {
-      uiState.gitPanelVisible = false;
+      closeSourceControlPanel();
     } else {
       await openSourceControlPanel({ force: true });
     }
@@ -2081,7 +2085,11 @@ async function handleKeyDown(event) {
 
   if (uiState.gitPanelVisible && event.key === "Escape") {
     event.preventDefault();
-    uiState.gitPanelVisible = false;
+    if (closeSourceControlRowMenu()) {
+      render();
+      return;
+    }
+    closeSourceControlPanel();
     render();
     return;
   }
@@ -2245,7 +2253,7 @@ function openQuickSwitcher() {
   );
   uiState.quickSwitcherShouldFocus = true;
   hideSettingsSheet();
-  uiState.gitPanelVisible = false;
+  closeSourceControlPanel();
   uiState.pendingWorkspaceDraft = null;
   uiState.contextMenu = null;
 }
@@ -2255,6 +2263,48 @@ function closeQuickSwitcher() {
   uiState.quickSwitcherQuery = "";
   uiState.quickSwitcherCursor = 0;
   uiState.quickSwitcherShouldFocus = false;
+}
+
+function closeSourceControlRowMenu() {
+  if (!uiState.sourceControl.activeRowMenuKey) {
+    return false;
+  }
+
+  uiState.sourceControl.activeRowMenuKey = "";
+  return true;
+}
+
+function isSourceControlRowMenuOpen(kind, key) {
+  return uiState.sourceControl.activeRowMenuKey === `${kind}:${key}`;
+}
+
+function toggleSourceControlRowMenu(kind, key) {
+  const nextKey = `${kind}:${key}`;
+  uiState.sourceControl.activeRowMenuKey = uiState.sourceControl.activeRowMenuKey === nextKey
+    ? ""
+    : nextKey;
+}
+
+function syncSourceControlTaskTray(task, previousTask = null) {
+  if (!task) {
+    uiState.sourceControl.taskTrayExpanded = false;
+    return;
+  }
+
+  const isNewTask = !previousTask || previousTask.id !== task.id;
+  if (task.canWriteInput || task.status === "failed") {
+    uiState.sourceControl.taskTrayExpanded = true;
+    return;
+  }
+
+  if (isNewTask) {
+    uiState.sourceControl.taskTrayExpanded = false;
+  }
+}
+
+function closeSourceControlPanel() {
+  uiState.gitPanelVisible = false;
+  closeSourceControlRowMenu();
 }
 
 function captureSourceControlFocusState(root = document) {
@@ -2295,10 +2345,15 @@ function captureSourceControlScrollState(root = document) {
 
   const selectors = [
     ".workspace-git-panel-body",
+    ".workspace-scm-content",
     ".workspace-scm-column-list",
     ".workspace-scm-column-detail",
+    ".workspace-scm-section-list",
+    ".workspace-scm-branch-groups",
+    ".workspace-scm-graph-list",
     ".workspace-scm-diff",
     ".workspace-scm-task-output",
+    ".workspace-scm-task-tray-output",
     ".workspace-scm-commit-body",
   ];
 
@@ -2404,6 +2459,7 @@ async function openSourceControlPanel({ force = false } = {}) {
     && uiState.sourceControl.snapshot;
 
   uiState.gitPanelVisible = true;
+  closeSourceControlRowMenu();
   hideSettingsSheet();
   uiState.activityRailVisible = false;
   closeQuickSwitcher();
@@ -2423,6 +2479,7 @@ function resetSourceControlState({ keepTab = true } = {}) {
     ...uiState.sourceControl,
     snapshot: null,
     activeTab,
+    activeRowMenuKey: "",
     selectedPath: "",
     selectedDiffMode: "working-tree",
     diff: null,
@@ -2433,8 +2490,11 @@ function resetSourceControlState({ keepTab = true } = {}) {
     graphLoadingMore: false,
     createBranchName: "",
     createBranchStartPoint: "",
+    commitMessage: "",
     generatingCommitMessage: false,
+    branchSearch: "",
     taskInput: "",
+    taskTrayExpanded: false,
     submitting: false,
     lastLoadedWorkspaceId: "",
   };
@@ -2442,6 +2502,7 @@ function resetSourceControlState({ keepTab = true } = {}) {
 
 function applySourceControlSnapshot(snapshot, { appendGraph = false } = {}) {
   const previous = uiState.sourceControl.snapshot;
+  const previousTask = previous?.task || null;
   const nextSnapshot = appendGraph && previous?.workspaceId === snapshot.workspaceId
     ? {
         ...snapshot,
@@ -2459,6 +2520,7 @@ function applySourceControlSnapshot(snapshot, { appendGraph = false } = {}) {
   uiState.sourceControl.snapshot = nextSnapshot;
   uiState.sourceControl.lastLoadedWorkspaceId = nextSnapshot.workspaceId || "";
   uiState.sourceControl.graphLoadingMore = false;
+  syncSourceControlTaskTray(nextSnapshot.task || null, previousTask);
 
   if (
     uiState.sourceControl.selectedPath
@@ -2503,10 +2565,12 @@ function handleSourceControlRuntimeEvent(event) {
 
   const sourceControl = uiState.sourceControl;
   if (sourceControl.snapshot?.workspaceId === event.workspaceId) {
+    const previousTask = sourceControl.snapshot.task || null;
     sourceControl.snapshot = {
       ...sourceControl.snapshot,
       task: event.task,
     };
+    syncSourceControlTaskTray(event.task, previousTask);
   }
 
   if (uiState.snapshot?.activeWorkspaceId === event.workspaceId) {
@@ -2839,6 +2903,10 @@ async function handleSourceControlAction(target) {
   const branchName = target.dataset.branchName || "";
   const commitOid = target.dataset.oid || "";
 
+  if (action !== "scm-toggle-row-menu") {
+    closeSourceControlRowMenu();
+  }
+
   if (!workspaceId && action !== "scm-switch-tab") {
     return;
   }
@@ -2866,6 +2934,14 @@ async function handleSourceControlAction(target) {
       }
       return;
     }
+    case "scm-toggle-row-menu":
+      toggleSourceControlRowMenu(target.dataset.scmMenuKind || "file", target.dataset.scmMenuKey || "");
+      render();
+      return;
+    case "scm-toggle-task-tray":
+      uiState.sourceControl.taskTrayExpanded = !uiState.sourceControl.taskTrayExpanded;
+      render();
+      return;
     case "scm-select-path":
       await selectSourceControlPath(path, target.dataset.diffMode || null);
       render();
@@ -3706,6 +3782,23 @@ function renderFileIcon() {
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
       <path d="M7 3h6.8L19 8.2V19a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Zm6 1.8V9h4.2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></path>
+    </svg>
+  `;
+}
+
+function renderMoreIcon() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M6 12a1.75 1.75 0 1 1 0 .01V12Zm6 0a1.75 1.75 0 1 1 0 .01V12Zm6 0a1.75 1.75 0 1 1 0 .01V12Z" fill="currentColor"></path>
+    </svg>
+  `;
+}
+
+function renderChevronIcon(direction = "down") {
+  const rotation = direction === "up" ? "rotate(180 12 12)" : "rotate(0 12 12)";
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M7 10.2 12 15l5-4.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" transform="${rotation}"></path>
     </svg>
   `;
 }
@@ -4660,14 +4753,26 @@ function renderSourceControlBody(snapshot) {
     <div class="workspace-git-panel-body workspace-scm-shell">
       ${renderSourceControlToolbar(snapshot)}
       ${renderSourceControlTabs()}
-      ${
-        uiState.sourceControl.activeTab === "changes"
-          ? renderSourceControlChangesTab(snapshot)
-          : uiState.sourceControl.activeTab === "branches"
-            ? renderSourceControlBranchesTab(snapshot)
-            : renderSourceControlGraphTab(snapshot)
-      }
+      <div class="workspace-scm-content">
+        ${
+          uiState.sourceControl.activeTab === "changes"
+            ? renderSourceControlChangesTab(snapshot)
+            : uiState.sourceControl.activeTab === "branches"
+              ? renderSourceControlBranchesTab(snapshot)
+              : renderSourceControlGraphTab(snapshot)
+        }
+      </div>
       ${renderSourceControlTaskPanel(snapshot.task)}
+    </div>
+  `;
+}
+
+function renderSourceControlSummaryStat({ label, value, copy, tone = "" }) {
+  return `
+    <div class="workspace-scm-toolbar-stat ${tone ? `is-${tone}` : ""}">
+      <span class="workspace-scm-toolbar-stat-label">${escapeHtml(label)}</span>
+      <strong class="workspace-scm-toolbar-stat-value">${escapeHtml(value)}</strong>
+      <span class="workspace-scm-toolbar-stat-copy">${escapeHtml(copy)}</span>
     </div>
   `;
 }
@@ -4675,40 +4780,54 @@ function renderSourceControlBody(snapshot) {
 function renderSourceControlToolbar(snapshot) {
   const summary = snapshot.summary;
   const fileCount = snapshot.changes?.length || 0;
-  const metaItems = [
-    {
-      label: formatGitBranchLabel(summary),
-      title: summary.upstream || "Current branch",
-      tone: getGitTone(summary),
-      icon: renderBranchIcon(),
-    },
-    summary.upstream
-      ? { label: summary.upstream, title: "Upstream branch" }
-      : { label: "Local only", title: "No upstream configured" },
-    {
-      label: summary.upstream ? `+${summary.ahead || 0} / -${summary.behind || 0}` : "No sync",
-      title: "Ahead / behind",
-    },
-    {
-      label: fileCount === 0 ? "Clean" : `${fileCount} ${fileCount === 1 ? "change" : "changes"}`,
-      title: "Pending changes",
-      tone: fileCount ? getGitTone(summary) : "clean",
-    },
-  ];
+  const tone = getGitTone(summary);
+  const syncValue = summary.upstream
+    ? (Number(summary.ahead || 0) > 0 || Number(summary.behind || 0) > 0
+      ? `+${summary.ahead || 0} / -${summary.behind || 0}`
+      : "Up to date")
+    : "Local only";
+  const syncCopy = summary.upstream || "No upstream configured";
+  const changeValue = fileCount === 0
+    ? "Clean"
+    : `${fileCount} ${fileCount === 1 ? "change" : "changes"}`;
+  const changeCopy = fileCount === 0
+    ? "Working tree has no pending edits."
+    : `${hasStagedSourceControlChanges(snapshot) ? "Ready to review and commit." : "Stage files to prepare a commit."}`;
 
   return `
     <section class="workspace-scm-toolbar">
       <div class="workspace-scm-toolbar-meta">
-        ${metaItems
-          .map(
-            (item) => `
-              <span class="workspace-scm-toolbar-chip ${item.tone ? `is-${item.tone}` : ""}" title="${escapeHtml(item.title || item.label)}">
-                ${item.icon ? `<span class="workspace-scm-toolbar-chip-icon" aria-hidden="true">${item.icon}</span>` : ""}
-                <span>${escapeHtml(item.label)}</span>
-              </span>
-            `,
-          )
-          .join("")}
+        <div class="workspace-scm-toolbar-hero">
+          <span class="workspace-scm-toolbar-label">Current branch</span>
+          <div class="workspace-scm-toolbar-branch-row">
+            <span class="workspace-scm-toolbar-branch-chip is-${tone}" title="${escapeHtml(summary.upstream || "Current branch")}">
+              <span class="workspace-scm-toolbar-chip-icon" aria-hidden="true">${renderBranchIcon()}</span>
+              <span>${escapeHtml(formatGitBranchLabel(summary))}</span>
+            </span>
+            <span class="workspace-scm-toolbar-state is-${tone}">
+              ${escapeHtml(formatGitStateText(summary))}
+            </span>
+          </div>
+        </div>
+        <div class="workspace-scm-toolbar-stats">
+          ${renderSourceControlSummaryStat({
+            label: "Sync",
+            value: syncValue,
+            copy: syncCopy,
+            tone: summary.upstream ? tone : "",
+          })}
+          ${renderSourceControlSummaryStat({
+            label: "Workspace scope",
+            value: snapshot.workspaceRelativePath || ".",
+            copy: snapshot.repoRoot || snapshot.workspacePath,
+          })}
+          ${renderSourceControlSummaryStat({
+            label: "Changes",
+            value: changeValue,
+            copy: changeCopy,
+            tone: fileCount ? tone : "clean",
+          })}
+        </div>
       </div>
       <div class="workspace-scm-toolbar-actions">
         <button type="button" class="workspace-scm-toolbar-button" data-action="scm-fetch">Fetch</button>
@@ -4751,77 +4870,11 @@ function renderSourceControlChangesTab(snapshot) {
   const sections = getSourceControlSections(snapshot);
   const selectedFile = getSourceControlFileByPath(uiState.sourceControl.selectedPath, snapshot);
   const stagedPaths = getSourceControlSectionPaths("staged", snapshot);
-  const commitDisabled = !hasStagedSourceControlChanges(snapshot) || uiState.sourceControl.submitting;
-  const commitAllDisabled = hasStagedSourceControlChanges(snapshot) || !hasPendingSourceControlChanges(snapshot) || uiState.sourceControl.submitting;
-  const generateDisabled = !hasPendingSourceControlChanges(snapshot) || uiState.sourceControl.generatingCommitMessage;
 
   return `
     <div class="workspace-scm-main workspace-scm-main-changes">
       <section class="workspace-scm-column workspace-scm-column-list">
-        <div class="workspace-scm-commit">
-          <div class="workspace-scm-commit-head">
-            <div>
-              <p class="workspace-scm-detail-kicker">Commit</p>
-              <strong>Message</strong>
-            </div>
-            <span>Staged changes commit by default</span>
-          </div>
-          <textarea
-            class="workspace-scm-commit-input"
-            data-scm-commit-input
-            placeholder="Commit message"
-            rows="4"
-            spellcheck="false"
-            autocapitalize="off"
-          >${escapeHtml(uiState.sourceControl.commitMessage)}</textarea>
-          <div class="workspace-scm-commit-actions">
-            <div class="workspace-scm-count-row">
-              ${renderSourceControlCountBadges(snapshot.summary)}
-            </div>
-            <div class="workspace-scm-action-row">
-              <button
-                type="button"
-                class="workspace-scm-ghost-button"
-                data-action="scm-generate-commit-message"
-                title="Generate with AI from staged changes when present, otherwise all pending changes."
-                ${generateDisabled ? "disabled" : ""}
-              >
-                ${uiState.sourceControl.generatingCommitMessage ? "Generating..." : "Generate"}
-              </button>
-              <button
-                type="button"
-                class="workspace-scm-primary-button"
-                data-action="scm-commit"
-                ${commitDisabled ? "disabled" : ""}
-              >
-                Commit
-              </button>
-              <button
-                type="button"
-                class="workspace-scm-secondary-button"
-                data-action="scm-commit-all"
-                ${commitAllDisabled ? "disabled" : ""}
-              >
-                Commit All
-              </button>
-              ${
-                stagedPaths.length
-                  ? `
-                    <button
-                      type="button"
-                      class="workspace-scm-ghost-button"
-                      data-action="scm-unstage-section"
-                      data-section="staged"
-                    >
-                      Unstage All
-                    </button>
-                  `
-                  : ""
-              }
-            </div>
-          </div>
-          <p class="workspace-scm-commit-hint">${escapeHtml(getPrimaryModifierLabel())}+Enter commits staged changes. AI generation uses <code>OPENAI_API_KEY</code> and staged changes when present.</p>
-        </div>
+        ${renderSourceControlCommitCard(snapshot, stagedPaths)}
         <div class="workspace-scm-section-list">
           ${
             sections.length
@@ -4836,6 +4889,86 @@ function renderSourceControlChangesTab(snapshot) {
       <aside class="workspace-scm-column workspace-scm-column-detail">
         ${renderSourceControlDiffPanel(selectedFile)}
       </aside>
+    </div>
+  `;
+}
+
+function renderSourceControlCommitCard(snapshot, stagedPaths) {
+  const stagedCount = stagedPaths.length;
+  const pendingCount = snapshot.changes?.length || 0;
+  const commitDisabled = stagedCount === 0 || uiState.sourceControl.submitting;
+  const commitAllDisabled = stagedCount > 0 || pendingCount === 0 || uiState.sourceControl.submitting;
+  const generateDisabled = pendingCount === 0 || uiState.sourceControl.generatingCommitMessage;
+  const summaryCopy = stagedCount
+    ? `${stagedCount} ${stagedCount === 1 ? "file is" : "files are"} staged and ready to commit.`
+    : pendingCount
+      ? "Review changes on the left, stage what matters, then commit."
+      : "Working tree clean. New edits will appear here automatically.";
+
+  return `
+    <div class="workspace-scm-commit">
+      <div class="workspace-scm-commit-head">
+        <div>
+          <p class="workspace-scm-detail-kicker">Commit</p>
+          <strong>Compose commit message</strong>
+        </div>
+        <span class="workspace-scm-commit-summary">${escapeHtml(summaryCopy)}</span>
+      </div>
+      <textarea
+        class="workspace-scm-commit-input"
+        data-scm-commit-input
+        placeholder="Summarize the change"
+        rows="4"
+        spellcheck="false"
+        autocapitalize="off"
+      >${escapeHtml(uiState.sourceControl.commitMessage)}</textarea>
+      <div class="workspace-scm-commit-actions">
+        <div class="workspace-scm-count-row">
+          ${renderSourceControlCountBadges(snapshot.summary)}
+        </div>
+        <div class="workspace-scm-action-row">
+          <button
+            type="button"
+            class="workspace-scm-ghost-button"
+            data-action="scm-generate-commit-message"
+            title="Generate with AI from staged changes when present, otherwise all pending changes."
+            ${generateDisabled ? "disabled" : ""}
+          >
+            ${uiState.sourceControl.generatingCommitMessage ? "Generating..." : "AI suggest"}
+          </button>
+          <button
+            type="button"
+            class="workspace-scm-primary-button"
+            data-action="scm-commit"
+            ${commitDisabled ? "disabled" : ""}
+          >
+            Commit staged
+          </button>
+          <button
+            type="button"
+            class="workspace-scm-secondary-button"
+            data-action="scm-commit-all"
+            ${commitAllDisabled ? "disabled" : ""}
+          >
+            Commit all
+          </button>
+          ${
+            stagedCount
+              ? `
+                <button
+                  type="button"
+                  class="workspace-scm-ghost-button"
+                  data-action="scm-unstage-section"
+                  data-section="staged"
+                >
+                  Unstage all
+                </button>
+              `
+              : ""
+          }
+        </div>
+      </div>
+      <p class="workspace-scm-commit-hint">${escapeHtml(getPrimaryModifierLabel())}+Enter commits staged changes.</p>
     </div>
   `;
 }
@@ -4912,6 +5045,55 @@ function renderSourceControlSection(section) {
   `;
 }
 
+function renderSourceControlRowMenu(kind, key, items) {
+  const isOpen = isSourceControlRowMenuOpen(kind, key);
+  if (!items.length) {
+    return "";
+  }
+
+  return `
+    <div class="workspace-scm-row-menu-shell ${isOpen ? "is-open" : ""}" data-scm-row-menu-shell>
+      <button
+        type="button"
+        class="workspace-scm-row-menu-toggle"
+        data-action="scm-toggle-row-menu"
+        data-scm-menu-kind="${escapeHtml(kind)}"
+        data-scm-menu-key="${escapeHtml(key)}"
+        aria-label="More actions"
+        aria-expanded="${isOpen ? "true" : "false"}"
+      >
+        ${renderMoreIcon()}
+      </button>
+      ${
+        isOpen
+          ? `
+            <div class="workspace-scm-row-menu">
+              ${items
+                .map(
+                  (item) => `
+                    <button
+                      type="button"
+                      class="workspace-scm-row-menu-item ${item.tone === "danger" ? "is-danger" : ""}"
+                      data-action="${escapeHtml(item.action)}"
+                      ${item.path ? `data-path="${escapeHtml(item.path)}"` : ""}
+                      ${item.branchName ? `data-branch-name="${escapeHtml(item.branchName)}"` : ""}
+                      ${item.startPoint ? `data-start-point="${escapeHtml(item.startPoint)}"` : ""}
+                      ${item.upstreamName ? `data-upstream-name="${escapeHtml(item.upstreamName)}"` : ""}
+                      ${item.oid ? `data-oid="${escapeHtml(item.oid)}"` : ""}
+                    >
+                      ${escapeHtml(item.label)}
+                    </button>
+                  `,
+                )
+                .join("")}
+            </div>
+          `
+          : ""
+      }
+    </div>
+  `;
+}
+
 function renderSourceControlFileRow(file, sectionKey) {
   const pathParts = splitGitFilePath(file.path);
   const presentation = getGitFilePresentation(file);
@@ -4927,6 +5109,14 @@ function renderSourceControlFileRow(file, sectionKey) {
   const primaryAction = sectionKey === "staged"
     ? { action: "scm-unstage-path", label: "Unstage" }
     : { action: "scm-stage-path", label: "Stage" };
+  const menu = renderSourceControlRowMenu("file", file.path, [
+    {
+      action: "scm-discard-path",
+      label: "Discard",
+      path: file.path,
+      tone: "danger",
+    },
+  ]);
 
   return `
     <article class="workspace-scm-file-row ${isSelected ? "is-selected" : ""}">
@@ -4946,20 +5136,13 @@ function renderSourceControlFileRow(file, sectionKey) {
       <div class="workspace-scm-file-actions">
         <button
           type="button"
-          class="workspace-scm-inline-action"
+          class="workspace-scm-row-primary"
           data-action="${primaryAction.action}"
           data-path="${escapeHtml(file.path)}"
         >
           ${primaryAction.label}
         </button>
-        <button
-          type="button"
-          class="workspace-scm-inline-action is-danger"
-          data-action="scm-discard-path"
-          data-path="${escapeHtml(file.path)}"
-        >
-          Discard
-        </button>
+        ${menu}
       </div>
     </article>
   `;
@@ -5119,86 +5302,52 @@ function renderSourceControlBranchGroup(title, branches, { remote = false } = {}
 }
 
 function renderSourceControlBranchRow(branch, { remote = false } = {}) {
-  const actions = [];
-
-  if (remote) {
-    const branchName = branch.name.split("/").slice(1).join("/") || branch.name;
-    actions.push(`
-      <button
-        type="button"
-        class="workspace-scm-inline-action"
-        data-action="scm-branch-from-remote"
-        data-branch-name="${escapeHtml(branchName)}"
-        data-start-point="${escapeHtml(branch.name)}"
-      >
-        Track
-      </button>
-    `);
-  } else if (!branch.isCurrent) {
-    actions.push(`
-      <button
-        type="button"
-        class="workspace-scm-inline-action"
-        data-action="scm-checkout-branch"
-        data-branch-name="${escapeHtml(branch.name)}"
-      >
-        Checkout
-      </button>
-    `);
-  }
-
-  if (!remote) {
-    actions.push(`
-      <button
-        type="button"
-        class="workspace-scm-inline-action"
-        data-action="scm-rename-branch"
-        data-branch-name="${escapeHtml(branch.name)}"
-      >
-        Rename
-      </button>
-    `);
-
-    if (!branch.isCurrent) {
-      actions.push(`
-        <button
-          type="button"
-          class="workspace-scm-inline-action is-danger"
-          data-action="scm-delete-branch"
-          data-branch-name="${escapeHtml(branch.name)}"
-        >
-          Delete
-        </button>
-      `);
-    }
-
-    if (branch.isCurrent && !branch.upstream) {
-      actions.push(`
-        <button
-          type="button"
-          class="workspace-scm-inline-action"
-          data-action="scm-publish-branch"
-          data-branch-name="${escapeHtml(branch.name)}"
-        >
-          Publish
-        </button>
-      `);
-    }
-
-    if (!branch.upstream) {
-      actions.push(`
-        <button
-          type="button"
-          class="workspace-scm-inline-action"
-          data-action="scm-set-upstream"
-          data-branch-name="${escapeHtml(branch.name)}"
-          data-upstream-name="${escapeHtml(getSuggestedUpstream(branch.name))}"
-        >
-          Set upstream
-        </button>
-      `);
-    }
-  }
+  const remoteBranchName = branch.name.split("/").slice(1).join("/") || branch.name;
+  const primaryAction = remote
+    ? {
+        action: "scm-branch-from-remote",
+        label: "Track",
+        branchName: remoteBranchName,
+        startPoint: branch.name,
+      }
+    : !branch.isCurrent
+      ? {
+          action: "scm-checkout-branch",
+          label: "Checkout",
+          branchName: branch.name,
+        }
+      : !branch.upstream
+        ? {
+            action: "scm-publish-branch",
+            label: "Publish",
+            branchName: branch.name,
+          }
+        : null;
+  const menuItems = remote
+    ? []
+    : [
+        {
+          action: "scm-rename-branch",
+          label: "Rename",
+          branchName: branch.name,
+        },
+        ...(!branch.isCurrent
+          ? [{
+              action: "scm-delete-branch",
+              label: "Delete",
+              branchName: branch.name,
+              tone: "danger",
+            }]
+          : []),
+        ...(!branch.upstream
+          ? [{
+              action: "scm-set-upstream",
+              label: "Set upstream",
+              branchName: branch.name,
+              upstreamName: getSuggestedUpstream(branch.name),
+            }]
+          : []),
+      ];
 
   return `
     <article class="workspace-scm-branch-row">
@@ -5211,7 +5360,22 @@ function renderSourceControlBranchRow(branch, { remote = false } = {}) {
         <span>${escapeHtml([branch.shortOid, branch.relativeDate, branch.upstream].filter(Boolean).join(" • "))}</span>
       </div>
       <div class="workspace-scm-branch-actions">
-        ${actions.join("")}
+        ${
+          primaryAction
+            ? `
+              <button
+                type="button"
+                class="workspace-scm-row-primary"
+                data-action="${escapeHtml(primaryAction.action)}"
+                data-branch-name="${escapeHtml(primaryAction.branchName || "")}"
+                ${primaryAction.startPoint ? `data-start-point="${escapeHtml(primaryAction.startPoint)}"` : ""}
+              >
+                ${escapeHtml(primaryAction.label)}
+              </button>
+            `
+            : ""
+        }
+        ${renderSourceControlRowMenu("branch", branch.fullName || branch.name, menuItems)}
       </div>
     </article>
   `;
@@ -5224,7 +5388,7 @@ function renderSourceControlGraphTab(snapshot) {
 
   return `
     <div class="workspace-scm-main workspace-scm-main-graph">
-      <section class="workspace-scm-column workspace-scm-column-list">
+      <section class="workspace-scm-column workspace-scm-column-list workspace-scm-column-list-graph">
         <div class="workspace-scm-graph-list">
           ${
             commits.length
@@ -5360,19 +5524,47 @@ function renderSourceControlTaskPanel(task) {
     return "";
   }
 
+  const isExpanded = uiState.sourceControl.taskTrayExpanded;
+  const tone = task.status === "failed" ? "failed" : task.status === "succeeded" ? "succeeded" : "running";
+  const summary = task.canWriteInput
+    ? "Waiting for input"
+    : task.status === "failed"
+      ? "Needs attention"
+      : task.status === "succeeded"
+        ? "Finished successfully"
+        : "Running";
+
   return `
-    <section class="workspace-scm-task">
-      <header class="workspace-scm-task-header">
-        <div>
-          <p class="workspace-scm-detail-kicker">Task</p>
+    <section class="workspace-scm-task-tray is-${tone} ${isExpanded ? "is-expanded" : ""}">
+      <button
+        type="button"
+        class="workspace-scm-task-tray-toggle"
+        data-action="scm-toggle-task-tray"
+        aria-expanded="${isExpanded ? "true" : "false"}"
+      >
+        <div class="workspace-scm-task-tray-copy">
+          <div class="workspace-scm-task-tray-title-row">
+            <p class="workspace-scm-detail-kicker">Task</p>
+            <span class="workspace-scm-task-tray-status is-${tone}">${escapeHtml(formatSourceControlTaskStatus(task))}</span>
+          </div>
           <strong>${escapeHtml(task.title)}</strong>
-          <span>${escapeHtml(formatSourceControlTaskStatus(task))}</span>
+          <span>${escapeHtml(summary)}</span>
         </div>
-        <span class="workspace-scm-task-command">${escapeHtml(task.command)}</span>
-      </header>
-      <pre class="workspace-scm-task-output">${escapeHtml(task.output || "Waiting for task output…")}</pre>
+        <div class="workspace-scm-task-tray-meta">
+          <span class="workspace-scm-task-command">${escapeHtml(task.command)}</span>
+          <span class="workspace-scm-task-tray-caret" aria-hidden="true">${renderChevronIcon(isExpanded ? "up" : "down")}</span>
+        </div>
+      </button>
       ${
-        task.canWriteInput
+        isExpanded
+          ? `
+            <div class="workspace-scm-task-tray-body">
+              <pre class="workspace-scm-task-output workspace-scm-task-tray-output">${escapeHtml(task.output || "Waiting for task output…")}</pre>
+          `
+          : ""
+      }
+      ${
+        isExpanded && task.canWriteInput
           ? `
             <form class="workspace-scm-task-form" data-action="scm-task-input">
               <input
@@ -5389,6 +5581,7 @@ function renderSourceControlTaskPanel(task) {
           `
           : ""
       }
+      ${isExpanded ? "</div>" : ""}
     </section>
   `;
 }

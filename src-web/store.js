@@ -27,6 +27,7 @@ export function createUiState() {
     sourceControl: {
       snapshot: null,
       activeTab: "changes",
+      activeRowMenuKey: "",
       selectedPath: "",
       selectedDiffMode: "working-tree",
       diff: null,
@@ -41,6 +42,7 @@ export function createUiState() {
       generatingCommitMessage: false,
       branchSearch: "",
       taskInput: "",
+      taskTrayExpanded: false,
       submitting: false,
       lastLoadedWorkspaceId: "",
     },
