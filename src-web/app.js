@@ -635,7 +635,11 @@ async function init() {
   document.addEventListener("submit", handleSubmit);
   document.addEventListener("input", handleInput);
   document.addEventListener("change", handleChange);
+  document.addEventListener("dragenter", handleDocumentDragHover, true);
+  document.addEventListener("dragover", handleDocumentDragHover, true);
+  document.addEventListener("drop", handleDocumentDrop, true);
   document.addEventListener("keydown", handleKeyDown);
+  document.addEventListener("paste", handlePaste, true);
   document.addEventListener("focusout", handleFocusOut, true);
   document.addEventListener("pointerdown", handlePointerDown, true);
   document.addEventListener("scroll", handleScroll, true);
@@ -710,9 +714,109 @@ function focusPaneTerminal(paneId) {
     return;
   }
 
-  requestAnimationFrame(() => {
+  const focusTerminal = () => {
     paneTerminals.get(paneId)?.terminal.focus();
-  });
+  };
+
+  focusTerminal();
+  requestAnimationFrame(focusTerminal);
+}
+
+function claimPaneTerminalFocus(paneId, workspace = getActiveWorkspace()) {
+  const resolvedPaneId = setActivePaneId(paneId, workspace);
+  if (resolvedPaneId) {
+    focusPaneTerminal(resolvedPaneId);
+  }
+
+  return resolvedPaneId;
+}
+
+function clearDragHoverPaneId() {
+  uiState.dragHoverPaneId = null;
+}
+
+function syncDragHoverPaneId(paneId, workspace = getActiveWorkspace()) {
+  if (!paneId || !workspace) {
+    return null;
+  }
+
+  const didChange = uiState.dragHoverPaneId !== paneId;
+  uiState.dragHoverPaneId = paneId;
+  setActivePaneId(paneId, workspace);
+  if (didChange) {
+    focusPaneTerminal(paneId);
+  }
+  return paneId;
+}
+
+function isExternalFileDrag(dataTransfer) {
+  if (!dataTransfer) {
+    return false;
+  }
+
+  if ((dataTransfer.files?.length || 0) > 0) {
+    return true;
+  }
+
+  if (Array.from(dataTransfer.items || []).some((item) => item?.kind === "file")) {
+    return true;
+  }
+
+  const types = Array.from(dataTransfer?.types || []);
+  return types.some((type) =>
+    type === "Files"
+    || type === "public.file-url"
+    || type === "text/uri-list"
+    || type === "application/x-moz-file",
+  );
+}
+
+function isImageFileDrag(dataTransfer) {
+  if (!dataTransfer) {
+    return false;
+  }
+
+  if (
+    Array.from(dataTransfer.items || []).some(
+      (item) => item?.kind === "file" && typeof item.type === "string" && item.type.startsWith("image/"),
+    )
+  ) {
+    return true;
+  }
+
+  return Array.from(dataTransfer.files || []).some(
+    (file) => typeof file?.type === "string" && file.type.startsWith("image/"),
+  );
+}
+
+function resolvePaneIdFromViewportPoint(x, y) {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    return null;
+  }
+
+  const elements = typeof document.elementsFromPoint === "function"
+    ? document.elementsFromPoint(x, y)
+    : [document.elementFromPoint(x, y)];
+
+  for (const element of elements) {
+    const paneId = element?.closest?.("[data-pane-id]")?.dataset?.paneId || null;
+    if (paneId) {
+      return paneId;
+    }
+  }
+
+  return null;
+}
+
+function resolvePaneIdFromElement(element) {
+  return element?.closest?.("[data-pane-id]")?.dataset?.paneId || null;
+}
+
+function resolvePaneIdFromDragEvent(event) {
+  return (
+    resolvePaneIdFromViewportPoint(event.clientX, event.clientY)
+    || resolvePaneIdFromElement(event.target instanceof Element ? event.target : null)
+  );
 }
 
 function normalizeDropPosition(position) {
@@ -720,18 +824,32 @@ function normalizeDropPosition(position) {
     return null;
   }
 
-  const scaleFactor = window.devicePixelRatio || 1;
-  const logicalPosition = typeof position.toLogical === "function"
-    ? position.toLogical(scaleFactor)
-    : position;
-  const x = Number(logicalPosition?.x);
-  const y = Number(logicalPosition?.y);
-
-  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+  const rawX = Number(position?.x);
+  const rawY = Number(position?.y);
+  if (!Number.isFinite(rawX) || !Number.isFinite(rawY)) {
     return null;
   }
 
-  return { x, y };
+  const withinViewport =
+    rawX >= 0
+    && rawY >= 0
+    && rawX <= window.innerWidth + 1
+    && rawY <= window.innerHeight + 1;
+  if (withinViewport) {
+    return { x: rawX, y: rawY };
+  }
+
+  const scaleFactor = window.devicePixelRatio || 1;
+  const logicalPosition = typeof position.toLogical === "function"
+    ? position.toLogical(scaleFactor)
+    : { x: rawX / scaleFactor, y: rawY / scaleFactor };
+  const logicalX = Number(logicalPosition?.x);
+  const logicalY = Number(logicalPosition?.y);
+  if (!Number.isFinite(logicalX) || !Number.isFinite(logicalY)) {
+    return null;
+  }
+
+  return { x: logicalX, y: logicalY };
 }
 
 function resolvePaneIdFromDropPosition(position) {
@@ -740,8 +858,7 @@ function resolvePaneIdFromDropPosition(position) {
     return null;
   }
 
-  const element = document.elementFromPoint(logicalPosition.x, logicalPosition.y);
-  return element?.closest?.("[data-pane-id]")?.dataset?.paneId || null;
+  return resolvePaneIdFromViewportPoint(logicalPosition.x, logicalPosition.y);
 }
 
 function normalizeDroppedPaths(paths) {
@@ -762,25 +879,122 @@ function formatDroppedPathsForShell(paths) {
   return `${paths.map(quoteShellPath).join(" ")} `;
 }
 
+function rememberBrowserHandledDrop(paneId) {
+  runtimeStore.browserHandledDropPaneId = paneId || null;
+  runtimeStore.browserHandledDropAt = paneId ? Date.now() : 0;
+}
+
+function consumeBrowserHandledDrop(paneId) {
+  const isRecent =
+    runtimeStore.browserHandledDropPaneId
+    && runtimeStore.browserHandledDropPaneId === paneId
+    && Date.now() - runtimeStore.browserHandledDropAt < 1200;
+
+  runtimeStore.browserHandledDropPaneId = null;
+  runtimeStore.browserHandledDropAt = 0;
+  return Boolean(isRecent);
+}
+
+function resolveTerminalDropTarget(paneId) {
+  const terminalState = paneId ? paneTerminals.get(paneId) : null;
+  if (!terminalState?.element) {
+    return null;
+  }
+
+  return (
+    terminalState.terminal.textarea
+    || terminalState.element.querySelector(".xterm-helper-textarea")
+    || terminalState.element.querySelector(".xterm")
+    || terminalState.element.querySelector(`[data-terminal-host="${paneId}"]`)
+    || terminalState.element
+  );
+}
+
+function dispatchReroutedTerminalDrop(paneId, sourceEvent, workspace = getActiveWorkspace()) {
+  const target = resolveTerminalDropTarget(paneId);
+  if (!target || typeof DragEvent !== "function") {
+    return false;
+  }
+
+  claimPaneTerminalFocus(paneId, workspace);
+
+  try {
+    const reroutedEvent = new DragEvent("drop", {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      dataTransfer: sourceEvent.dataTransfer,
+      clientX: sourceEvent.clientX,
+      clientY: sourceEvent.clientY,
+      screenX: sourceEvent.screenX,
+      screenY: sourceEvent.screenY,
+      ctrlKey: sourceEvent.ctrlKey,
+      shiftKey: sourceEvent.shiftKey,
+      altKey: sourceEvent.altKey,
+      metaKey: sourceEvent.metaKey,
+    });
+    Object.defineProperty(reroutedEvent, "__crewdockReroutedDrop", {
+      configurable: true,
+      value: true,
+    });
+    target.dispatchEvent(reroutedEvent);
+    return true;
+  } catch (error) {
+    console.error(error);
+    return false;
+  }
+}
+
 async function handleNativeDragDrop(payload) {
-  if (!payload || payload.type !== "drop") {
+  if (!payload) {
     return;
   }
 
   const workspace = getActiveWorkspace();
-  const paths = normalizeDroppedPaths(payload.paths);
-  if (!workspace || paths.length === 0) {
+  if (!workspace) {
+    clearDragHoverPaneId();
     return;
   }
 
-  const paneId = resolvePaneIdFromDropPosition(payload.position) || resolveActivePaneId(workspace);
+  if (payload.type === "over") {
+    const paneId = resolvePaneIdFromDropPosition(payload.position);
+    if (paneId) {
+      syncDragHoverPaneId(paneId, workspace);
+    }
+    return;
+  }
+
+  if (payload.type === "enter") {
+    return;
+  }
+
+  if (payload.type === "leave") {
+    clearDragHoverPaneId();
+    return;
+  }
+
+  if (payload.type !== "drop") {
+    return;
+  }
+
+  const paths = normalizeDroppedPaths(payload.paths);
+  const hoveredPaneId = uiState.dragHoverPaneId;
+  clearDragHoverPaneId();
+  if (paths.length === 0) {
+    return;
+  }
+
+  const paneId = hoveredPaneId || resolvePaneIdFromDropPosition(payload.position) || resolveActivePaneId(workspace);
   if (!paneId) {
     return;
   }
 
-  setActivePaneId(paneId, workspace);
+  if (consumeBrowserHandledDrop(paneId)) {
+    return;
+  }
+
+  claimPaneTerminalFocus(paneId, workspace);
   await bridge.writeToPane(paneId, formatDroppedPathsForShell(paths));
-  paneTerminals.get(paneId)?.terminal.focus();
 }
 
 function normalizeSettingsSection(section) {
@@ -1777,7 +1991,11 @@ function handlePointerDown(event) {
   const target = event.target instanceof Element ? event.target : null;
   const paneId = target?.closest("[data-pane-id]")?.dataset?.paneId || null;
   if (paneId) {
-    setActivePaneId(paneId);
+    if (event.button === 0) {
+      claimPaneTerminalFocus(paneId);
+    } else {
+      setActivePaneId(paneId);
+    }
   }
 
   let shouldRender = false;
@@ -1795,6 +2013,102 @@ function handlePointerDown(event) {
   if (shouldRender) {
     render();
   }
+}
+
+function handlePaste(event) {
+  const target = event.target instanceof Element ? event.target : null;
+  const isTerminalPaste = Boolean(
+    target?.closest(".xterm") || target?.classList?.contains("xterm-helper-textarea"),
+  );
+  if (!isTerminalPaste) {
+    return;
+  }
+
+  const clipboard = event.clipboardData;
+  const clipboardTypes = Array.from(clipboard?.types || []);
+  if (!clipboard || !clipboardTypes.includes("text/plain")) {
+    return;
+  }
+
+  const workspace = getActiveWorkspace();
+  const paneId = resolveActivePaneId(workspace);
+  const terminalState = paneId ? paneTerminals.get(paneId) : null;
+  if (!paneId || !terminalState) {
+    return;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+
+  claimPaneTerminalFocus(paneId, workspace);
+  terminalState.terminal.paste(clipboard.getData("text/plain"));
+}
+
+function handleDocumentDragHover(event) {
+  if (!isExternalFileDrag(event.dataTransfer)) {
+    return;
+  }
+
+  const workspace = getActiveWorkspace();
+  if (!workspace) {
+    return;
+  }
+
+  const paneId = resolvePaneIdFromDragEvent(event);
+  if (!paneId) {
+    return;
+  }
+
+  event.preventDefault();
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = "copy";
+  }
+
+  syncDragHoverPaneId(paneId, workspace);
+}
+
+function handleDocumentDrop(event) {
+  if (event.__crewdockReroutedDrop) {
+    return;
+  }
+
+  if (!isExternalFileDrag(event.dataTransfer)) {
+    return;
+  }
+
+  const workspace = getActiveWorkspace();
+  const target = event.target instanceof Element ? event.target : null;
+  const targetPaneId = resolvePaneIdFromElement(target);
+  const pointerPaneId = resolvePaneIdFromViewportPoint(event.clientX, event.clientY);
+  const paneId =
+    pointerPaneId
+    || uiState.dragHoverPaneId
+    || targetPaneId
+    || resolveActivePaneId(workspace);
+
+  if (paneId && workspace) {
+    syncDragHoverPaneId(paneId, workspace);
+    if (isImageFileDrag(event.dataTransfer)) {
+      rememberBrowserHandledDrop(paneId);
+      if (
+        targetPaneId !== paneId
+        && dispatchReroutedTerminalDrop(paneId, event, workspace)
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      window.setTimeout(() => {
+        if (runtimeStore.browserHandledDropPaneId === paneId) {
+          rememberBrowserHandledDrop(null);
+        }
+      }, 1500);
+      clearDragHoverPaneId();
+      return;
+    }
+  }
+
+  event.preventDefault();
+  clearDragHoverPaneId();
 }
 
 function handleScroll(event) {
@@ -4781,6 +5095,10 @@ function renderSourceControlToolbar(snapshot) {
   const summary = snapshot.summary;
   const fileCount = snapshot.changes?.length || 0;
   const tone = getGitTone(summary);
+  const scopeValue = snapshot.workspaceRelativePath && snapshot.workspaceRelativePath !== "."
+    ? snapshot.workspaceRelativePath
+    : "Repository root";
+  const scopeCopy = snapshot.repoRoot || snapshot.workspacePath;
   const syncValue = summary.upstream
     ? (Number(summary.ahead || 0) > 0 || Number(summary.behind || 0) > 0
       ? `+${summary.ahead || 0} / -${summary.behind || 0}`
@@ -4796,7 +5114,7 @@ function renderSourceControlToolbar(snapshot) {
 
   return `
     <section class="workspace-scm-toolbar">
-      <div class="workspace-scm-toolbar-meta">
+      <div class="workspace-scm-toolbar-top">
         <div class="workspace-scm-toolbar-hero">
           <span class="workspace-scm-toolbar-label">Current branch</span>
           <div class="workspace-scm-toolbar-branch-row">
@@ -4809,30 +5127,30 @@ function renderSourceControlToolbar(snapshot) {
             </span>
           </div>
         </div>
-        <div class="workspace-scm-toolbar-stats">
-          ${renderSourceControlSummaryStat({
-            label: "Sync",
-            value: syncValue,
-            copy: syncCopy,
-            tone: summary.upstream ? tone : "",
-          })}
-          ${renderSourceControlSummaryStat({
-            label: "Workspace scope",
-            value: snapshot.workspaceRelativePath || ".",
-            copy: snapshot.repoRoot || snapshot.workspacePath,
-          })}
-          ${renderSourceControlSummaryStat({
-            label: "Changes",
-            value: changeValue,
-            copy: changeCopy,
-            tone: fileCount ? tone : "clean",
-          })}
+        <div class="workspace-scm-toolbar-actions">
+          <button type="button" class="workspace-scm-toolbar-button" data-action="scm-fetch">Fetch</button>
+          <button type="button" class="workspace-scm-toolbar-button" data-action="scm-pull">Pull</button>
+          <button type="button" class="workspace-scm-toolbar-button" data-action="scm-push">Push</button>
         </div>
       </div>
-      <div class="workspace-scm-toolbar-actions">
-        <button type="button" class="workspace-scm-toolbar-button" data-action="scm-fetch">Fetch</button>
-        <button type="button" class="workspace-scm-toolbar-button" data-action="scm-pull">Pull</button>
-        <button type="button" class="workspace-scm-toolbar-button" data-action="scm-push">Push</button>
+      <div class="workspace-scm-toolbar-stats">
+        ${renderSourceControlSummaryStat({
+          label: "Sync",
+          value: syncValue,
+          copy: syncCopy,
+          tone: summary.upstream ? tone : "",
+        })}
+        ${renderSourceControlSummaryStat({
+          label: "Workspace scope",
+          value: scopeValue,
+          copy: scopeCopy,
+        })}
+        ${renderSourceControlSummaryStat({
+          label: "Changes",
+          value: changeValue,
+          copy: changeCopy,
+          tone: fileCount ? tone : "clean",
+        })}
       </div>
     </section>
   `;
@@ -6318,13 +6636,14 @@ function mountWorkspaceTerminals(workspace, root = document) {
       element: host.closest(".terminal-pane"),
     };
 
+    const syncPaneFocusState = () => {
+      setActivePaneId(pane.id, getActiveWorkspace() || workspace);
+    };
+
     state.observer.observe(host);
-    host.addEventListener("focusin", () => {
-      setActivePaneId(pane.id, workspace);
-    });
-    host.addEventListener("pointerdown", () => {
-      setActivePaneId(pane.id, workspace);
-    });
+    host.addEventListener("focusin", syncPaneFocusState);
+    host.addEventListener("pointerdown", syncPaneFocusState);
+    terminal.textarea?.addEventListener("focus", syncPaneFocusState);
     terminal.onData((data) => {
       bridge.writeToPane(pane.id, data).catch((error) => console.error(error));
     });

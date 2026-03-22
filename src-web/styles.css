@@ -3701,18 +3701,21 @@ button {
 
 .workspace-scm-toolbar {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
   gap: 14px;
   padding: 0 0 12px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 
-.workspace-scm-toolbar-meta {
-  display: grid;
-  gap: 12px;
+.workspace-scm-toolbar-top {
+  min-width: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
 }
 
 .workspace-scm-toolbar-hero {
+  min-width: 0;
   display: grid;
   gap: 8px;
 }
@@ -3802,13 +3805,17 @@ button {
 }
 
 .workspace-scm-toolbar-stat-copy {
+  max-width: 100%;
   color: var(--surface-soft-text);
   font-size: 0.58rem;
   line-height: 1.4;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .workspace-scm-toolbar-actions {
-  align-self: start;
+  flex: 0 0 auto;
+  display: inline-flex;
   justify-content: flex-end;
   flex-wrap: wrap;
   gap: 8px;
@@ -4947,6 +4954,11 @@ button {
     grid-template-columns: 1fr;
   }
 
+  .workspace-scm-toolbar-top {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
   .workspace-scm-toolbar-stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -5074,7 +5086,6 @@ button {
     flex-wrap: wrap;
   }
 
-  .workspace-scm-toolbar,
   .workspace-scm-task-header,
   .workspace-scm-detail-header,
   .workspace-scm-section-header {
@@ -5082,7 +5093,6 @@ button {
     align-items: stretch;
   }
 
-  .workspace-scm-toolbar,
   .workspace-scm-task-tray-toggle {
     grid-template-columns: 1fr;
   }
