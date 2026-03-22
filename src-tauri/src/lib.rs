@@ -32,12 +32,12 @@ use persistence::resolve_persistence_path;
 use session_manager::{prepare_workspace_launch, spawn_pane_jobs, LiveSession, PaneJob};
 use source_control::{
     build_commit_message_generation_request, discard_paths, generate_commit_message_with_openai,
-    git_task_write_stdin as write_git_task_input,
+    git_task_write_stdin as write_git_task_input, load_git_remotes,
     load_workspace_git_commit_detail as build_workspace_git_commit_detail,
     load_workspace_git_diff as build_workspace_git_diff,
-    load_workspace_source_control as build_workspace_source_control, stage_paths, start_git_task,
-    unstage_paths, GitCommitDetailSnapshot, GitDiffMode, GitDiffSnapshot, GitTaskRecord,
-    WorkspaceSourceControlSnapshot,
+    load_workspace_source_control as build_workspace_source_control, select_default_git_remote,
+    stage_paths, start_git_task, unstage_paths, GitCommitDetailSnapshot, GitDiffMode,
+    GitDiffSnapshot, GitTaskRecord, WorkspaceSourceControlSnapshot,
 };
 
 #[derive(Clone)]
@@ -1219,11 +1219,14 @@ fn git_push(
 fn git_publish_branch(
     workspace_id: String,
     branch_name: String,
+    remote_name: Option<String>,
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<WorkspaceSourceControlSnapshot, String> {
     let branch_name = validate_git_cli_arg(branch_name, "branch name")?;
-    let remote = resolve_default_git_remote(&state.inner, &workspace_id)?;
+    let remote = validate_optional_git_cli_arg(remote_name, "remote name")?
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(resolve_default_git_remote(&state.inner, &workspace_id)?);
     start_git_task(
         state.inner.clone(),
         app,
@@ -1372,24 +1375,13 @@ fn resolve_default_git_remote(
         .iter()
         .find(|workspace| workspace.id == workspace_id)
         .ok_or_else(|| "workspace not found".to_string())?;
-    let output = run_git_command("git", Path::new(&workspace.path), &["remote"])
-        .map_err(|error| error.message)?;
-    let remotes = output
-        .lines()
-        .map(str::trim)
-        .filter(|entry| !entry.is_empty())
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-
+    let remotes = load_git_remotes(Path::new(&workspace.path))?;
     if remotes.is_empty() {
         return Err("no git remote configured for this repository".to_string());
     }
 
-    Ok(remotes
-        .iter()
-        .find(|remote| remote.as_str() == "origin")
-        .cloned()
-        .unwrap_or_else(|| remotes[0].clone()))
+    select_default_git_remote(&remotes)
+        .ok_or_else(|| "no git remote configured for this repository".to_string())
 }
 
 fn execute_launcher_command(

@@ -2716,6 +2716,7 @@ button {
 }
 
 .workspace-git-panel {
+  position: relative;
   width: min(var(--scm-sidebar-width), calc(100vw - 20px));
   height: 100%;
   display: grid;
@@ -3128,6 +3129,19 @@ button {
 .workspace-scm-input {
   min-height: 28px;
   padding: 0 9px;
+}
+
+.workspace-scm-select {
+  appearance: none;
+  padding-right: 30px;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--surface-soft-text) 50%),
+    linear-gradient(135deg, var(--surface-soft-text) 50%, transparent 50%);
+  background-position:
+    calc(100% - 14px) calc(50% - 2px),
+    calc(100% - 9px) calc(50% - 2px);
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
 }
 
 .workspace-scm-commit-input:focus,
@@ -4256,6 +4270,35 @@ button {
   gap: 10px;
 }
 
+.workspace-scm-task-recovery {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 12px;
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--danger) 18%, rgba(255, 255, 255, 0.06));
+  background: color-mix(in srgb, var(--danger) 8%, rgba(255, 255, 255, 0.02));
+}
+
+.workspace-scm-task-recovery-copy {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.workspace-scm-task-recovery-copy strong {
+  font-size: 0.66rem;
+  color: var(--text);
+}
+
+.workspace-scm-task-recovery-copy span {
+  color: var(--surface-soft-text);
+  font-size: 0.58rem;
+  line-height: 1.45;
+}
+
 .workspace-scm-task-tray-output {
   min-height: 110px;
   max-height: 220px;
@@ -4263,6 +4306,68 @@ button {
 
 .workspace-scm-task-tray.is-failed .workspace-scm-task-tray-toggle {
   border-color: color-mix(in srgb, var(--danger) 22%, rgba(255, 255, 255, 0.06));
+}
+
+.workspace-scm-inline-modal {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(8, 10, 14, 0.52);
+  z-index: 8;
+}
+
+.workspace-scm-publish-dialog {
+  width: min(360px, 100%);
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+  border-radius: 18px;
+  border: 1px solid color-mix(in srgb, var(--overlay-panel-border) 88%, transparent);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.025), transparent 48%),
+    color-mix(in srgb, var(--overlay-panel-bg) 98%, black 2%);
+  box-shadow: 0 24px 42px rgba(0, 0, 0, 0.3);
+}
+
+.workspace-scm-publish-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.workspace-scm-publish-head > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.workspace-scm-publish-head strong {
+  font-size: 0.82rem;
+}
+
+.workspace-scm-publish-head span {
+  color: var(--surface-soft-text);
+  font-size: 0.59rem;
+  line-height: 1.45;
+}
+
+.workspace-scm-publish-field {
+  display: grid;
+  gap: 6px;
+  color: var(--surface-soft-text);
+  font-size: 0.56rem;
+  font-weight: 600;
+}
+
+.workspace-scm-publish-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .workspace-git-summary-shell {
@@ -5117,6 +5222,23 @@ button {
 
   .workspace-scm-branch-form {
     grid-template-columns: 1fr;
+  }
+
+  .workspace-scm-inline-modal {
+    padding: 12px;
+  }
+
+  .workspace-scm-publish-dialog {
+    width: 100%;
+    padding: 14px;
+    border-radius: 16px;
+  }
+
+  .workspace-scm-publish-head,
+  .workspace-scm-publish-actions,
+  .workspace-scm-task-recovery {
+    flex-direction: column;
+    align-items: stretch;
   }
 
   .workspace-scm-column-list,

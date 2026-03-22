@@ -14,8 +14,8 @@ use tauri::AppHandle;
 use crate::{
     collect_git_detail,
     events::{emit_runtime_event, emit_snapshot, RuntimeEvent},
-    run_git_command, validate_git_cli_arg, AppSnapshot, GitFileSnapshot, GitSummarySnapshot,
-    RuntimeState,
+    run_git_command, validate_git_cli_arg, AppSnapshot, GitFileSnapshot, GitState,
+    GitSummarySnapshot, RuntimeState,
 };
 
 const GRAPH_PAGE_SIZE: usize = 120;
@@ -46,6 +46,8 @@ pub(crate) struct WorkspaceSourceControlSnapshot {
     pub(crate) workspace_relative_path: Option<String>,
     pub(crate) summary: GitSummarySnapshot,
     pub(crate) changes: Vec<GitFileSnapshot>,
+    pub(crate) remotes: Vec<GitRemoteSnapshot>,
+    pub(crate) default_remote: Option<String>,
     pub(crate) local_branches: Vec<GitBranchSnapshot>,
     pub(crate) remote_branches: Vec<GitBranchSnapshot>,
     pub(crate) graph: GitGraphSnapshot,
@@ -63,6 +65,13 @@ pub(crate) struct GitBranchSnapshot {
     pub(crate) relative_date: String,
     pub(crate) is_current: bool,
     pub(crate) is_remote: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GitRemoteSnapshot {
+    pub(crate) name: String,
+    pub(crate) is_default: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -153,6 +162,7 @@ pub(crate) struct GitTaskSnapshot {
     pub(crate) started_at: u64,
     pub(crate) finished_at: Option<u64>,
     pub(crate) exit_code: Option<i32>,
+    pub(crate) recovery: Option<GitTaskRecoverySnapshot>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -163,9 +173,26 @@ pub(crate) enum GitTaskStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct GitTaskRecoverySnapshot {
+    pub(crate) kind: GitTaskRecoveryKind,
+    pub(crate) branch_name: String,
+    pub(crate) remotes: Vec<GitRemoteSnapshot>,
+    pub(crate) default_remote: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum GitTaskRecoveryKind {
+    PublishBranch,
+}
+
 pub(crate) struct GitTaskRecord {
     pub(crate) snapshot: GitTaskSnapshot,
     pub(crate) writer: Option<Arc<Mutex<Box<dyn Write + Send>>>>,
+    pub(crate) args: Vec<String>,
+    pub(crate) repo_root: PathBuf,
 }
 
 struct SpawnedGitTaskProcess {
@@ -190,10 +217,13 @@ pub(crate) fn load_workspace_source_control(
         .and_then(|raw| raw.parse::<usize>().ok())
         .unwrap_or(0);
 
-    let (local_branches, remote_branches, graph) =
+    let (remotes, default_remote, local_branches, remote_branches, graph) =
         if let Some(repo_root) = detail.repo_root.as_deref() {
             let repo_root = PathBuf::from(repo_root);
+            let remotes = load_git_remotes(&repo_root).unwrap_or_default();
             (
+                remotes.clone(),
+                select_default_git_remote(&remotes),
                 load_branches(&repo_root, false).unwrap_or_default(),
                 load_branches(&repo_root, true).unwrap_or_default(),
                 load_graph_page(&repo_root, graph_skip).unwrap_or_else(|_| GitGraphSnapshot {
@@ -203,6 +233,8 @@ pub(crate) fn load_workspace_source_control(
             )
         } else {
             (
+                Vec::new(),
+                None,
                 Vec::new(),
                 Vec::new(),
                 GitGraphSnapshot {
@@ -220,6 +252,8 @@ pub(crate) fn load_workspace_source_control(
         workspace_relative_path: detail.workspace_relative_path.clone(),
         summary: detail.summary.clone(),
         changes: detail.files.clone(),
+        remotes,
+        default_remote,
         local_branches,
         remote_branches,
         graph,
@@ -664,12 +698,15 @@ pub(crate) fn start_git_task(
             started_at: now_timestamp_ms(),
             finished_at: None,
             exit_code: None,
+            recovery: None,
         };
         runtime.git_tasks.insert(
             workspace_id.clone(),
             GitTaskRecord {
                 snapshot: task_snapshot.clone(),
                 writer: Some(writer.clone()),
+                args: args.clone(),
+                repo_root: repo_root.clone(),
             },
         );
         task_snapshot
@@ -793,6 +830,7 @@ fn run_git_task_blocking(
         started_at,
         finished_at: Some(now_timestamp_ms()),
         exit_code,
+        recovery: classify_git_task_recovery(repo_root, args, task_status),
     })
 }
 
@@ -895,6 +933,37 @@ fn finish_git_task(
     error: Option<String>,
     exit_code: Option<i32>,
 ) -> Result<GitTaskSnapshot, String> {
+    let (repo_root, args, status) = {
+        let mut runtime = shared
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+        let task = runtime
+            .git_tasks
+            .get_mut(workspace_id)
+            .ok_or_else(|| "git task not found".to_string())?;
+        if let Some(error) = error {
+            task.snapshot.output.push_str(&format!("\n{error}\n"));
+            trim_task_output(&mut task.snapshot.output);
+            task.snapshot.status = GitTaskStatus::Failed;
+        } else if exit_code.unwrap_or(1) == 0 {
+            task.snapshot.status = GitTaskStatus::Succeeded;
+        } else {
+            task.snapshot.status = GitTaskStatus::Failed;
+        }
+        task.snapshot.can_write_input = false;
+        task.snapshot.exit_code = exit_code;
+        task.snapshot.finished_at = Some(now_timestamp_ms());
+        task.snapshot.recovery = None;
+        task.writer = None;
+        (
+            task.repo_root.clone(),
+            task.args.clone(),
+            task.snapshot.status,
+        )
+    };
+
+    let recovery = classify_git_task_recovery(&repo_root, &args, status);
+
     let mut runtime = shared
         .lock()
         .map_err(|_| "failed to acquire application state".to_string())?;
@@ -902,20 +971,36 @@ fn finish_git_task(
         .git_tasks
         .get_mut(workspace_id)
         .ok_or_else(|| "git task not found".to_string())?;
-    if let Some(error) = error {
-        task.snapshot.output.push_str(&format!("\n{error}\n"));
-        trim_task_output(&mut task.snapshot.output);
-        task.snapshot.status = GitTaskStatus::Failed;
-    } else if exit_code.unwrap_or(1) == 0 {
-        task.snapshot.status = GitTaskStatus::Succeeded;
-    } else {
-        task.snapshot.status = GitTaskStatus::Failed;
-    }
-    task.snapshot.can_write_input = false;
-    task.snapshot.exit_code = exit_code;
-    task.snapshot.finished_at = Some(now_timestamp_ms());
-    task.writer = None;
+    task.snapshot.recovery = recovery;
     Ok(task.snapshot.clone())
+}
+
+fn classify_git_task_recovery(
+    repo_root: &Path,
+    args: &[String],
+    status: GitTaskStatus,
+) -> Option<GitTaskRecoverySnapshot> {
+    if status != GitTaskStatus::Failed || args.len() != 1 || args[0] != "push" {
+        return None;
+    }
+
+    let detail = collect_git_detail(repo_root);
+    if detail.summary.state == GitState::Detached || detail.summary.upstream.is_some() {
+        return None;
+    }
+
+    let branch_name = detail.summary.branch?.trim().to_string();
+    if branch_name.is_empty() {
+        return None;
+    }
+
+    let remotes = load_git_remotes(repo_root).unwrap_or_default();
+    Some(GitTaskRecoverySnapshot {
+        kind: GitTaskRecoveryKind::PublishBranch,
+        branch_name,
+        default_remote: select_default_git_remote(&remotes),
+        remotes,
+    })
 }
 
 fn load_untracked_diff(repo_root: &Path, path: &str) -> Result<String, String> {
@@ -974,6 +1059,37 @@ fn load_branches(repo_root: &Path, remotes: bool) -> Result<Vec<GitBranchSnapsho
     }
 
     Ok(branches)
+}
+
+pub(crate) fn load_git_remotes(repo_root: &Path) -> Result<Vec<GitRemoteSnapshot>, String> {
+    let output = run_git_command("git", repo_root, &["remote"]).map_err(|error| error.message)?;
+    let remote_names = output
+        .lines()
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let default_remote = remote_names
+        .iter()
+        .find(|name| name.as_str() == "origin")
+        .cloned()
+        .or_else(|| remote_names.first().cloned());
+
+    Ok(remote_names
+        .into_iter()
+        .map(|name| GitRemoteSnapshot {
+            is_default: default_remote.as_deref() == Some(name.as_str()),
+            name,
+        })
+        .collect())
+}
+
+pub(crate) fn select_default_git_remote(remotes: &[GitRemoteSnapshot]) -> Option<String> {
+    remotes
+        .iter()
+        .find(|remote| remote.is_default)
+        .or_else(|| remotes.first())
+        .map(|remote| remote.name.clone())
 }
 
 fn load_graph_page(repo_root: &Path, skip: usize) -> Result<GitGraphSnapshot, String> {
@@ -1481,8 +1597,9 @@ mod tests {
     };
 
     use super::{
-        build_commit_message_generation_request, extract_openai_response_text, parse_commit_detail,
-        resolve_repo_relative_existing_path, run_git_task_blocking, GitTaskStatus,
+        build_commit_message_generation_request, extract_openai_response_text, load_git_remotes,
+        parse_commit_detail, resolve_repo_relative_existing_path, run_git_task_blocking,
+        select_default_git_remote, GitTaskRecoveryKind, GitTaskStatus,
     };
 
     #[test]
@@ -1737,6 +1854,167 @@ mod tests {
             fs::read_to_string(secondary.join("README.md")).expect("pulled file should exist"),
             "updated on main\n"
         );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn load_git_remotes_marks_origin_as_default() {
+        let repo = init_test_repo("remote-list");
+        run_git(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "upstream",
+                "https://example.com/upstream.git",
+            ],
+        );
+        run_git(
+            &repo,
+            &["remote", "add", "origin", "https://example.com/origin.git"],
+        );
+
+        let remotes = load_git_remotes(&repo).expect("git remotes should load");
+        assert_eq!(remotes.len(), 2);
+        assert_eq!(
+            select_default_git_remote(&remotes).as_deref(),
+            Some("origin")
+        );
+        assert!(remotes
+            .iter()
+            .any(|remote| remote.name == "origin" && remote.is_default));
+
+        let _ = fs::remove_dir_all(repo.parent().unwrap());
+    }
+
+    #[test]
+    fn git_task_blocking_adds_publish_recovery_for_unpublished_pushes() {
+        let root = unique_temp_dir("publish-recovery");
+        let remote = root.join("remote.git");
+        let repo = root.join("repo");
+
+        let init_remote = Command::new("git")
+            .args([
+                "init",
+                "--bare",
+                "--initial-branch=main",
+                remote.to_str().expect("remote path should be utf-8"),
+            ])
+            .current_dir(&root)
+            .output()
+            .expect("bare remote should start");
+        assert!(
+            init_remote.status.success(),
+            "git init --bare failed: {}",
+            String::from_utf8_lossy(&init_remote.stderr)
+        );
+
+        fs::create_dir_all(&repo).expect("repo dir should exist");
+        configure_repo(&repo);
+        fs::write(repo.join("README.md"), "initial\n").expect("initial file should be written");
+        run_git(&repo, &["add", "README.md"]);
+        run_git(&repo, &["commit", "-m", "initial"]);
+        run_git(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                remote.to_str().expect("remote path should be utf-8"),
+            ],
+        );
+        run_git(&repo, &["push", "-u", "origin", "main"]);
+        run_git(&repo, &["checkout", "-b", "feature/publish-me"]);
+        fs::write(repo.join("feature.txt"), "publish me\n").expect("feature file should exist");
+        run_git(&repo, &["add", "feature.txt"]);
+        run_git(&repo, &["commit", "-m", "feature work"]);
+
+        let push = run_git_task_blocking(&repo, "Push", &["push".to_string()], None)
+            .expect("push should run");
+        assert_eq!(push.status, GitTaskStatus::Failed);
+
+        let recovery = push
+            .recovery
+            .as_ref()
+            .expect("failed unpublished push should offer recovery");
+        assert_eq!(recovery.kind, GitTaskRecoveryKind::PublishBranch);
+        assert_eq!(recovery.branch_name, "feature/publish-me");
+        assert_eq!(recovery.default_remote.as_deref(), Some("origin"));
+        assert!(recovery
+            .remotes
+            .iter()
+            .any(|remote| remote.name == "origin" && remote.is_default));
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn git_task_blocking_skips_publish_recovery_for_tracked_branch_push_failures() {
+        let root = unique_temp_dir("tracked-push-failure");
+        let remote = root.join("remote.git");
+        let missing_remote = root.join("missing.git");
+        let repo = root.join("repo");
+
+        let init_remote = Command::new("git")
+            .args([
+                "init",
+                "--bare",
+                "--initial-branch=main",
+                remote.to_str().expect("remote path should be utf-8"),
+            ])
+            .current_dir(&root)
+            .output()
+            .expect("bare remote should start");
+        assert!(
+            init_remote.status.success(),
+            "git init --bare failed: {}",
+            String::from_utf8_lossy(&init_remote.stderr)
+        );
+
+        fs::create_dir_all(&repo).expect("repo dir should exist");
+        configure_repo(&repo);
+        fs::write(repo.join("README.md"), "initial\n").expect("initial file should be written");
+        run_git(&repo, &["add", "README.md"]);
+        run_git(&repo, &["commit", "-m", "initial"]);
+        run_git(
+            &repo,
+            &[
+                "remote",
+                "add",
+                "origin",
+                remote.to_str().expect("remote path should be utf-8"),
+            ],
+        );
+        run_git(&repo, &["push", "-u", "origin", "main"]);
+        run_git(&repo, &["checkout", "-b", "feature/tracked"]);
+        fs::write(repo.join("tracked.txt"), "tracked\n").expect("tracked file should exist");
+        run_git(&repo, &["add", "tracked.txt"]);
+        run_git(&repo, &["commit", "-m", "tracked branch"]);
+        run_git(
+            &repo,
+            &["push", "--set-upstream", "origin", "feature/tracked"],
+        );
+
+        fs::write(repo.join("tracked.txt"), "tracked again\n").expect("tracked file should exist");
+        run_git(&repo, &["add", "tracked.txt"]);
+        run_git(&repo, &["commit", "-m", "tracked branch update"]);
+        run_git(
+            &repo,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                missing_remote
+                    .to_str()
+                    .expect("missing remote path should be utf-8"),
+            ],
+        );
+
+        let push = run_git_task_blocking(&repo, "Push", &["push".to_string()], None)
+            .expect("push should run");
+        assert_eq!(push.status, GitTaskStatus::Failed);
+        assert!(push.recovery.is_none());
 
         let _ = fs::remove_dir_all(&root);
     }

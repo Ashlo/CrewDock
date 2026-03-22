@@ -839,6 +839,8 @@ function normalizeDropPosition(position) {
     return { x: rawX, y: rawY };
   }
 
+  // Some native drag payloads on macOS already arrive in logical coordinates.
+  // Only convert when the raw values are clearly outside the current viewport.
   const scaleFactor = window.devicePixelRatio || 1;
   const logicalPosition = typeof position.toLogical === "function"
     ? position.toLogical(scaleFactor)
@@ -1658,6 +1660,14 @@ async function handleClick(event) {
   }
 
   if (
+    target.dataset.action === "close-scm-publish-modal"
+    && target.classList.contains("workspace-scm-inline-modal")
+    && clickedElement?.closest(".workspace-scm-publish-dialog")
+  ) {
+    return;
+  }
+
+  if (
     target.dataset.action === "close-quick-switcher"
     && target.classList.contains("workspace-quick-switcher-backdrop")
     && clickedElement?.closest(".workspace-quick-switcher")
@@ -1670,7 +1680,10 @@ async function handleClick(event) {
     return;
   }
 
-  if (target.dataset.action?.startsWith("scm-")) {
+  if (
+    target.dataset.action?.startsWith("scm-")
+    || target.dataset.action === "close-scm-publish-modal"
+  ) {
     await handleSourceControlAction(target);
     return;
   }
@@ -2089,6 +2102,7 @@ function handleDocumentDrop(event) {
   if (paneId && workspace) {
     syncDragHoverPaneId(paneId, workspace);
     if (isImageFileDrag(event.dataTransfer)) {
+      // Let browser-handled image drops reach Codex while keeping the pane target in sync.
       rememberBrowserHandledDrop(paneId);
       if (
         targetPaneId !== paneId
@@ -2285,6 +2299,12 @@ function handleInput(event) {
 }
 
 async function handleChange(event) {
+  const publishRemoteSelect = event.target.closest("[data-scm-publish-remote]");
+  if (publishRemoteSelect) {
+    uiState.sourceControl.publishModalSelectedRemote = publishRemoteSelect.value;
+    return;
+  }
+
   const countInput = event.target.closest("[data-terminal-count-input]");
   if (!countInput || !uiState.pendingWorkspaceDraft) {
     return;
@@ -2399,6 +2419,10 @@ async function handleKeyDown(event) {
 
   if (uiState.gitPanelVisible && event.key === "Escape") {
     event.preventDefault();
+    if (closeSourceControlPublishModal()) {
+      render();
+      return;
+    }
     if (closeSourceControlRowMenu()) {
       render();
       return;
@@ -2616,9 +2640,139 @@ function syncSourceControlTaskTray(task, previousTask = null) {
   }
 }
 
+function normalizeSourceControlRemoteOptions(remotes = [], defaultRemote = "") {
+  const seen = new Set();
+  const normalized = (Array.isArray(remotes) ? remotes : [])
+    .map((remote) => {
+      const name = typeof remote === "string"
+        ? remote.trim()
+        : String(remote?.name || "").trim();
+      if (!name || seen.has(name)) {
+        return null;
+      }
+      seen.add(name);
+      return {
+        name,
+        isDefault: Boolean(typeof remote === "object" && remote?.isDefault),
+      };
+    })
+    .filter(Boolean);
+
+  const resolvedDefault = normalized.find((remote) => remote.name === defaultRemote)?.name
+    || normalized.find((remote) => remote.isDefault)?.name
+    || normalized[0]?.name
+    || "";
+
+  return {
+    remotes: normalized.map((remote) => ({
+      ...remote,
+      isDefault: remote.name === resolvedDefault,
+    })),
+    defaultRemote: resolvedDefault,
+  };
+}
+
+function closeSourceControlPublishModal() {
+  if (!uiState.sourceControl.publishModalVisible) {
+    return false;
+  }
+
+  uiState.sourceControl.publishModalVisible = false;
+  uiState.sourceControl.publishModalBranchName = "";
+  uiState.sourceControl.publishModalRemotes = [];
+  uiState.sourceControl.publishModalSelectedRemote = "";
+  uiState.sourceControl.publishModalShouldFocus = false;
+  return true;
+}
+
+function openSourceControlPublishModal({
+  branchName,
+  remotes = [],
+  defaultRemote = "",
+} = {}) {
+  const options = normalizeSourceControlRemoteOptions(remotes, defaultRemote);
+  uiState.sourceControl.publishModalVisible = true;
+  uiState.sourceControl.publishModalBranchName = branchName;
+  uiState.sourceControl.publishModalRemotes = options.remotes;
+  uiState.sourceControl.publishModalSelectedRemote = options.defaultRemote;
+  uiState.sourceControl.publishModalShouldFocus = true;
+}
+
 function closeSourceControlPanel() {
+  closeSourceControlPublishModal();
   uiState.gitPanelVisible = false;
   closeSourceControlRowMenu();
+}
+
+function focusSourceControlPublishModal(root = document) {
+  if (!uiState.sourceControl.publishModalVisible || !uiState.sourceControl.publishModalShouldFocus) {
+    return;
+  }
+
+  const focusTarget =
+    root.querySelector("[data-scm-publish-remote]")
+    || root.querySelector('[data-action="scm-confirm-publish-branch"]');
+  if (focusTarget instanceof HTMLElement) {
+    focusTarget.focus({ preventScroll: true });
+  }
+  uiState.sourceControl.publishModalShouldFocus = false;
+}
+
+function captureSettingsFocusState(root = document) {
+  const activeElement = document.activeElement;
+  if (!(activeElement instanceof HTMLInputElement || activeElement instanceof HTMLTextAreaElement)) {
+    return null;
+  }
+
+  if (!root.contains(activeElement) || !activeElement.closest(".settings-sheet")) {
+    return null;
+  }
+
+  const selector = [
+    "[data-settings-openai-api-key-input]",
+    "[data-settings-interface-range]",
+    "[data-settings-terminal-range]",
+  ].find((candidate) => activeElement.matches(candidate));
+
+  if (!selector) {
+    return null;
+  }
+
+  return {
+    selector,
+    selectionStart: typeof activeElement.selectionStart === "number" ? activeElement.selectionStart : null,
+    selectionEnd: typeof activeElement.selectionEnd === "number" ? activeElement.selectionEnd : null,
+    scrollTop: "scrollTop" in activeElement ? activeElement.scrollTop : null,
+  };
+}
+
+function captureSettingsScrollState(root = document) {
+  const sheet = root.querySelector(".settings-sheet");
+  if (!(sheet instanceof HTMLElement)) {
+    return [];
+  }
+
+  const selectors = [
+    ".settings-sheet",
+    ".settings-nav",
+    ".settings-panel",
+  ];
+
+  return selectors.flatMap((selector) => Array
+    .from(root.querySelectorAll(selector))
+    .map((element, index) => {
+      if (!(element instanceof HTMLElement)) {
+        return null;
+      }
+
+      return {
+        selector,
+        index,
+        scrollTop: element.scrollTop,
+        scrollLeft: element.scrollLeft,
+      };
+    })
+    .filter(Boolean));
 }
 
 function captureSourceControlFocusState(root = document) {
@@ -2717,6 +2871,35 @@ function restoreSourceControlFocusState(state, root = document) {
   }
 }
 
+function restoreSettingsFocusState(state, root = document) {
+  if (!state?.selector) {
+    return;
+  }
+
+  const input = root.querySelector(state.selector);
+  if (!(input instanceof HTMLInputElement || input instanceof HTMLTextAreaElement)) {
+    return;
+  }
+
+  input.focus({ preventScroll: true });
+
+  if (
+    typeof state.selectionStart === "number"
+    && typeof state.selectionEnd === "number"
+    && typeof input.setSelectionRange === "function"
+  ) {
+    try {
+      input.setSelectionRange(state.selectionStart, state.selectionEnd);
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
+  if (typeof state.scrollTop === "number" && "scrollTop" in input) {
+    input.scrollTop = state.scrollTop;
+  }
+}
+
 function restoreSourceControlScrollState(states, root = document) {
   if (!Array.isArray(states) || states.length === 0) {
     return;
@@ -2733,6 +2916,30 @@ function restoreSourceControlScrollState(states, root = document) {
     }
 
     const element = panel.querySelectorAll(state.selector)[state.index];
+    if (!(element instanceof HTMLElement)) {
+      continue;
+    }
+
+    if (typeof state.scrollTop === "number") {
+      element.scrollTop = state.scrollTop;
+    }
+    if (typeof state.scrollLeft === "number") {
+      element.scrollLeft = state.scrollLeft;
+    }
+  }
+}
+
+function restoreSettingsScrollState(states, root = document) {
+  if (!Array.isArray(states) || states.length === 0) {
+    return;
+  }
+
+  for (const state of states) {
+    if (!state?.selector) {
+      continue;
+    }
+
+    const element = root.querySelectorAll(state.selector)[state.index];
     if (!(element instanceof HTMLElement)) {
       continue;
     }
@@ -2809,6 +3016,11 @@ function resetSourceControlState({ keepTab = true } = {}) {
     branchSearch: "",
     taskInput: "",
     taskTrayExpanded: false,
+    publishModalVisible: false,
+    publishModalBranchName: "",
+    publishModalRemotes: [],
+    publishModalSelectedRemote: "",
+    publishModalShouldFocus: false,
     submitting: false,
     lastLoadedWorkspaceId: "",
   };
@@ -3039,6 +3251,12 @@ function getSourceControlSummary(snapshot = uiState.sourceControl.snapshot) {
   return snapshot?.summary || null;
 }
 
+function getSourceControlCurrentBranch(snapshot = uiState.sourceControl.snapshot) {
+  return (snapshot?.localBranches || []).find((branch) => branch.isCurrent)?.name
+    || snapshot?.summary?.branch
+    || "";
+}
+
 function getSourceControlSection(key, snapshot = uiState.sourceControl.snapshot) {
   return getSourceControlSections(snapshot).find((section) => section.key === key) || null;
 }
@@ -3066,6 +3284,97 @@ function getSuggestedUpstream(branchName, snapshot = uiState.sourceControl.snaps
   }
 
   return snapshot?.remoteBranches?.[0]?.name || "";
+}
+
+function getSourceControlRemoteOptions(snapshot = uiState.sourceControl.snapshot) {
+  return normalizeSourceControlRemoteOptions(snapshot?.remotes || [], snapshot?.defaultRemote || "");
+}
+
+function getSourceControlDefaultRemote(snapshot = uiState.sourceControl.snapshot) {
+  return getSourceControlRemoteOptions(snapshot).defaultRemote;
+}
+
+async function executeSourceControlPublish(branchName, remoteName = null) {
+  const workspaceId = getSourceControlWorkspaceId();
+  const nextBranchName = String(branchName || "").trim();
+  if (!workspaceId || !bridge.gitPublishBranch) {
+    return null;
+  }
+
+  if (!nextBranchName) {
+    window.alert("Current branch is unavailable.");
+    return null;
+  }
+
+  closeSourceControlPublishModal();
+  return runSourceControlMutation(
+    () => bridge.gitPublishBranch(workspaceId, nextBranchName, remoteName || null),
+    { resetGraphSelection: true },
+  );
+}
+
+async function beginSourceControlPublish(
+  branchName,
+  { remotes = null, defaultRemote = null } = {},
+) {
+  const nextBranchName = String(branchName || "").trim();
+  if (!nextBranchName) {
+    window.alert("Current branch is unavailable.");
+    return null;
+  }
+
+  const remoteOptions = normalizeSourceControlRemoteOptions(
+    remotes === null ? getSourceControlRemoteOptions().remotes : remotes,
+    defaultRemote === null ? getSourceControlDefaultRemote() : defaultRemote,
+  );
+
+  if (!remoteOptions.remotes.length) {
+    window.alert("No remote is configured for this repository.");
+    return null;
+  }
+
+  if (remoteOptions.remotes.length === 1) {
+    return executeSourceControlPublish(
+      nextBranchName,
+      remoteOptions.defaultRemote || remoteOptions.remotes[0].name,
+    );
+  }
+
+  openSourceControlPublishModal({
+    branchName: nextBranchName,
+    remotes: remoteOptions.remotes,
+    defaultRemote: remoteOptions.defaultRemote,
+  });
+  render();
+  return null;
+}
+
+async function submitSourceControlPush() {
+  const workspaceId = getSourceControlWorkspaceId();
+  const summary = getSourceControlSummary();
+  if (!workspaceId || !bridge.gitPush) {
+    return null;
+  }
+
+  if (summary && !summary.upstream && summary.state !== "detached") {
+    return beginSourceControlPublish(getSourceControlCurrentBranch());
+  }
+
+  return runSourceControlMutation(() => bridge.gitPush(workspaceId), {
+    resetGraphSelection: true,
+  });
+}
+
+async function submitSourceControlTaskRecovery() {
+  const recovery = uiState.sourceControl.snapshot?.task?.recovery || null;
+  if (recovery?.kind !== "publish-branch") {
+    return null;
+  }
+
+  return beginSourceControlPublish(recovery.branchName, {
+    remotes: recovery.remotes || [],
+    defaultRemote: recovery.defaultRemote || "",
+  });
 }
 
 async function runSourceControlMutation(runner, { resetGraphSelection = false } = {}) {
@@ -3221,6 +3530,13 @@ async function handleSourceControlAction(target) {
     closeSourceControlRowMenu();
   }
 
+  if (action === "close-scm-publish-modal") {
+    if (closeSourceControlPublishModal()) {
+      render();
+    }
+    return;
+  }
+
   if (!workspaceId && action !== "scm-switch-tab") {
     return;
   }
@@ -3319,7 +3635,7 @@ async function handleSourceControlAction(target) {
       await runSourceControlMutation(() => bridge.gitPull(workspaceId), { resetGraphSelection: true });
       return;
     case "scm-push":
-      await runSourceControlMutation(() => bridge.gitPush(workspaceId), { resetGraphSelection: true });
+      await submitSourceControlPush();
       return;
     case "scm-checkout-branch": {
       const summary = getSourceControlSummary();
@@ -3359,9 +3675,16 @@ async function handleSourceControlAction(target) {
       });
       return;
     case "scm-publish-branch":
-      await runSourceControlMutation(() => bridge.gitPublishBranch(workspaceId, branchName), {
-        resetGraphSelection: true,
-      });
+      await beginSourceControlPublish(branchName);
+      return;
+    case "scm-confirm-publish-branch":
+      await executeSourceControlPublish(
+        uiState.sourceControl.publishModalBranchName,
+        uiState.sourceControl.publishModalSelectedRemote,
+      );
+      return;
+    case "scm-run-task-recovery":
+      await submitSourceControlTaskRecovery();
       return;
     case "scm-set-upstream": {
       const suggested = target.dataset.upstreamName || getSuggestedUpstream(branchName);
@@ -3911,6 +4234,12 @@ function render() {
   const contextRegion = app.querySelector('[data-region="context"]');
   const modalRegion = app.querySelector('[data-region="modal"]');
   bindModalLayerControls(modalRegion);
+  const settingsFocusState = uiState.settingsVisible
+    ? captureSettingsFocusState(modalRegion)
+    : null;
+  const settingsScrollState = uiState.settingsVisible
+    ? captureSettingsScrollState(modalRegion)
+    : null;
   const sourceControlFocusState = uiState.gitPanelVisible
     ? captureSourceControlFocusState(modalRegion)
     : null;
@@ -3970,11 +4299,20 @@ function render() {
     bindSettingsSheetControls(modalRegion);
     syncSettingsActionDom(modalRegion);
   }
+  if (settingsScrollState && uiState.settingsVisible) {
+    restoreSettingsScrollState(settingsScrollState, modalRegion);
+  }
+  if (settingsFocusState && uiState.settingsVisible) {
+    restoreSettingsFocusState(settingsFocusState, modalRegion);
+  }
   if (sourceControlScrollState && uiState.gitPanelVisible) {
     restoreSourceControlScrollState(sourceControlScrollState, modalRegion);
   }
   if (sourceControlFocusState && uiState.gitPanelVisible) {
     restoreSourceControlFocusState(sourceControlFocusState, modalRegion);
+  }
+  if (uiState.gitPanelVisible && uiState.sourceControl.publishModalVisible) {
+    focusSourceControlPublishModal(modalRegion);
   }
   contextRegion.innerHTML =
     uiState.contextMenu && activeWorkspace
@@ -5042,6 +5380,7 @@ function renderGitPanel(workspace) {
                   "Open the panel again once the active workspace finishes loading.",
                 )
         }
+        ${renderSourceControlPublishModal()}
       </section>
     </div>
   `;
@@ -5899,8 +6238,91 @@ function renderSourceControlTaskPanel(task) {
           `
           : ""
       }
+      ${isExpanded ? renderSourceControlTaskRecovery(task) : ""}
       ${isExpanded ? "</div>" : ""}
     </section>
+  `;
+}
+
+function renderSourceControlTaskRecovery(task) {
+  const recovery = task?.recovery || null;
+  if (recovery?.kind !== "publish-branch") {
+    return "";
+  }
+
+  const remoteCount = recovery.remotes?.length || 0;
+  const copy = remoteCount > 1
+    ? "This branch has no upstream yet. Choose a remote and publish it to start tracking future pushes."
+    : "This branch has no upstream yet. Publish it now to start tracking future pushes.";
+
+  return `
+    <div class="workspace-scm-task-recovery">
+      <div class="workspace-scm-task-recovery-copy">
+        <strong>Publish ${escapeHtml(recovery.branchName)}</strong>
+        <span>${escapeHtml(copy)}</span>
+      </div>
+      <button type="button" class="workspace-scm-primary-button" data-action="scm-run-task-recovery">
+        Publish branch
+      </button>
+    </div>
+  `;
+}
+
+function renderSourceControlPublishModal() {
+  if (!uiState.sourceControl.publishModalVisible) {
+    return "";
+  }
+
+  const branchName = uiState.sourceControl.publishModalBranchName;
+  const remotes = uiState.sourceControl.publishModalRemotes || [];
+  const selectedRemote = uiState.sourceControl.publishModalSelectedRemote;
+
+  return `
+    <div class="workspace-scm-inline-modal" data-action="close-scm-publish-modal">
+      <section class="workspace-scm-publish-dialog" role="dialog" aria-modal="true" aria-labelledby="workspace-scm-publish-title">
+        <header class="workspace-scm-publish-head">
+          <div>
+            <p class="workspace-scm-detail-kicker">Publish branch</p>
+            <strong id="workspace-scm-publish-title">${escapeHtml(branchName)}</strong>
+            <span>Choose which remote should track this branch.</span>
+          </div>
+          <button
+            type="button"
+            class="workspace-git-panel-button"
+            data-action="close-scm-publish-modal"
+            aria-label="Close publish branch dialog"
+            title="Close publish branch dialog"
+          >
+            ${renderCloseIcon()}
+          </button>
+        </header>
+        <label class="workspace-scm-publish-field">
+          <span>Remote</span>
+          <select class="workspace-scm-input workspace-scm-select" data-scm-publish-remote>
+            ${remotes
+              .map(
+                (remote) => `
+                  <option
+                    value="${escapeHtml(remote.name)}"
+                    ${remote.name === selectedRemote ? "selected" : ""}
+                  >
+                    ${escapeHtml(remote.name)}${remote.isDefault ? " (default)" : ""}
+                  </option>
+                `,
+              )
+              .join("")}
+          </select>
+        </label>
+        <div class="workspace-scm-publish-actions">
+          <button type="button" class="workspace-scm-ghost-button" data-action="close-scm-publish-modal">
+            Cancel
+          </button>
+          <button type="button" class="workspace-scm-primary-button" data-action="scm-confirm-publish-branch">
+            Publish branch
+          </button>
+        </div>
+      </section>
+    </div>
   `;
 }
 
