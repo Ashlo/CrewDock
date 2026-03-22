@@ -825,16 +825,34 @@ function getTerminalFontSize(snapshot = uiState.snapshot) {
   return normalizeTerminalFontSize(snapshot?.settings?.terminalFontSize);
 }
 
+function hasStoredOpenAiApiKey(snapshot = uiState.snapshot) {
+  return Boolean(snapshot?.settings?.hasStoredOpenAiApiKey);
+}
+
+function hasEnvironmentOpenAiApiKey(snapshot = uiState.snapshot) {
+  return Boolean(snapshot?.settings?.hasEnvironmentOpenAiApiKey);
+}
+
 function createSettingsDraft(snapshot = uiState.snapshot) {
   return {
+    themeId: getActiveThemeId(snapshot),
     interfaceTextScale: getInterfaceTextScale(snapshot),
     terminalFontSize: getTerminalFontSize(snapshot),
+    openAiApiKey: "",
+    hasStoredOpenAiApiKey: hasStoredOpenAiApiKey(snapshot),
+    hasEnvironmentOpenAiApiKey: hasEnvironmentOpenAiApiKey(snapshot),
+    savingOpenAiApiKey: false,
+    applyingAppearance: false,
   };
 }
 
 function syncSettingsDraftFromSnapshot(snapshot = uiState.snapshot) {
   uiState.settingsDraft = createSettingsDraft(snapshot);
   return uiState.settingsDraft;
+}
+
+function getDraftThemeId(snapshot = uiState.snapshot) {
+  return normalizeThemeId(uiState.settingsDraft?.themeId ?? snapshot?.settings?.themeId);
 }
 
 function getDraftInterfaceTextScale(snapshot = uiState.snapshot) {
@@ -846,6 +864,22 @@ function getDraftInterfaceTextScale(snapshot = uiState.snapshot) {
 function getDraftTerminalFontSize(snapshot = uiState.snapshot) {
   return normalizeTerminalFontSize(
     uiState.settingsDraft?.terminalFontSize ?? snapshot?.settings?.terminalFontSize,
+  );
+}
+
+function getDraftOpenAiApiKey() {
+  return uiState.settingsDraft?.openAiApiKey ?? "";
+}
+
+function getDraftHasStoredOpenAiApiKey(snapshot = uiState.snapshot) {
+  return Boolean(
+    uiState.settingsDraft?.hasStoredOpenAiApiKey ?? hasStoredOpenAiApiKey(snapshot),
+  );
+}
+
+function getDraftHasEnvironmentOpenAiApiKey(snapshot = uiState.snapshot) {
+  return Boolean(
+    uiState.settingsDraft?.hasEnvironmentOpenAiApiKey ?? hasEnvironmentOpenAiApiKey(snapshot),
   );
 }
 
@@ -902,9 +936,9 @@ function applySnapshotSettings(snapshot = uiState.snapshot) {
 function applyRenderedSettings(snapshot = uiState.snapshot) {
   const useDraft = uiState.settingsVisible && uiState.settingsDraft;
   applySettingsAppearance(
-    getActiveThemeId(snapshot),
+    useDraft ? getDraftThemeId(snapshot) : getActiveThemeId(snapshot),
     useDraft ? getDraftInterfaceTextScale(snapshot) : getInterfaceTextScale(snapshot),
-    useDraft ? getDraftTerminalFontSize(snapshot) : getTerminalFontSize(snapshot),
+    getTerminalFontSize(snapshot),
   );
 }
 
@@ -915,8 +949,68 @@ function clearSettingsDraft({ restoreSnapshot = false } = {}) {
   }
 }
 
-function closeSettingsSheet() {
+function hideSettingsSheet({ restoreSnapshot = true } = {}) {
+  if (!uiState.settingsVisible && !uiState.settingsDraft) {
+    return;
+  }
+
   uiState.settingsVisible = false;
+  clearSettingsDraft({ restoreSnapshot });
+}
+
+function closeSettingsSheet({ restoreSnapshot = true } = {}) {
+  if (uiState.settingsDraft?.applyingAppearance) {
+    return;
+  }
+
+  hideSettingsSheet({ restoreSnapshot });
+  render();
+}
+
+function hasSettingsAppearanceChanges(snapshot = uiState.snapshot) {
+  if (!uiState.settingsDraft) {
+    return false;
+  }
+
+  return (
+    getDraftThemeId(snapshot) !== getActiveThemeId(snapshot)
+    || getDraftInterfaceTextScale(snapshot) !== getInterfaceTextScale(snapshot)
+    || getDraftTerminalFontSize(snapshot) !== getTerminalFontSize(snapshot)
+  );
+}
+
+function syncSettingsActionDom(root = document) {
+  const sheet = root.querySelector(".settings-sheet");
+  if (!(sheet instanceof HTMLElement) || !uiState.settingsVisible || !uiState.settingsDraft) {
+    return;
+  }
+
+  const isApplying = Boolean(uiState.settingsDraft.applyingAppearance);
+  const hasChanges = hasSettingsAppearanceChanges();
+  const applyButton = sheet.querySelector("[data-settings-apply]");
+  if (applyButton instanceof HTMLButtonElement) {
+    applyButton.disabled = isApplying || !hasChanges;
+    applyButton.textContent = isApplying ? "Applying..." : "Apply changes";
+  }
+
+  const closeButtons = sheet.querySelectorAll("[data-settings-close]");
+  for (const button of closeButtons) {
+    if (button instanceof HTMLButtonElement) {
+      button.disabled = isApplying;
+    }
+  }
+}
+
+function previewTheme(themeId) {
+  if (!uiState.settingsVisible) {
+    return;
+  }
+
+  if (!uiState.settingsDraft) {
+    syncSettingsDraftFromSnapshot();
+  }
+
+  uiState.settingsDraft.themeId = normalizeThemeId(themeId);
   render();
 }
 
@@ -1017,6 +1111,7 @@ function previewInterfaceTextScale(value) {
   uiState.settingsDraft.interfaceTextScale = normalizeInterfaceTextScale(value);
   applyRenderedSettings(uiState.snapshot);
   syncSettingsPreviewDom(document);
+  syncSettingsActionDom(document);
 }
 
 function previewTerminalFontSize(value) {
@@ -1029,28 +1124,126 @@ function previewTerminalFontSize(value) {
   }
 
   uiState.settingsDraft.terminalFontSize = normalizeTerminalFontSize(value);
-  applyRenderedSettings(uiState.snapshot);
   syncSettingsPreviewDom(document);
+  syncSettingsActionDom(document);
 }
 
-async function commitInterfaceTextScale(value) {
-  const interfaceTextScale = normalizeInterfaceTextScale(value);
-  if (interfaceTextScale !== getInterfaceTextScale()) {
-    uiState.snapshot = await bridge.setInterfaceTextScale(interfaceTextScale);
+async function applySettingsDraft() {
+  if (!uiState.settingsVisible) {
+    return;
   }
-  syncSettingsDraftFromSnapshot(uiState.snapshot);
-  applySnapshotSettings(uiState.snapshot);
-  render();
+
+  if (!uiState.settingsDraft) {
+    syncSettingsDraftFromSnapshot();
+  }
+
+  if (!hasSettingsAppearanceChanges(uiState.snapshot)) {
+    return;
+  }
+
+  uiState.settingsDraft.applyingAppearance = true;
+  syncSettingsActionDom(document);
+
+  try {
+    if (bridge.setSettings) {
+      uiState.snapshot = await bridge.setSettings(
+        getDraftThemeId(uiState.snapshot),
+        getDraftInterfaceTextScale(uiState.snapshot),
+        getDraftTerminalFontSize(uiState.snapshot),
+      );
+    } else {
+      if (getDraftThemeId(uiState.snapshot) !== getActiveThemeId(uiState.snapshot)) {
+        uiState.snapshot = await bridge.setTheme(getDraftThemeId(uiState.snapshot));
+      }
+      if (getDraftInterfaceTextScale(uiState.snapshot) !== getInterfaceTextScale(uiState.snapshot)) {
+        uiState.snapshot = await bridge.setInterfaceTextScale(getDraftInterfaceTextScale(uiState.snapshot));
+      }
+      if (getDraftTerminalFontSize(uiState.snapshot) !== getTerminalFontSize(uiState.snapshot)) {
+        uiState.snapshot = await bridge.setTerminalFontSize(getDraftTerminalFontSize(uiState.snapshot));
+      }
+    }
+
+    syncSettingsDraftFromSnapshot(uiState.snapshot);
+    applySnapshotSettings(uiState.snapshot);
+  } catch (error) {
+    reportSourceControlError(error);
+  } finally {
+    if (uiState.settingsDraft) {
+      uiState.settingsDraft.applyingAppearance = false;
+    }
+    render();
+  }
 }
 
-async function commitTerminalFontSize(value) {
-  const terminalFontSize = normalizeTerminalFontSize(value);
-  if (terminalFontSize !== getTerminalFontSize()) {
-    uiState.snapshot = await bridge.setTerminalFontSize(terminalFontSize);
+async function commitOpenAiApiKey() {
+  if (!bridge.setOpenAiApiKey || !uiState.settingsVisible) {
+    return;
   }
-  syncSettingsDraftFromSnapshot(uiState.snapshot);
-  applySnapshotSettings(uiState.snapshot);
+
+  if (!uiState.settingsDraft) {
+    syncSettingsDraftFromSnapshot();
+  }
+
+  const nextKey = getDraftOpenAiApiKey().trim();
+  if (!nextKey) {
+    window.alert("Paste an OpenAI API key first, or use Remove to clear the stored one.");
+    return;
+  }
+
+  uiState.settingsDraft.savingOpenAiApiKey = true;
   render();
+
+  try {
+    uiState.snapshot = await bridge.setOpenAiApiKey(nextKey);
+    syncSettingsDraftFromSnapshot(uiState.snapshot);
+    applySnapshotSettings(uiState.snapshot);
+  } catch (error) {
+    reportSourceControlError(error);
+  } finally {
+    if (uiState.settingsDraft) {
+      uiState.settingsDraft.savingOpenAiApiKey = false;
+    }
+    render();
+  }
+}
+
+async function clearStoredOpenAiApiKey() {
+  if (!bridge.setOpenAiApiKey || !uiState.settingsVisible) {
+    return;
+  }
+
+  const hasStoredKey = getDraftHasStoredOpenAiApiKey();
+  if (!hasStoredKey) {
+    if (uiState.settingsDraft) {
+      uiState.settingsDraft.openAiApiKey = "";
+    }
+    render();
+    return;
+  }
+
+  if (!window.confirm("Remove the stored OpenAI API key from CrewDock settings?")) {
+    return;
+  }
+
+  if (!uiState.settingsDraft) {
+    syncSettingsDraftFromSnapshot();
+  }
+
+  uiState.settingsDraft.savingOpenAiApiKey = true;
+  render();
+
+  try {
+    uiState.snapshot = await bridge.setOpenAiApiKey(null);
+    syncSettingsDraftFromSnapshot(uiState.snapshot);
+    applySnapshotSettings(uiState.snapshot);
+  } catch (error) {
+    reportSourceControlError(error);
+  } finally {
+    if (uiState.settingsDraft) {
+      uiState.settingsDraft.savingOpenAiApiKey = false;
+    }
+    render();
+  }
 }
 
 function bindSettingsSheetControls(root = document) {
@@ -1082,10 +1275,6 @@ function bindSettingsSheetControls(root = document) {
       event.stopPropagation();
       previewInterfaceTextScale(interfaceRange.value);
     });
-    interfaceRange.addEventListener("change", (event) => {
-      event.stopPropagation();
-      void commitInterfaceTextScale(interfaceRange.value);
-    });
   }
 
   const terminalRange = root.querySelector("[data-settings-terminal-range]");
@@ -1094,11 +1283,107 @@ function bindSettingsSheetControls(root = document) {
       event.stopPropagation();
       previewTerminalFontSize(terminalRange.value);
     });
-    terminalRange.addEventListener("change", (event) => {
+  }
+
+  const openAiInput = root.querySelector("[data-settings-openai-api-key-input]");
+  if (openAiInput instanceof HTMLInputElement) {
+    openAiInput.addEventListener("input", (event) => {
       event.stopPropagation();
-      void commitTerminalFontSize(terminalRange.value);
+      if (!uiState.settingsDraft) {
+        syncSettingsDraftFromSnapshot();
+      }
+      uiState.settingsDraft.openAiApiKey = openAiInput.value;
+    });
+    openAiInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      void commitOpenAiApiKey();
     });
   }
+
+  const openAiSaveButton = root.querySelector("[data-settings-openai-save]");
+  if (openAiSaveButton instanceof HTMLButtonElement) {
+    openAiSaveButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void commitOpenAiApiKey();
+    });
+  }
+
+  const openAiClearButton = root.querySelector("[data-settings-openai-clear]");
+  if (openAiClearButton instanceof HTMLButtonElement) {
+    openAiClearButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void clearStoredOpenAiApiKey();
+    });
+  }
+}
+
+function bindModalLayerControls(root = document) {
+  if (!(root instanceof HTMLElement) || root.dataset.modalLayerBound === "true") {
+    return;
+  }
+
+  root.dataset.modalLayerBound = "true";
+  root.addEventListener("click", (event) => {
+    const clickedElement = event.target instanceof Element ? event.target : null;
+    if (!clickedElement) {
+      return;
+    }
+
+    const settingsCloseButton = clickedElement.closest(".settings-sheet-close");
+    if (settingsCloseButton) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeSettingsSheet();
+      return;
+    }
+
+    if (clickedElement.classList.contains("settings-sheet-backdrop")) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeSettingsSheet();
+      return;
+    }
+
+    const gitCloseButton = clickedElement.closest('.workspace-git-panel-button[data-action="close-git-panel"]');
+    if (gitCloseButton) {
+      event.preventDefault();
+      event.stopPropagation();
+      uiState.gitPanelVisible = false;
+      render();
+      return;
+    }
+
+    if (clickedElement.classList.contains("workspace-git-backdrop")) {
+      event.preventDefault();
+      event.stopPropagation();
+      uiState.gitPanelVisible = false;
+      render();
+      return;
+    }
+
+    const quickSwitcherCloseButton = clickedElement.closest(".workspace-quick-switcher-close");
+    if (quickSwitcherCloseButton) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeQuickSwitcher();
+      render();
+      return;
+    }
+
+    if (clickedElement.classList.contains("workspace-quick-switcher-backdrop")) {
+      event.preventDefault();
+      event.stopPropagation();
+      closeQuickSwitcher();
+      render();
+    }
+  });
 }
 
 function syncMountedTerminalAppearance(
@@ -1189,8 +1474,7 @@ async function handleClick(event) {
   }
 
   if (target.dataset.action === "close-settings") {
-    uiState.settingsVisible = false;
-    render();
+    closeSettingsSheet();
     return;
   }
 
@@ -1205,7 +1489,7 @@ async function handleClick(event) {
 
   if (target.dataset.action === "show-launcher") {
     uiState.launcherVisible = true;
-    uiState.settingsVisible = false;
+    hideSettingsSheet();
     uiState.gitPanelVisible = false;
     uiState.activityRailVisible = false;
     closeQuickSwitcher();
@@ -1297,7 +1581,7 @@ async function handleClick(event) {
   }
 
   if (target.dataset.action === "open-workspace") {
-    uiState.settingsVisible = false;
+    hideSettingsSheet();
     uiState.gitPanelVisible = false;
     uiState.activityRailVisible = false;
     closeQuickSwitcher();
@@ -1330,7 +1614,20 @@ async function handleClick(event) {
 
   if (target.dataset.action === "set-theme") {
     const themeId = target.dataset.themeId;
-    if (!themeId || themeId === getActiveThemeId()) {
+    if (!themeId) {
+      return;
+    }
+
+    if (uiState.settingsVisible) {
+      if (normalizeThemeId(themeId) === getDraftThemeId()) {
+        return;
+      }
+
+      previewTheme(themeId);
+      return;
+    }
+
+    if (themeId === getActiveThemeId()) {
       return;
     }
 
@@ -1340,27 +1637,8 @@ async function handleClick(event) {
     return;
   }
 
-  if (target.dataset.action === "set-interface-text-scale") {
-    const interfaceTextScale = normalizeInterfaceTextScale(target.dataset.textScale);
-    if (interfaceTextScale === getInterfaceTextScale()) {
-      return;
-    }
-
-    uiState.snapshot = await bridge.setInterfaceTextScale(interfaceTextScale);
-    applySnapshotSettings(uiState.snapshot);
-    render();
-    return;
-  }
-
-  if (target.dataset.action === "set-terminal-font-size") {
-    const terminalFontSize = normalizeTerminalFontSize(target.dataset.fontSize);
-    if (terminalFontSize === getTerminalFontSize()) {
-      return;
-    }
-
-    uiState.snapshot = await bridge.setTerminalFontSize(terminalFontSize);
-    applySnapshotSettings(uiState.snapshot);
-    render();
+  if (target.dataset.action === "apply-settings") {
+    await applySettingsDraft();
     return;
   }
 
@@ -1401,7 +1679,7 @@ async function handleClick(event) {
       uiState.pendingWorkspaceDraft.paneCount,
     );
     uiState.launcherVisible = false;
-    uiState.settingsVisible = false;
+    hideSettingsSheet();
     uiState.gitPanelVisible = false;
     closeQuickSwitcher();
     uiState.pendingWorkspaceDraft = null;
@@ -1415,7 +1693,7 @@ async function handleClick(event) {
     const workspaceId = target.dataset.workspaceId;
     if (!workspaceId || workspaceId === uiState.snapshot?.activeWorkspaceId) {
       uiState.launcherVisible = false;
-      uiState.settingsVisible = false;
+      hideSettingsSheet();
       markWorkspaceAttentionSeen(workspaceId || null);
       closeQuickSwitcher();
       render();
@@ -1797,8 +2075,7 @@ async function handleKeyDown(event) {
 
   if (uiState.settingsVisible && event.key === "Escape") {
     event.preventDefault();
-    uiState.settingsVisible = false;
-    render();
+    closeSettingsSheet();
     return;
   }
 
@@ -1940,7 +2217,7 @@ async function activateWorkspace(workspaceId) {
   }
 
   uiState.launcherVisible = false;
-  uiState.settingsVisible = false;
+  hideSettingsSheet();
   uiState.gitPanelVisible = keepSourceControlOpen;
   uiState.pendingWorkspaceDraft = null;
   uiState.contextMenu = null;
@@ -1967,7 +2244,7 @@ function openQuickSwitcher() {
     uiState.snapshot.workspaces.findIndex((workspace) => workspace.id === uiState.snapshot?.activeWorkspaceId),
   );
   uiState.quickSwitcherShouldFocus = true;
-  uiState.settingsVisible = false;
+  hideSettingsSheet();
   uiState.gitPanelVisible = false;
   uiState.pendingWorkspaceDraft = null;
   uiState.contextMenu = null;
@@ -2066,7 +2343,7 @@ async function openSourceControlPanel({ force = false } = {}) {
     && uiState.sourceControl.snapshot;
 
   uiState.gitPanelVisible = true;
-  uiState.settingsVisible = false;
+  hideSettingsSheet();
   uiState.activityRailVisible = false;
   closeQuickSwitcher();
   uiState.pendingWorkspaceDraft = null;
@@ -2095,6 +2372,7 @@ function resetSourceControlState({ keepTab = true } = {}) {
     graphLoadingMore: false,
     createBranchName: "",
     createBranchStartPoint: "",
+    generatingCommitMessage: false,
     taskInput: "",
     submitting: false,
     lastLoadedWorkspaceId: "",
@@ -2408,6 +2686,44 @@ async function submitSourceControlCommit({ commitAll = false } = {}) {
   }
 }
 
+async function generateSourceControlCommitMessage() {
+  const workspaceId = getSourceControlWorkspaceId();
+  if (!workspaceId || !bridge.generateGitCommitMessage || uiState.sourceControl.generatingCommitMessage) {
+    return;
+  }
+
+  const existingMessage = uiState.sourceControl.commitMessage.trim();
+  if (
+    existingMessage
+    && !window.confirm("Replace the current commit message with an AI suggestion?")
+  ) {
+    return;
+  }
+
+  const initialMessage = uiState.sourceControl.commitMessage;
+  uiState.sourceControl.generatingCommitMessage = true;
+  render();
+
+  try {
+    const suggestion = await bridge.generateGitCommitMessage(workspaceId);
+    const currentMessage = uiState.sourceControl.commitMessage;
+    if (
+      currentMessage.trim()
+      && currentMessage.trim() !== initialMessage.trim()
+      && !window.confirm("Replace the current commit message with the AI suggestion?")
+    ) {
+      return;
+    }
+
+    uiState.sourceControl.commitMessage = String(suggestion || "").trim();
+  } catch (error) {
+    reportSourceControlError(error);
+  } finally {
+    uiState.sourceControl.generatingCommitMessage = false;
+    render();
+  }
+}
+
 async function submitSourceControlCreateBranch() {
   const workspaceId = getSourceControlWorkspaceId();
   const branchName = uiState.sourceControl.createBranchName.trim();
@@ -2541,6 +2857,9 @@ async function handleSourceControlAction(target) {
       return;
     case "scm-commit-all":
       await submitSourceControlCommit({ commitAll: true });
+      return;
+    case "scm-generate-commit-message":
+      await generateSourceControlCommitMessage();
       return;
     case "scm-fetch":
       await runSourceControlMutation(() => bridge.gitFetch(workspaceId), { resetGraphSelection: true });
@@ -2741,7 +3060,7 @@ function toggleActivityRail(forceVisible = !uiState.activityRailVisible) {
 
   uiState.activityRailVisible = true;
   uiState.activityRailScope = normalizeActivityScope(uiState.activityRailScope);
-  uiState.settingsVisible = false;
+  hideSettingsSheet();
   uiState.gitPanelVisible = false;
   closeQuickSwitcher();
   uiState.pendingWorkspaceDraft = null;
@@ -2953,7 +3272,7 @@ function startWorkspaceRename(workspaceId) {
   uiState.workspaceRenameShouldFocus = true;
   uiState.workspaceRenameSaving = false;
   uiState.launcherVisible = false;
-  uiState.settingsVisible = false;
+  hideSettingsSheet();
   uiState.gitPanelVisible = false;
   uiState.activityRailVisible = false;
   uiState.contextMenu = null;
@@ -3140,6 +3459,7 @@ function render() {
   const activityRegion = app.querySelector('[data-region="activity"]');
   const contextRegion = app.querySelector('[data-region="context"]');
   const modalRegion = app.querySelector('[data-region="modal"]');
+  bindModalLayerControls(modalRegion);
   const sourceControlFocusState = uiState.gitPanelVisible
     ? captureSourceControlFocusState(modalRegion)
     : null;
@@ -3182,9 +3502,19 @@ function render() {
         : uiState.gitPanelVisible && activeWorkspace
           ? renderGitPanel(activeWorkspace)
           : "";
+  modalRegion.classList.toggle(
+    "is-active",
+    Boolean(
+      uiState.quickSwitcherVisible
+      || uiState.settingsVisible
+      || uiState.pendingWorkspaceDraft
+      || (uiState.gitPanelVisible && activeWorkspace),
+    ),
+  );
   if (uiState.settingsVisible) {
     syncSettingsPreviewDom(modalRegion);
     bindSettingsSheetControls(modalRegion);
+    syncSettingsActionDom(modalRegion);
   }
   if (sourceControlFocusState && uiState.gitPanelVisible) {
     restoreSourceControlFocusState(sourceControlFocusState, modalRegion);
@@ -3713,9 +4043,13 @@ function normalizeWheelDelta(event, tabs) {
 }
 
 function renderSettingsSheet(snapshot) {
-  const activeThemeId = getActiveThemeId(snapshot);
+  const activeThemeId = getDraftThemeId(snapshot);
   const interfaceTextScale = getDraftInterfaceTextScale(snapshot);
   const terminalFontSize = getDraftTerminalFontSize(snapshot);
+  const hasStoredKey = getDraftHasStoredOpenAiApiKey(snapshot);
+  const hasEnvironmentKey = getDraftHasEnvironmentOpenAiApiKey(snapshot);
+  const hasAppearanceChanges = hasSettingsAppearanceChanges(snapshot);
+  const isApplyingAppearance = Boolean(uiState.settingsDraft?.applyingAppearance);
   const themes = Object.values(THEME_REGISTRY);
   const primaryModifier = getPrimaryModifierLabel();
   const activeSection = normalizeSettingsSection(uiState.settingsSection);
@@ -3734,7 +4068,7 @@ function renderSettingsSheet(snapshot) {
             <h2 id="settings-title">${sectionTitle}</h2>
             <p class="settings-sheet-copy">${sectionCopy}</p>
           </div>
-          <button class="settings-sheet-close" data-action="close-settings" aria-label="Close settings">
+          <button class="settings-sheet-close" type="button" data-action="close-settings" data-settings-close aria-label="Close settings">
             ${renderCloseIcon()}
           </button>
         </header>
@@ -3795,6 +4129,10 @@ function renderSettingsSheet(snapshot) {
                     preview: renderTerminalTextPreview(),
                   })}
                 </div>
+                ${renderSettingsAiCard({
+                  hasStoredKey,
+                  hasEnvironmentKey,
+                })}
                 <div class="settings-theme-grid">
                   ${themes.map((theme) => renderThemeCard(theme, activeThemeId)).join("")}
                 </div>
@@ -3806,6 +4144,31 @@ function renderSettingsSheet(snapshot) {
               </section>
             `}
         </div>
+        <footer class="settings-sheet-footer">
+          <p class="settings-sheet-footer-copy">
+            Preview workbench changes here. Apply keeps them, and close discards anything still in draft.
+          </p>
+          <div class="settings-sheet-actions">
+            <button
+              class="settings-ai-button"
+              type="button"
+              data-action="close-settings"
+              data-settings-close
+              ${isApplyingAppearance ? "disabled" : ""}
+            >
+              Cancel
+            </button>
+            <button
+              class="settings-ai-button settings-ai-button-primary"
+              type="button"
+              data-action="apply-settings"
+              data-settings-apply
+              ${(!hasAppearanceChanges || isApplyingAppearance) ? "disabled" : ""}
+            >
+              ${isApplyingAppearance ? "Applying..." : "Apply changes"}
+            </button>
+          </div>
+        </footer>
       </section>
     </div>
   `;
@@ -4038,6 +4401,70 @@ function renderTerminalTextPreview() {
   `;
 }
 
+function renderSettingsAiCard({ hasStoredKey, hasEnvironmentKey }) {
+  const draftValue = getDraftOpenAiApiKey();
+  const isSaving = Boolean(uiState.settingsDraft?.savingOpenAiApiKey);
+  const statusLabel = hasStoredKey
+    ? "Saved locally"
+    : hasEnvironmentKey
+      ? "Using env"
+      : "Not set";
+  const statusTone = hasStoredKey || hasEnvironmentKey ? "is-active" : "";
+  const saveDisabled = isSaving || !draftValue.trim();
+  const clearDisabled = isSaving || !hasStoredKey;
+  const placeholder = hasStoredKey
+    ? "Stored locally. Paste a new key to replace it."
+    : "Paste OpenAI API key";
+  const note = hasStoredKey
+    ? "CrewDock will use the key saved here for AI commit messages."
+    : hasEnvironmentKey
+      ? "CrewDock is currently falling back to OPENAI_API_KEY from the launch environment."
+      : "Used for AI commit message generation in Source Control. Stored locally on this machine.";
+
+  return `
+    <section class="settings-ai-card">
+      <div class="settings-ai-head">
+        <div>
+          <p class="settings-panel-kicker">AI commit messages</p>
+          <h4 class="settings-adjustment-title">OpenAI API key</h4>
+          <p class="settings-adjustment-copy">${escapeHtml(note)}</p>
+        </div>
+        <span class="settings-ai-status ${statusTone}">${escapeHtml(statusLabel)}</span>
+      </div>
+      <div class="settings-ai-controls">
+        <input
+          class="settings-ai-input"
+          type="password"
+          value="${escapeHtml(draftValue)}"
+          data-settings-openai-api-key-input
+          placeholder="${escapeHtml(placeholder)}"
+          autocomplete="off"
+          autocapitalize="off"
+          spellcheck="false"
+        />
+        <div class="settings-ai-actions">
+          <button
+            type="button"
+            class="settings-ai-button settings-ai-button-primary"
+            data-settings-openai-save
+            ${saveDisabled ? "disabled" : ""}
+          >
+            ${isSaving ? "Saving..." : "Save key"}
+          </button>
+          <button
+            type="button"
+            class="settings-ai-button"
+            data-settings-openai-clear
+            ${clearDisabled ? "disabled" : ""}
+          >
+            Remove
+          </button>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
 function renderThemeCard(theme, activeThemeId) {
   const activeClass = theme.id === activeThemeId ? "is-active" : "";
   const swatches = theme.preview
@@ -4259,6 +4686,7 @@ function renderSourceControlChangesTab(snapshot) {
   const stagedPaths = getSourceControlSectionPaths("staged", snapshot);
   const commitDisabled = !hasStagedSourceControlChanges(snapshot) || uiState.sourceControl.submitting;
   const commitAllDisabled = hasStagedSourceControlChanges(snapshot) || !hasPendingSourceControlChanges(snapshot) || uiState.sourceControl.submitting;
+  const generateDisabled = !hasPendingSourceControlChanges(snapshot) || uiState.sourceControl.generatingCommitMessage;
 
   return `
     <div class="workspace-scm-main workspace-scm-main-changes">
@@ -4284,6 +4712,15 @@ function renderSourceControlChangesTab(snapshot) {
               ${renderSourceControlCountBadges(snapshot.summary)}
             </div>
             <div class="workspace-scm-action-row">
+              <button
+                type="button"
+                class="workspace-scm-ghost-button"
+                data-action="scm-generate-commit-message"
+                title="Generate with AI from staged changes when present, otherwise all pending changes."
+                ${generateDisabled ? "disabled" : ""}
+              >
+                ${uiState.sourceControl.generatingCommitMessage ? "Generating..." : "Generate"}
+              </button>
               <button
                 type="button"
                 class="workspace-scm-primary-button"
@@ -4316,7 +4753,7 @@ function renderSourceControlChangesTab(snapshot) {
               }
             </div>
           </div>
-          <p class="workspace-scm-commit-hint">${escapeHtml(getPrimaryModifierLabel())}+Enter commits staged changes.</p>
+          <p class="workspace-scm-commit-hint">${escapeHtml(getPrimaryModifierLabel())}+Enter commits staged changes. AI generation uses <code>OPENAI_API_KEY</code> and staged changes when present.</p>
         </div>
         <div class="workspace-scm-section-list">
           ${
@@ -5874,7 +6311,7 @@ async function executeLauncherCommand(rawValue) {
     uiState.launcherCommandValue = "";
     if (result.openPath) {
       uiState.launcherVisible = true;
-      uiState.settingsVisible = false;
+      hideSettingsSheet();
       uiState.pendingWorkspaceDraft = createPendingWorkspaceDraft(
         result.openPath,
         uiState.snapshot?.launcher?.presets,

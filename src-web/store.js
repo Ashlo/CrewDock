@@ -38,6 +38,7 @@ export function createUiState() {
       createBranchName: "",
       createBranchStartPoint: "",
       commitMessage: "",
+      generatingCommitMessage: false,
       branchSearch: "",
       taskInput: "",
       submitting: false,

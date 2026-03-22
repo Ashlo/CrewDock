@@ -21,10 +21,18 @@ export function createBridge({
     return {
       getAppSnapshot: () => tauriApi.core.invoke("get_app_snapshot"),
       setTheme: (themeId) => tauriApi.core.invoke("set_theme", { themeId }),
+      setSettings: (themeId, interfaceTextScale, terminalFontSize) =>
+        tauriApi.core.invoke("set_settings", {
+          themeId,
+          interfaceTextScale,
+          terminalFontSize,
+        }),
       setInterfaceTextScale: (interfaceTextScale) =>
         tauriApi.core.invoke("set_interface_text_scale", { interfaceTextScale }),
       setTerminalFontSize: (terminalFontSize) =>
         tauriApi.core.invoke("set_terminal_font_size", { terminalFontSize }),
+      setOpenAiApiKey: (openaiApiKey) =>
+        tauriApi.core.invoke("set_openai_api_key", { openaiApiKey }),
       createWorkspace: (path, paneCount) =>
         tauriApi.core.invoke("create_workspace", { path, paneCount }),
       renameWorkspace: (workspaceId, name) =>
@@ -43,6 +51,8 @@ export function createBridge({
         tauriApi.core.invoke("git_unstage_paths", { workspaceId, paths }),
       gitDiscardPaths: (workspaceId, paths) =>
         tauriApi.core.invoke("git_discard_paths", { workspaceId, paths }),
+      generateGitCommitMessage: (workspaceId) =>
+        tauriApi.core.invoke("generate_git_commit_message", { workspaceId }),
       gitCommit: (workspaceId, message, commitAll = false) =>
         tauriApi.core.invoke("git_commit", { workspaceId, message, commitAll }),
       gitCheckoutBranch: (workspaceId, branchName) =>
@@ -164,6 +174,8 @@ function createMockBridge({
     themeId: defaultThemeId,
     interfaceTextScale: 1,
     terminalFontSize: 13.5,
+    hasStoredOpenAiApiKey: false,
+    hasEnvironmentOpenAiApiKey: false,
   };
 
   let workspaceCounter = 0;
@@ -457,6 +469,31 @@ function createMockBridge({
     };
   }
 
+  function generateMockCommitMessage(workspace) {
+    const files = workspace?.gitDetail?.files || [];
+    if (!files.length) {
+      return "chore: refresh workspace state";
+    }
+
+    const primary = files[0]?.path?.split("/").pop() || "workspace";
+    const touchesUi = files.some((file) => file.path?.startsWith("src-web/"));
+    const touchesCore = files.some((file) => file.path?.startsWith("src-tauri/"));
+
+    if (touchesUi && touchesCore) {
+      return `refine source control across ui and backend`;
+    }
+
+    if (touchesUi) {
+      return `polish ${primary.replace(/\.[^.]+$/, "")} source control ui`;
+    }
+
+    if (touchesCore) {
+      return `update ${primary.replace(/\.[^.]+$/, "")} git integration`;
+    }
+
+    return `update ${primary.replace(/\.[^.]+$/, "")}`;
+  }
+
   return {
     getAppSnapshot: async () => emitState(),
     listenState: async (handler) => {
@@ -481,12 +518,26 @@ function createMockBridge({
       settings.themeId = themeId;
       return emitState();
     },
+    setSettings: async (themeId, interfaceTextScale, terminalFontSize) => {
+      if (!themeRegistry[themeId]) {
+        throw new Error("theme not found");
+      }
+
+      settings.themeId = themeId;
+      settings.interfaceTextScale = Number(interfaceTextScale) || 1;
+      settings.terminalFontSize = Number(terminalFontSize) || 13.5;
+      return emitState();
+    },
     setInterfaceTextScale: async (interfaceTextScale) => {
       settings.interfaceTextScale = Number(interfaceTextScale) || 1;
       return emitState();
     },
     setTerminalFontSize: async (terminalFontSize) => {
       settings.terminalFontSize = Number(terminalFontSize) || 13.5;
+      return emitState();
+    },
+    setOpenAiApiKey: async (openaiApiKey) => {
+      settings.hasStoredOpenAiApiKey = Boolean(String(openaiApiKey || "").trim());
       return emitState();
     },
     openDirectory: async (defaultPath) => {
@@ -573,6 +624,13 @@ function createMockBridge({
         workspace.gitDetail.files = workspace.gitDetail.files.filter((file) => !paths.includes(file.path));
       }
       return buildMockSourceControl(workspace);
+    },
+    generateGitCommitMessage: async (workspaceId) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      if (!workspace) {
+        throw new Error("workspace not found");
+      }
+      return generateMockCommitMessage(workspace);
     },
     gitCommit: async (workspaceId, message) => {
       const workspace = workspaces.find((entry) => entry.id === workspaceId);

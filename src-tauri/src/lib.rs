@@ -31,7 +31,8 @@ use events::emit_snapshot;
 use persistence::resolve_persistence_path;
 use session_manager::{prepare_workspace_launch, spawn_pane_jobs, LiveSession, PaneJob};
 use source_control::{
-    discard_paths, git_task_write_stdin as write_git_task_input,
+    build_commit_message_generation_request, discard_paths, generate_commit_message_with_openai,
+    git_task_write_stdin as write_git_task_input,
     load_workspace_git_commit_detail as build_workspace_git_commit_detail,
     load_workspace_git_diff as build_workspace_git_diff,
     load_workspace_source_control as build_workspace_source_control, stage_paths, start_git_task,
@@ -82,6 +83,7 @@ struct SettingsRecord {
     theme_id: ThemeId,
     interface_text_scale: f64,
     terminal_font_size: f64,
+    openai_api_key: Option<String>,
 }
 
 impl Default for SettingsRecord {
@@ -90,6 +92,7 @@ impl Default for SettingsRecord {
             theme_id: ThemeId::default(),
             interface_text_scale: DEFAULT_INTERFACE_TEXT_SCALE,
             terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
+            openai_api_key: None,
         }
     }
 }
@@ -153,6 +156,8 @@ impl RuntimeState {
                 theme_id: self.settings.theme_id,
                 interface_text_scale: self.settings.interface_text_scale,
                 terminal_font_size: self.settings.terminal_font_size,
+                has_stored_openai_api_key: self.settings.openai_api_key.is_some(),
+                has_environment_openai_api_key: has_openai_api_key_in_environment(),
             },
             activity: persistence::build_activity_snapshot(self),
             workspaces: self
@@ -271,6 +276,10 @@ struct SettingsSnapshot {
     theme_id: ThemeId,
     interface_text_scale: f64,
     terminal_font_size: f64,
+    #[serde(rename = "hasStoredOpenAiApiKey")]
+    has_stored_openai_api_key: bool,
+    #[serde(rename = "hasEnvironmentOpenAiApiKey")]
+    has_environment_openai_api_key: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -507,6 +516,24 @@ fn normalize_terminal_font_size(value: f64) -> f64 {
     value.clamp(MIN_TERMINAL_FONT_SIZE, MAX_TERMINAL_FONT_SIZE)
 }
 
+fn normalize_optional_openai_api_key(value: Option<String>) -> Option<String> {
+    value.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn has_openai_api_key_in_environment() -> bool {
+    env::var("OPENAI_API_KEY")
+        .ok()
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 enum PersistedPaneLayout {
@@ -741,6 +768,33 @@ fn complete_launcher_input(
 }
 
 #[tauri::command]
+fn set_settings(
+    theme_id: String,
+    interface_text_scale: f64,
+    terminal_font_size: f64,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let snapshot = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        let theme_id = ThemeId::parse(&theme_id).ok_or_else(|| "theme not found".to_string())?;
+        runtime.settings.theme_id = theme_id;
+        runtime.settings.interface_text_scale =
+            normalize_interface_text_scale(interface_text_scale);
+        runtime.settings.terminal_font_size = normalize_terminal_font_size(terminal_font_size);
+        runtime.persist_to_disk()?;
+        runtime.build_snapshot()
+    };
+
+    emit_snapshot(&app, &snapshot)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
 fn set_theme(
     theme_id: String,
     state: State<'_, AppState>,
@@ -797,6 +851,27 @@ fn set_terminal_font_size(
             .map_err(|_| "failed to acquire application state".to_string())?;
 
         runtime.settings.terminal_font_size = normalize_terminal_font_size(terminal_font_size);
+        runtime.persist_to_disk()?;
+        runtime.build_snapshot()
+    };
+
+    emit_snapshot(&app, &snapshot)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn set_openai_api_key(
+    openai_api_key: Option<String>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let snapshot = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        runtime.settings.openai_api_key = normalize_optional_openai_api_key(openai_api_key);
         runtime.persist_to_disk()?;
         runtime.build_snapshot()
     };
@@ -987,6 +1062,22 @@ fn git_commit(
         "Commit".to_string(),
         vec!["commit".to_string(), "-m".to_string(), message],
     )
+}
+
+#[tauri::command]
+async fn generate_git_commit_message(
+    workspace_id: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let request = {
+        let runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+        build_commit_message_generation_request(&runtime, &workspace_id)?
+    };
+
+    generate_commit_message_with_openai(request).await
 }
 
 #[tauri::command]
@@ -1761,7 +1852,13 @@ fn collect_git_detail_with_binary(git_binary: &str, workspace_path: &Path) -> Gi
     let status_output = match run_git_command(
         git_binary,
         workspace_path,
-        &["status", "--porcelain=v2", "--branch", "-z"],
+        &[
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "-z",
+            "--untracked-files=all",
+        ],
     ) {
         Ok(output) => output,
         Err(error) => {
@@ -2590,9 +2687,11 @@ pub fn run() {
             create_workspace,
             rename_workspace,
             complete_launcher_input,
+            set_settings,
             set_theme,
             set_interface_text_scale,
             set_terminal_font_size,
+            set_openai_api_key,
             refresh_workspace_git_status,
             load_workspace_source_control,
             load_workspace_git_diff,
@@ -2600,6 +2699,7 @@ pub fn run() {
             git_stage_paths,
             git_unstage_paths,
             git_discard_paths,
+            generate_git_commit_message,
             git_commit,
             git_checkout_branch,
             git_create_branch,
@@ -2734,6 +2834,7 @@ mod tests {
         assert_eq!(persisted.settings.theme_id.as_deref(), Some("one-dark"));
         assert_eq!(persisted.settings.interface_text_scale, Some(1.0));
         assert_eq!(persisted.settings.terminal_font_size, Some(13.5));
+        assert_eq!(persisted.settings.openai_api_key, None);
     }
 
     #[test]
@@ -2791,6 +2892,28 @@ mod tests {
 
         assert_eq!(runtime.settings.interface_text_scale, 1.08);
         assert_eq!(runtime.settings.terminal_font_size, 15.25);
+    }
+
+    #[test]
+    fn persisted_openai_api_key_is_restored_from_disk() {
+        let fixture = TestWorkspace::new();
+        let persistence_path = fixture.root_dir().join("workspaces.json");
+        fs::write(
+            &persistence_path,
+            r#"{"settings":{"openAiApiKey":"sk-test-123"},"workspaces":[]}"#,
+        )
+        .expect("should write persisted state");
+
+        let mut runtime = RuntimeState::seeded();
+        runtime
+            .load_persisted_from_disk(persistence_path)
+            .expect("should load persisted state");
+
+        assert_eq!(
+            runtime.settings.openai_api_key.as_deref(),
+            Some("sk-test-123")
+        );
+        assert!(runtime.build_snapshot().settings.has_stored_openai_api_key);
     }
 
     #[test]

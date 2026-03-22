@@ -104,6 +104,7 @@ body,
 
 html {
   font-size: calc(16px * var(--ui-text-scale));
+  transition: font-size 140ms ease;
 }
 
 body {
@@ -994,6 +995,10 @@ button {
   inset: 0;
   pointer-events: none;
   z-index: 30;
+}
+
+.workspace-modal-layer.is-active {
+  pointer-events: auto;
 }
 
 .workspace-context-layer {
@@ -1939,6 +1944,13 @@ button {
   line-height: 1.45;
 }
 
+.settings-sheet-footer-copy {
+  margin: 0;
+  color: var(--surface-soft-text);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
 .settings-sheet-close {
   width: 30px;
   height: 30px;
@@ -1971,6 +1983,22 @@ button {
   grid-template-columns: 156px minmax(0, 1fr);
   gap: 22px;
   min-height: 0;
+}
+
+.settings-sheet-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding-top: 4px;
+}
+
+.settings-sheet-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .settings-nav,
@@ -2053,6 +2081,113 @@ button {
   background: rgba(255, 255, 255, 0.02);
 }
 
+.settings-ai-card {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.settings-ai-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-ai-status {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--surface-soft-text);
+  font-size: 0.72rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.settings-ai-status.is-active {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 24%, rgba(255, 255, 255, 0.06));
+  background: color-mix(in srgb, var(--accent-soft) 74%, rgba(255, 255, 255, 0.03));
+}
+
+.settings-ai-controls {
+  display: grid;
+  gap: 10px;
+}
+
+.settings-ai-input {
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  padding: 0 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(0, 0, 0, 0.14);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.82rem;
+  outline: none;
+  transition:
+    border-color 140ms ease,
+    background 140ms ease;
+}
+
+.settings-ai-input:focus {
+  border-color: color-mix(in srgb, var(--accent) 26%, rgba(255, 255, 255, 0.08));
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.settings-ai-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.settings-ai-button {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 10px;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.025);
+  color: var(--surface-soft-text);
+  font-size: 0.74rem;
+  font-weight: 600;
+  transition:
+    border-color 140ms ease,
+    background 140ms ease,
+    color 140ms ease;
+}
+
+.settings-ai-button:hover {
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.055);
+  color: var(--control-text-strong);
+}
+
+.settings-ai-button:disabled {
+  opacity: 0.42;
+  cursor: default;
+}
+
+.settings-ai-button-primary {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 22%, rgba(255, 255, 255, 0.08));
+  background: color-mix(in srgb, var(--accent-soft) 72%, rgba(255, 255, 255, 0.02));
+}
+
 .settings-adjustment-head {
   display: flex;
   align-items: flex-start;
@@ -2088,9 +2223,32 @@ button {
 }
 
 .settings-adjustment-range-shell {
+  position: relative;
   display: grid;
   gap: 8px;
   --settings-adjustment-progress: 50%;
+}
+
+.settings-adjustment-range-shell::before,
+.settings-adjustment-range-shell::after {
+  content: "";
+  position: absolute;
+  top: 5px;
+  left: 0;
+  height: 6px;
+  border-radius: 999px;
+  pointer-events: none;
+}
+
+.settings-adjustment-range-shell::before {
+  right: 0;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.settings-adjustment-range-shell::after {
+  width: var(--settings-adjustment-progress);
+  background: color-mix(in srgb, var(--accent) 72%, white 8%);
+  transition: width 120ms ease;
 }
 
 .settings-adjustment-range {
@@ -2098,6 +2256,8 @@ button {
   height: 16px;
   margin: 0;
   padding: 0;
+  position: relative;
+  z-index: 1;
   appearance: none;
   -webkit-appearance: none;
   border: 0;
@@ -2110,14 +2270,7 @@ button {
 .settings-adjustment-range::-webkit-slider-runnable-track {
   height: 6px;
   border-radius: 999px;
-  background:
-    linear-gradient(
-      90deg,
-      color-mix(in srgb, var(--accent) 72%, white 8%) 0%,
-      color-mix(in srgb, var(--accent) 72%, white 8%) var(--settings-adjustment-progress),
-      rgba(255, 255, 255, 0.08) var(--settings-adjustment-progress),
-      rgba(255, 255, 255, 0.08) 100%
-    );
+  background: transparent;
 }
 
 .settings-adjustment-range::-webkit-slider-thumb {
@@ -2146,13 +2299,13 @@ button {
 .settings-adjustment-range::-moz-range-track {
   height: 6px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
+  background: transparent;
 }
 
 .settings-adjustment-range::-moz-range-progress {
   height: 6px;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--accent) 72%, white 8%);
+  background: transparent;
 }
 
 .settings-adjustment-range-labels {
@@ -2998,6 +3151,11 @@ button {
 
 .workspace-scm-commit-hint {
   margin: 0;
+}
+
+.workspace-scm-commit-hint code {
+  font: inherit;
+  color: var(--text);
 }
 
 .workspace-scm-count-badge {
@@ -4294,7 +4452,8 @@ button {
   }
 
   .settings-sheet-header,
-  .settings-panel-intro {
+  .settings-panel-intro,
+  .settings-sheet-footer {
     flex-direction: column;
     align-items: stretch;
   }
@@ -4308,6 +4467,10 @@ button {
   .settings-panel {
     padding: 14px;
     border-radius: 18px;
+  }
+
+  .settings-sheet-actions {
+    justify-content: flex-start;
   }
 
   .workspace-modal {

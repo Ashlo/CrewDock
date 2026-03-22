@@ -8,7 +8,7 @@ use std::{
 };
 
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::AppHandle;
 
 use crate::{
@@ -21,6 +21,20 @@ use crate::{
 const GRAPH_PAGE_SIZE: usize = 120;
 const MAX_GIT_TASK_OUTPUT_BYTES: usize = 96 * 1024;
 const MAX_GIT_DIFF_BYTES: usize = 256 * 1024;
+const MAX_COMMIT_MESSAGE_CONTEXT_BYTES: usize = 48 * 1024;
+const DEFAULT_OPENAI_MODEL: &str = "gpt-5-mini";
+const OPENAI_RESPONSES_URL: &str = "https://api.openai.com/v1/responses";
+
+pub(crate) struct CommitMessageGenerationRequest {
+    api_key: String,
+    model: String,
+    prompt: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GeneratedCommitMessagePayload {
+    message: String,
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -308,6 +322,184 @@ pub(crate) fn load_workspace_git_commit_detail(
         ],
     )?;
     parse_commit_detail(&output)
+}
+
+pub(crate) fn build_commit_message_generation_request(
+    runtime: &RuntimeState,
+    workspace_id: &str,
+) -> Result<CommitMessageGenerationRequest, String> {
+    let workspace = runtime
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.id == workspace_id)
+        .ok_or_else(|| "workspace not found".to_string())?;
+    let detail = collect_git_detail(Path::new(&workspace.path));
+    let repo_root = detail
+        .repo_root
+        .as_deref()
+        .map(PathBuf::from)
+        .ok_or_else(|| {
+            detail
+                .summary
+                .message
+                .unwrap_or_else(|| "repository not found".to_string())
+        })?;
+
+    let use_staged_scope = detail.summary.counts.staged > 0;
+    let scoped_files: Vec<GitFileSnapshot> = detail
+        .files
+        .iter()
+        .filter(|file| file_matches_commit_generation_scope(file, use_staged_scope))
+        .cloned()
+        .collect();
+
+    if scoped_files.is_empty() {
+        return Err(
+            "No Git changes are available to summarize. Stage files first or make working tree changes."
+                .to_string(),
+        );
+    }
+
+    let file_summary = scoped_files
+        .iter()
+        .map(format_commit_generation_file_line)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let diff_stat = build_commit_generation_diff_stat(&repo_root, &scoped_files, use_staged_scope)?;
+    let diff_patch = build_commit_generation_patch(&repo_root, &scoped_files, use_staged_scope)?;
+    let (diff_patch, _) = truncate_git_output(&diff_patch, MAX_COMMIT_MESSAGE_CONTEXT_BYTES);
+    let scope_label = if use_staged_scope {
+        "staged changes only"
+    } else {
+        "all pending changes"
+    };
+    let branch = detail.summary.branch.as_deref().unwrap_or("(detached)");
+    let upstream = detail.summary.upstream.as_deref().unwrap_or("none");
+    let workspace_relative_path = detail.workspace_relative_path.as_deref().unwrap_or(".");
+
+    let prompt = format!(
+        concat!(
+            "Generate a concise Git commit message for this repository state.\n\n",
+            "Repository path: {repo_root}\n",
+            "Workspace scope: {workspace_relative_path}\n",
+            "Branch: {branch}\n",
+            "Upstream: {upstream}\n",
+            "Commit scope: {scope_label}\n\n",
+            "Changed files:\n{file_summary}\n\n",
+            "Diff stat:\n{diff_stat}\n\n",
+            "Patch excerpt:\n{diff_patch}\n"
+        ),
+        repo_root = repo_root.display(),
+        workspace_relative_path = workspace_relative_path,
+        branch = branch,
+        upstream = upstream,
+        scope_label = scope_label,
+        file_summary = file_summary,
+        diff_stat = if diff_stat.trim().is_empty() {
+            "(no diff stat available)"
+        } else {
+            diff_stat.trim()
+        },
+        diff_patch = if diff_patch.trim().is_empty() {
+            "(no patch available)"
+        } else {
+            diff_patch.trim()
+        },
+    );
+
+    Ok(CommitMessageGenerationRequest {
+        api_key: runtime
+            .settings
+            .openai_api_key
+            .clone()
+            .or_else(|| {
+                env::var("OPENAI_API_KEY")
+                    .ok()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            })
+            .ok_or_else(|| {
+                "Set an OpenAI API key in Settings or via OPENAI_API_KEY to enable AI commit message generation."
+                    .to_string()
+            })?,
+        model: env::var("CREWDOCK_OPENAI_MODEL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| DEFAULT_OPENAI_MODEL.to_string()),
+        prompt,
+    })
+}
+
+pub(crate) async fn generate_commit_message_with_openai(
+    request: CommitMessageGenerationRequest,
+) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let mut builder = client
+        .post(OPENAI_RESPONSES_URL)
+        .bearer_auth(&request.api_key)
+        .header("Content-Type", "application/json");
+
+    if let Ok(project) = env::var("OPENAI_PROJECT").map(|value| value.trim().to_string()) {
+        if !project.is_empty() {
+            builder = builder.header("OpenAI-Project", project);
+        }
+    }
+
+    if let Ok(organization) = env::var("OPENAI_ORGANIZATION").map(|value| value.trim().to_string())
+    {
+        if !organization.is_empty() {
+            builder = builder.header("OpenAI-Organization", organization);
+        }
+    }
+
+    let response = builder
+        .json(&serde_json::json!({
+            "model": request.model,
+            "instructions": concat!(
+                "You write Git commit messages for a desktop developer tool. ",
+                "Return JSON with exactly one key named \"message\". ",
+                "Use imperative mood. Prefer a single subject line under 72 characters. ",
+                "Only include a blank line and up to two body bullet lines if the diff clearly spans multiple concerns. ",
+                "Do not use markdown fences, quotes, or commentary outside the JSON object."
+            ),
+            "text": {
+                "format": {
+                    "type": "json_object"
+                }
+            },
+            "input": request.prompt
+        }))
+        .send()
+        .await
+        .map_err(|error| format!("failed to reach OpenAI: {error}"))?;
+
+    let status = response.status();
+    let payload: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|error| format!("failed to decode OpenAI response: {error}"))?;
+
+    if !status.is_success() {
+        let message = payload
+            .get("error")
+            .and_then(|error| error.get("message"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("OpenAI request failed with status {status}"));
+        return Err(message);
+    }
+
+    let raw_text = extract_openai_response_text(&payload)
+        .ok_or_else(|| "OpenAI did not return commit message text.".to_string())?;
+    let parsed: GeneratedCommitMessagePayload = serde_json::from_str(raw_text.trim())
+        .map_err(|error| format!("failed to parse AI commit message payload: {error}"))?;
+    let message = parsed.message.trim();
+    if message.is_empty() {
+        return Err("OpenAI returned an empty commit message.".to_string());
+    }
+
+    Ok(message.to_string())
 }
 
 pub(crate) fn stage_paths(
@@ -732,7 +924,7 @@ fn load_untracked_diff(repo_root: &Path, path: &str) -> Result<String, String> {
     }
     let output = ProcessCommand::new("git")
         .args(["diff", "--no-index", "--", "/dev/null"])
-        .arg(&absolute)
+        .arg(path)
         .current_dir(repo_root)
         .output()
         .map_err(|error| format!("failed to run git diff --no-index: {error}"))?;
@@ -1040,6 +1232,117 @@ fn refresh_workspace_cache(runtime: &mut RuntimeState, workspace_id: &str) -> Re
     Ok(())
 }
 
+fn file_matches_commit_generation_scope(file: &GitFileSnapshot, use_staged_scope: bool) -> bool {
+    if use_staged_scope {
+        file.index_status.is_some()
+    } else {
+        true
+    }
+}
+
+fn build_commit_generation_diff_stat(
+    repo_root: &Path,
+    files: &[GitFileSnapshot],
+    use_staged_scope: bool,
+) -> Result<String, String> {
+    let tracked_paths = files
+        .iter()
+        .filter(|file| file.kind != crate::GitFileKind::Untracked)
+        .map(|file| file.path.as_str())
+        .collect::<Vec<_>>();
+    if tracked_paths.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut args = vec!["diff"];
+    if use_staged_scope {
+        args.push("--cached");
+    }
+    args.push("--stat=160,120");
+    args.push("--no-color");
+    args.push("--");
+    args.extend(tracked_paths.iter().copied());
+
+    run_git_capture(repo_root, &args)
+}
+
+fn build_commit_generation_patch(
+    repo_root: &Path,
+    files: &[GitFileSnapshot],
+    use_staged_scope: bool,
+) -> Result<String, String> {
+    let tracked_paths = files
+        .iter()
+        .filter(|file| file.kind != crate::GitFileKind::Untracked)
+        .map(|file| file.path.as_str())
+        .collect::<Vec<_>>();
+    let mut sections = Vec::new();
+
+    if !tracked_paths.is_empty() {
+        let mut args = vec!["diff"];
+        if use_staged_scope {
+            args.push("--cached");
+        }
+        args.push("--no-color");
+        args.push("--");
+        args.extend(tracked_paths.iter().copied());
+        let diff = run_git_capture(repo_root, &args)?;
+        if !diff.trim().is_empty() {
+            sections.push(diff);
+        }
+    }
+
+    if !use_staged_scope {
+        for file in files
+            .iter()
+            .filter(|file| file.kind == crate::GitFileKind::Untracked)
+        {
+            let diff = load_untracked_diff(repo_root, &file.path)?;
+            if !diff.trim().is_empty() {
+                sections.push(diff);
+            }
+        }
+    }
+
+    Ok(sections.join("\n\n"))
+}
+
+fn format_commit_generation_file_line(file: &GitFileSnapshot) -> String {
+    let mut details = Vec::new();
+    if let Some(index_status) = file.index_status {
+        details.push(format!("index {}", git_file_status_label(index_status)));
+    }
+    if let Some(worktree_status) = file.worktree_status {
+        details.push(format!(
+            "worktree {}",
+            git_file_status_label(worktree_status)
+        ));
+    }
+
+    let suffix = if details.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", details.join(", "))
+    };
+
+    match file.original_path.as_deref() {
+        Some(original_path) => format!("- {} -> {}{}", original_path, file.path, suffix),
+        None => format!("- {}{}", file.path, suffix),
+    }
+}
+
+fn git_file_status_label(status: crate::GitFileStatus) -> &'static str {
+    match status {
+        crate::GitFileStatus::Added => "added",
+        crate::GitFileStatus::Modified => "modified",
+        crate::GitFileStatus::Deleted => "deleted",
+        crate::GitFileStatus::Renamed => "renamed",
+        crate::GitFileStatus::Copied => "copied",
+        crate::GitFileStatus::TypeChanged => "type changed",
+        crate::GitFileStatus::Unmerged => "unmerged",
+    }
+}
+
 fn run_git_capture(repo_root: &Path, args: &[&str]) -> Result<String, String> {
     run_git_command("git", repo_root, args).map_err(|error| error.message)
 }
@@ -1127,6 +1430,46 @@ fn normalize_optional_text(raw: &str) -> Option<String> {
     }
 }
 
+fn extract_openai_response_text(payload: &serde_json::Value) -> Option<String> {
+    if let Some(output_text) = payload
+        .get("output_text")
+        .and_then(serde_json::Value::as_str)
+    {
+        let trimmed = output_text.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    payload
+        .get("output")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|items| {
+            let mut parts = Vec::new();
+            for item in items {
+                let Some(content) = item.get("content").and_then(serde_json::Value::as_array)
+                else {
+                    continue;
+                };
+                for chunk in content {
+                    let Some(text) = chunk.get("text").and_then(serde_json::Value::as_str) else {
+                        continue;
+                    };
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        parts.push(trimmed.to_string());
+                    }
+                }
+            }
+
+            if parts.is_empty() {
+                None
+            } else {
+                Some(parts.join("\n"))
+            }
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1137,8 +1480,8 @@ mod tests {
     };
 
     use super::{
-        parse_commit_detail, resolve_repo_relative_existing_path, run_git_task_blocking,
-        GitTaskStatus,
+        build_commit_message_generation_request, extract_openai_response_text, parse_commit_detail,
+        resolve_repo_relative_existing_path, run_git_task_blocking, GitTaskStatus,
     };
 
     #[test]
@@ -1425,6 +1768,65 @@ mod tests {
         let _ = fs::remove_dir_all(repo.parent().unwrap());
     }
 
+    #[test]
+    fn commit_message_generation_prefers_staged_changes() {
+        let repo = init_test_repo("commit-message-staged");
+        fs::write(repo.join("src-web-app.js"), "console.log('staged');\n")
+            .expect("staged file should be written");
+        run_git(&repo, &["add", "src-web-app.js"]);
+        fs::write(repo.join("notes.txt"), "draft note\n").expect("note file should be written");
+
+        let runtime = runtime_with_workspace(&repo);
+        let request = build_commit_message_generation_request(&runtime, "workspace-1")
+            .expect("request should build");
+
+        assert!(request.prompt.contains("Commit scope: staged changes only"));
+        assert!(request.prompt.contains("src-web-app.js"));
+        assert!(!request.prompt.contains("notes.txt"));
+
+        let _ = fs::remove_dir_all(repo.parent().unwrap());
+    }
+
+    #[test]
+    fn commit_message_generation_includes_untracked_files_when_no_staged_changes() {
+        let repo = init_test_repo("commit-message-untracked");
+        fs::create_dir_all(repo.join("docs")).expect("docs dir should exist");
+        fs::write(repo.join("docs/guide.md"), "# guide\n\nhello\n")
+            .expect("guide file should be written");
+
+        let runtime = runtime_with_workspace(&repo);
+        let request = build_commit_message_generation_request(&runtime, "workspace-1")
+            .expect("request should build");
+
+        assert!(request.prompt.contains("Commit scope: all pending changes"));
+        assert!(request.prompt.contains("docs/guide.md"));
+        assert!(request.prompt.contains("+++ b/docs/guide.md"));
+
+        let _ = fs::remove_dir_all(repo.parent().unwrap());
+    }
+
+    #[test]
+    fn extract_openai_response_text_reads_message_content() {
+        let payload = serde_json::json!({
+            "output": [
+                {
+                    "type": "message",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "{\"message\":\"refine source control ui\"}"
+                        }
+                    ]
+                }
+            ]
+        });
+
+        assert_eq!(
+            extract_openai_response_text(&payload).as_deref(),
+            Some("{\"message\":\"refine source control ui\"}")
+        );
+    }
+
     fn unique_temp_dir(label: &str) -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -1459,6 +1861,25 @@ mod tests {
         );
         run_git(repo, &["config", "user.name", "CrewDock Test"]);
         run_git(repo, &["config", "user.email", "test@crewdock.dev"]);
+    }
+
+    fn runtime_with_workspace(repo: &PathBuf) -> crate::RuntimeState {
+        let mut runtime = crate::RuntimeState::seeded();
+        runtime.settings.openai_api_key = Some("sk-test-123".to_string());
+        runtime.workspaces.push(crate::WorkspaceRecord {
+            id: "workspace-1".to_string(),
+            name: "repo".to_string(),
+            path: repo.display().to_string(),
+            layout: crate::LayoutPreset::new("count-1", "1 terminal".to_string(), 1, 1, 1),
+            panes: Vec::new(),
+            pane_layout: crate::PaneLayout::Leaf {
+                pane_id: "pane-1".to_string(),
+            },
+            started: true,
+            git: None,
+        });
+        runtime.active_workspace_id = Some("workspace-1".to_string());
+        runtime
     }
 
     fn run_git(cwd: &PathBuf, args: &[&str]) {
