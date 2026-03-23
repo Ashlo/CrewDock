@@ -56,6 +56,10 @@ export function createUiState() {
     quickSwitcherQuery: "",
     quickSwitcherCursor: 0,
     quickSwitcherShouldFocus: false,
+    systemHealthPanelVisible: false,
+    systemHealthSnapshot: null,
+    systemHealthLoading: false,
+    systemHealthError: "",
     activityRailVisible: false,
     activityRailScope: "all",
     workspaceRenameDraft: null,
@@ -83,5 +87,8 @@ export function createRuntimeStore() {
     launcherCardAnimationFrame: 0,
     gitRefreshInFlight: null,
     gitRefreshQueuedWorkspaceId: null,
+    systemHealthRefreshTimer: 0,
+    systemHealthRefreshMode: "",
+    systemHealthRefreshInFlight: null,
   };
 }

@@ -11,10 +11,12 @@ use std::{
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
     sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use portable_pty::{ChildKiller, PtySize};
 use serde::{Deserialize, Serialize};
+use sysinfo::{CpuRefreshKind, DiskRefreshKind, Disks, MemoryRefreshKind, RefreshKind, System};
 use tauri::{AppHandle, Manager, State};
 
 const MAX_LAUNCHER_COMPLETION_MATCHES: usize = 24;
@@ -53,6 +55,19 @@ impl Default for AppState {
     }
 }
 
+#[derive(Clone)]
+struct SystemHealthState {
+    inner: Arc<Mutex<SystemHealthMonitor>>,
+}
+
+impl Default for SystemHealthState {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(SystemHealthMonitor::new())),
+        }
+    }
+}
+
 struct RuntimeState {
     next_id: u64,
     shell: String,
@@ -64,6 +79,11 @@ struct RuntimeState {
     sessions: HashMap<String, LiveSession>,
     git_tasks: HashMap<String, GitTaskRecord>,
     persistence_path: Option<PathBuf>,
+}
+
+struct SystemHealthMonitor {
+    system: System,
+    disks: Disks,
 }
 
 #[derive(Debug, Clone)]
@@ -280,6 +300,40 @@ struct SettingsSnapshot {
     has_stored_openai_api_key: bool,
     #[serde(rename = "hasEnvironmentOpenAiApiKey")]
     has_environment_openai_api_key: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemHealthSnapshot {
+    availability: SystemHealthAvailability,
+    cpu_percent: f64,
+    memory_used_bytes: u64,
+    memory_total_bytes: u64,
+    memory_percent: f64,
+    disk_used_bytes: u64,
+    disk_total_bytes: u64,
+    disk_percent: f64,
+    battery_percent: Option<f64>,
+    battery_state: Option<BatteryState>,
+    last_refreshed_at_ms: u64,
+    error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum SystemHealthAvailability {
+    Ready,
+    Unavailable,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum BatteryState {
+    Charging,
+    Discharging,
+    Full,
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -534,6 +588,210 @@ fn has_openai_api_key_in_environment() -> bool {
         .unwrap_or(false)
 }
 
+impl SystemHealthSnapshot {
+    fn unavailable(message: impl Into<String>) -> Self {
+        Self {
+            availability: SystemHealthAvailability::Unavailable,
+            cpu_percent: 0.0,
+            memory_used_bytes: 0,
+            memory_total_bytes: 0,
+            memory_percent: 0.0,
+            disk_used_bytes: 0,
+            disk_total_bytes: 0,
+            disk_percent: 0.0,
+            battery_percent: None,
+            battery_state: None,
+            last_refreshed_at_ms: current_timestamp_ms(),
+            error_message: Some(message.into()),
+        }
+    }
+
+    fn error(message: impl Into<String>) -> Self {
+        Self {
+            availability: SystemHealthAvailability::Error,
+            cpu_percent: 0.0,
+            memory_used_bytes: 0,
+            memory_total_bytes: 0,
+            memory_percent: 0.0,
+            disk_used_bytes: 0,
+            disk_total_bytes: 0,
+            disk_percent: 0.0,
+            battery_percent: None,
+            battery_state: None,
+            last_refreshed_at_ms: current_timestamp_ms(),
+            error_message: Some(message.into()),
+        }
+    }
+}
+
+impl SystemHealthMonitor {
+    fn new() -> Self {
+        let mut system = System::new_with_specifics(
+            RefreshKind::nothing()
+                .with_cpu(CpuRefreshKind::everything())
+                .with_memory(MemoryRefreshKind::everything()),
+        );
+        system.refresh_cpu_usage();
+        system.refresh_memory();
+
+        Self {
+            system,
+            disks: Disks::new_with_refreshed_list_specifics(DiskRefreshKind::everything()),
+        }
+    }
+
+    fn collect_snapshot(&mut self) -> Result<SystemHealthSnapshot, String> {
+        if !cfg!(target_os = "macos") {
+            return Ok(SystemHealthSnapshot::unavailable(
+                "System monitoring is available on macOS only.",
+            ));
+        }
+
+        self.system.refresh_cpu_usage();
+        self.system.refresh_memory();
+        self.disks.refresh(true);
+
+        let cpu_percent = round_percentage(self.system.global_cpu_usage() as f64);
+        let memory_total_bytes = self.system.total_memory();
+        let memory_used_bytes = self.system.used_memory();
+        let memory_percent = percentage(memory_used_bytes, memory_total_bytes);
+        let (disk_used_bytes, disk_total_bytes) = primary_disk_usage(&self.disks).unwrap_or((0, 0));
+        let disk_percent = percentage(disk_used_bytes, disk_total_bytes);
+        let (battery_percent, battery_state) = collect_battery_snapshot();
+
+        Ok(SystemHealthSnapshot {
+            availability: SystemHealthAvailability::Ready,
+            cpu_percent,
+            memory_used_bytes,
+            memory_total_bytes,
+            memory_percent,
+            disk_used_bytes,
+            disk_total_bytes,
+            disk_percent,
+            battery_percent,
+            battery_state,
+            last_refreshed_at_ms: current_timestamp_ms(),
+            error_message: None,
+        })
+    }
+}
+
+fn current_timestamp_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn round_percentage(value: f64) -> f64 {
+    if !value.is_finite() {
+        return 0.0;
+    }
+
+    ((value * 10.0).round() / 10.0).clamp(0.0, 100.0)
+}
+
+fn percentage(value: u64, total: u64) -> f64 {
+    if total == 0 {
+        return 0.0;
+    }
+
+    round_percentage((value as f64 / total as f64) * 100.0)
+}
+
+fn primary_disk_usage(disks: &Disks) -> Option<(u64, u64)> {
+    let current_dir = env::current_dir().ok();
+    let disk = current_dir
+        .as_ref()
+        .and_then(|path| {
+            disks
+                .list()
+                .iter()
+                .filter(|disk| path.starts_with(disk.mount_point()))
+                .max_by_key(|disk| disk.mount_point().as_os_str().len())
+        })
+        .or_else(|| {
+            disks
+                .list()
+                .iter()
+                .find(|disk| disk.mount_point() == Path::new("/"))
+        })
+        .or_else(|| disks.list().iter().next())?;
+
+    let total = disk.total_space();
+    let available = disk.available_space();
+    Some((total.saturating_sub(available), total))
+}
+
+fn collect_battery_snapshot() -> (Option<f64>, Option<BatteryState>) {
+    #[cfg(target_os = "macos")]
+    {
+        let output = ProcessCommand::new("pmset")
+            .args(["-g", "batt"])
+            .output()
+            .ok();
+
+        let Some(output) = output else {
+            return (None, None);
+        };
+
+        if !output.status.success() {
+            return (None, None);
+        }
+
+        return parse_battery_snapshot(&String::from_utf8_lossy(&output.stdout));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        (None, None)
+    }
+}
+
+fn parse_battery_snapshot(output: &str) -> (Option<f64>, Option<BatteryState>) {
+    for line in output.lines() {
+        let Some(percent_index) = line.find('%') else {
+            continue;
+        };
+
+        let percent_digits = line[..percent_index]
+            .chars()
+            .rev()
+            .take_while(|character| character.is_ascii_digit())
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>();
+
+        let battery_percent = percent_digits.parse::<f64>().ok().map(round_percentage);
+        let state_fragment = line[percent_index + 1..]
+            .split(';')
+            .nth(1)
+            .map(str::trim)
+            .unwrap_or("");
+        let normalized_state = state_fragment.to_ascii_lowercase();
+        let battery_state = if normalized_state.contains("discharging") {
+            Some(BatteryState::Discharging)
+        } else if normalized_state.contains("charging") {
+            Some(BatteryState::Charging)
+        } else if normalized_state.contains("charged")
+            || normalized_state.contains("finishing charge")
+        {
+            Some(BatteryState::Full)
+        } else if battery_percent.is_some() {
+            Some(BatteryState::Unknown)
+        } else {
+            None
+        };
+
+        if battery_percent.is_some() || battery_state.is_some() {
+            return (battery_percent, battery_state);
+        }
+    }
+
+    (None, None)
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 enum PersistedPaneLayout {
@@ -554,6 +812,24 @@ fn get_app_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
         .lock()
         .map_err(|_| "failed to acquire application state".to_string())?;
     Ok(runtime.build_snapshot())
+}
+
+#[tauri::command]
+fn load_system_health_snapshot(
+    state: State<'_, SystemHealthState>,
+) -> Result<SystemHealthSnapshot, String> {
+    let mut monitor = state
+        .inner
+        .lock()
+        .map_err(|_| "failed to acquire system monitor state".to_string())?;
+
+    monitor.collect_snapshot().or_else(|error| {
+        if cfg!(target_os = "macos") {
+            Ok(SystemHealthSnapshot::error(error))
+        } else {
+            Ok(SystemHealthSnapshot::unavailable(error))
+        }
+    })
 }
 
 #[tauri::command]
@@ -2643,6 +2919,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
+        .manage(SystemHealthState::default())
         .setup(|app| {
             let shared = app.state::<AppState>().inner.clone();
             let restore = (|| -> Result<(Vec<PaneJob>, String), String> {
@@ -2675,6 +2952,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_app_snapshot,
+            load_system_health_snapshot,
             reset_to_launcher,
             create_workspace,
             rename_workspace,
@@ -2728,10 +3006,10 @@ mod tests {
     use super::{
         collect_git_detail, collect_git_detail_with_binary, complete_launcher_input_for_base,
         default_launcher_path, execute_launcher_command, extract_navigation_target,
-        layout_for_pane_count, layout_presets, normalize_workspace_path,
+        layout_for_pane_count, layout_presets, normalize_workspace_path, parse_battery_snapshot,
         parse_git_status_porcelain, persistence::ActivityEventKind, prepare_workspace_launch,
-        resolve_navigation_path, validate_git_cli_arg, GitFileKind, GitState, RuntimeState,
-        ThemeId, DEFAULT_INTERFACE_TEXT_SCALE, DEFAULT_TERMINAL_FONT_SIZE,
+        resolve_navigation_path, validate_git_cli_arg, BatteryState, GitFileKind, GitState,
+        RuntimeState, ThemeId, DEFAULT_INTERFACE_TEXT_SCALE, DEFAULT_TERMINAL_FONT_SIZE,
     };
 
     #[test]
@@ -2760,6 +3038,16 @@ mod tests {
         assert_eq!(presets[3].pane_count, 8);
         assert_eq!(presets[4].pane_count, 12);
         assert_eq!(presets[5].pane_count, 16);
+    }
+
+    #[test]
+    fn battery_snapshot_is_parsed_from_pmset_output() {
+        let output =
+            "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22216803)\t100%; charged; 0:00 remaining present: true\n";
+        let (battery_percent, battery_state) = parse_battery_snapshot(output);
+
+        assert_eq!(battery_percent, Some(100.0));
+        assert!(matches!(battery_state, Some(BatteryState::Full)));
     }
 
     #[test]

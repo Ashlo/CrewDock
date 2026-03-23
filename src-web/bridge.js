@@ -33,6 +33,8 @@ export function createBridge({
         tauriApi.core.invoke("set_terminal_font_size", { terminalFontSize }),
       setOpenAiApiKey: (openaiApiKey) =>
         tauriApi.core.invoke("set_openai_api_key", { openaiApiKey }),
+      loadSystemHealthSnapshot: () =>
+        tauriApi.core.invoke("load_system_health_snapshot"),
       createWorkspace: (path, paneCount) =>
         tauriApi.core.invoke("create_workspace", { path, paneCount }),
       renameWorkspace: (workspaceId, name) =>
@@ -523,8 +525,37 @@ function createMockBridge({
     return `update ${primary.replace(/\.[^.]+$/, "")}`;
   }
 
+  function buildMockSystemHealthSnapshot() {
+    const now = Date.now();
+    const tick = Math.floor(now / 1000);
+    const cpuPercent = 18 + (tick % 17);
+    const memoryPercent = 46 + ((tick * 3) % 22);
+    const memoryTotalBytes = 32 * 1024 * 1024 * 1024;
+    const memoryUsedBytes = Math.round(memoryTotalBytes * (memoryPercent / 100));
+    const diskPercent = 61;
+    const diskTotalBytes = 512 * 1024 * 1024 * 1024;
+    const diskUsedBytes = Math.round(diskTotalBytes * (diskPercent / 100));
+    const batteryPercent = 84;
+
+    return {
+      availability: "ready",
+      cpuPercent,
+      memoryUsedBytes,
+      memoryTotalBytes,
+      memoryPercent,
+      diskUsedBytes,
+      diskTotalBytes,
+      diskPercent,
+      batteryPercent,
+      batteryState: "charging",
+      lastRefreshedAtMs: now,
+      errorMessage: null,
+    };
+  }
+
   return {
     getAppSnapshot: async () => emitState(),
+    loadSystemHealthSnapshot: async () => buildMockSystemHealthSnapshot(),
     listenState: async (handler) => {
       stateListeners.add(handler);
       return () => stateListeners.delete(handler);

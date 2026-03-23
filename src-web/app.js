@@ -21,6 +21,8 @@ const MAX_PENDING_TERMINAL_BYTES = 4 * 1024 * 1024;
 const MAX_RUNTIME_ACTIVITY_ITEMS = 80;
 const MAX_WORKSPACE_ATTENTION_COUNT = 99;
 const LAUNCHER_CARD_TRANSITION_MS = 360;
+const SYSTEM_HEALTH_IDLE_REFRESH_MS = 5000;
+const SYSTEM_HEALTH_PANEL_REFRESH_MS = 1000;
 const DEFAULT_THEME_ID = "one-dark";
 const DEFAULT_INTERFACE_TEXT_SCALE = 1;
 const MIN_INTERFACE_TEXT_SCALE = 0.85;
@@ -649,6 +651,8 @@ async function init() {
 
   render();
   syncGitRefreshLoop();
+  syncSystemHealthLoop();
+  void loadSystemHealthSnapshot({ silent: true });
   void refreshActiveWorkspaceGitStatus();
 }
 
@@ -664,6 +668,10 @@ function detectPlatform() {
   }
 
   return "other";
+}
+
+function supportsSystemHealth() {
+  return detectPlatform() === "macos" && typeof bridge.loadSystemHealthSnapshot === "function";
 }
 
 function getActiveWorkspace() {
@@ -1691,6 +1699,7 @@ async function handleClick(event) {
   if (target.dataset.action === "show-settings") {
     uiState.settingsVisible = true;
     uiState.settingsSection = "workbench";
+    closeSystemHealthPanel();
     closeSourceControlPanel();
     uiState.activityRailVisible = false;
     closeQuickSwitcher();
@@ -1717,6 +1726,7 @@ async function handleClick(event) {
   if (target.dataset.action === "show-launcher") {
     uiState.launcherVisible = true;
     hideSettingsSheet();
+    closeSystemHealthPanel();
     closeSourceControlPanel();
     uiState.activityRailVisible = false;
     closeQuickSwitcher();
@@ -1729,6 +1739,27 @@ async function handleClick(event) {
 
   if (target.dataset.action === "show-git-panel") {
     await openSourceControlPanel({ force: true });
+    return;
+  }
+
+  if (target.dataset.action === "toggle-system-health-panel") {
+    toggleSystemHealthPanel();
+    render({ refreshVisibleTerminals: false });
+    if (uiState.systemHealthPanelVisible) {
+      void loadSystemHealthSnapshot({ force: true });
+    }
+    return;
+  }
+
+  if (target.dataset.action === "close-system-health-panel") {
+    if (closeSystemHealthPanel()) {
+      render({ refreshVisibleTerminals: false });
+    }
+    return;
+  }
+
+  if (target.dataset.action === "refresh-system-health") {
+    await loadSystemHealthSnapshot({ force: true });
     return;
   }
 
@@ -1809,6 +1840,7 @@ async function handleClick(event) {
 
   if (target.dataset.action === "open-workspace") {
     hideSettingsSheet();
+    closeSystemHealthPanel();
     closeSourceControlPanel();
     uiState.activityRailVisible = false;
     closeQuickSwitcher();
@@ -2021,8 +2053,17 @@ function handlePointerDown(event) {
     shouldRender = true;
   }
 
+  if (
+    uiState.systemHealthPanelVisible
+    && !target?.closest("[data-system-health-panel]")
+    && target?.closest('[data-action="toggle-system-health-panel"]') == null
+  ) {
+    closeSystemHealthPanel();
+    shouldRender = true;
+  }
+
   if (shouldRender) {
-    render();
+    render({ refreshVisibleTerminals: false });
   }
 }
 
@@ -2172,6 +2213,8 @@ function handleWindowResize() {
 
 function handleWindowFocus() {
   syncGitRefreshLoop();
+  syncSystemHealthLoop();
+  void loadSystemHealthSnapshot({ force: true, silent: true });
   const activeWorkspaceId = uiState.snapshot?.activeWorkspaceId || null;
   const didClearAttention = markWorkspaceAttentionSeen(activeWorkspaceId);
   if (didClearAttention && activeWorkspaceId) {
@@ -2182,6 +2225,7 @@ function handleWindowFocus() {
 
 function handleWindowBlur() {
   syncGitRefreshLoop();
+  syncSystemHealthLoop();
 }
 
 function handleFocusOut(event) {
@@ -2367,6 +2411,7 @@ async function handleKeyDown(event) {
     event.preventDefault();
     uiState.settingsVisible = true;
     uiState.settingsSection = "workbench";
+    closeSystemHealthPanel();
     closeSourceControlPanel();
     uiState.activityRailVisible = false;
     closeQuickSwitcher();
@@ -2398,6 +2443,13 @@ async function handleKeyDown(event) {
       await openSourceControlPanel({ force: true });
     }
     render();
+    return;
+  }
+
+  if (uiState.systemHealthPanelVisible && event.key === "Escape") {
+    event.preventDefault();
+    closeSystemHealthPanel();
+    render({ refreshVisibleTerminals: false });
     return;
   }
 
@@ -2489,6 +2541,7 @@ async function handleKeyDown(event) {
     uiState.quickSwitcherVisible
     || uiState.settingsVisible
     || uiState.gitPanelVisible
+    || uiState.systemHealthPanelVisible
     || uiState.pendingWorkspaceDraft
   ) {
     return;
@@ -2580,6 +2633,7 @@ function openQuickSwitcher() {
   uiState.quickSwitcherVisible = true;
   uiState.launcherVisible = false;
   uiState.activityRailVisible = false;
+  closeSystemHealthPanel();
   uiState.quickSwitcherQuery = "";
   uiState.quickSwitcherCursor = Math.max(
     0,
@@ -2597,6 +2651,37 @@ function closeQuickSwitcher() {
   uiState.quickSwitcherQuery = "";
   uiState.quickSwitcherCursor = 0;
   uiState.quickSwitcherShouldFocus = false;
+}
+
+function closeSystemHealthPanel() {
+  if (!uiState.systemHealthPanelVisible) {
+    return false;
+  }
+
+  uiState.systemHealthPanelVisible = false;
+  syncSystemHealthLoop();
+  return true;
+}
+
+function toggleSystemHealthPanel(forceVisible = !uiState.systemHealthPanelVisible) {
+  if (!supportsSystemHealth()) {
+    return;
+  }
+
+  if (!forceVisible) {
+    closeSystemHealthPanel();
+    return;
+  }
+
+  uiState.systemHealthPanelVisible = true;
+  hideSettingsSheet();
+  closeSourceControlPanel();
+  uiState.activityRailVisible = false;
+  closeQuickSwitcher();
+  uiState.pendingWorkspaceDraft = null;
+  uiState.contextMenu = null;
+  cancelWorkspaceRename();
+  syncSystemHealthLoop();
 }
 
 function closeSourceControlRowMenu() {
@@ -2961,6 +3046,7 @@ async function openSourceControlPanel({ force = false } = {}) {
   uiState.gitPanelVisible = true;
   closeSourceControlRowMenu();
   hideSettingsSheet();
+  closeSystemHealthPanel();
   uiState.activityRailVisible = false;
   closeQuickSwitcher();
   uiState.pendingWorkspaceDraft = null;
@@ -3814,6 +3900,7 @@ function toggleActivityRail(forceVisible = !uiState.activityRailVisible) {
   uiState.activityRailVisible = true;
   uiState.activityRailScope = normalizeActivityScope(uiState.activityRailScope);
   hideSettingsSheet();
+  closeSystemHealthPanel();
   uiState.gitPanelVisible = false;
   closeQuickSwitcher();
   uiState.pendingWorkspaceDraft = null;
@@ -4152,7 +4239,7 @@ function stashMountedWorkspaceScreen(stageRegion) {
   uiState.mountedLayoutSignature = null;
 }
 
-function render() {
+function render({ refreshVisibleTerminals = true } = {}) {
   if (!uiState.snapshot) {
     return;
   }
@@ -4301,6 +4388,7 @@ function render() {
     focusQuickSwitcherInput();
   }
   syncGitRefreshLoop();
+  syncSystemHealthLoop();
 
   if (shouldShowLauncher) {
     if (uiState.mountedWorkspaceId) {
@@ -4382,7 +4470,9 @@ function render() {
   }
 
   syncWorkspace(activeWorkspace);
-  scheduleVisibleTerminalRefresh(activeWorkspace);
+  if (refreshVisibleTerminals) {
+    scheduleVisibleTerminalRefresh(activeWorkspace);
+  }
 }
 
 function renderBranchIcon() {
@@ -4405,6 +4495,14 @@ function renderActivityIcon() {
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
       <path d="M5 5h14v2H5V5Zm0 6h14v2H5v-2Zm0 6h9v2H5v-2Z" fill="currentColor"></path>
+    </svg>
+  `;
+}
+
+function renderSystemIcon() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M12 4a8 8 0 1 1-8 8 8 8 0 0 1 8-8Zm0 3.2a1 1 0 0 0-1 1V12c0 .3.13.58.36.77l2.7 2.18 1.25-1.55L13 11.52V8.2a1 1 0 0 0-1-1Z" fill="currentColor"></path>
     </svg>
   `;
 }
@@ -4438,9 +4536,13 @@ function renderWorkspaceStatusBar(snapshot, activeWorkspace) {
   const leftItems = [`<span class="workspace-statusbar-brand">CrewDock</span>`];
   const rightItems = [];
   const activitySummary = getRuntimeActivitySummary(snapshot);
+  const shouldShowSystemHealth = supportsSystemHealth();
 
   if (!activeWorkspace) {
     leftItems.push(renderStatusBarItem("Launcher", "Source folders and workspace creation"));
+    if (shouldShowSystemHealth) {
+      leftItems.push(renderStatusBarSystemHealthButton());
+    }
     leftItems.push(renderStatusBarActivityButton(activitySummary));
 
     if (snapshot.workspaces.length > 0) {
@@ -4461,6 +4563,9 @@ function renderWorkspaceStatusBar(snapshot, activeWorkspace) {
 
     leftItems.push(renderStatusBarItem(pathLabel, activeWorkspace.path, "is-path is-primary"));
     leftItems.push(renderStatusBarGitButton(summary));
+    if (shouldShowSystemHealth) {
+      leftItems.push(renderStatusBarSystemHealthButton());
+    }
     leftItems.push(renderStatusBarActivityButton(activitySummary));
 
     const stateLabel = formatStatusBarState(summary);
@@ -4482,12 +4587,15 @@ function renderWorkspaceStatusBar(snapshot, activeWorkspace) {
   }
 
   return `
-    <div class="workspace-statusbar" role="status" aria-live="polite">
-      <div class="workspace-statusbar-group">
-        ${leftItems.join("")}
-      </div>
-      <div class="workspace-statusbar-group is-right">
-        ${rightItems.join("")}
+    <div class="workspace-statusbar-shell">
+      ${uiState.systemHealthPanelVisible && shouldShowSystemHealth ? renderSystemHealthPanel() : ""}
+      <div class="workspace-statusbar" role="status" aria-live="polite">
+        <div class="workspace-statusbar-group">
+          ${leftItems.join("")}
+        </div>
+        <div class="workspace-statusbar-group is-right">
+          ${rightItems.join("")}
+        </div>
       </div>
     </div>
   `;
@@ -4541,6 +4649,139 @@ function renderStatusBarActivityButton(summary) {
   `;
 }
 
+function renderStatusBarSystemHealthButton() {
+  const snapshot = uiState.systemHealthSnapshot;
+  const hasReadySnapshot = snapshot?.availability === "ready";
+  const title = hasReadySnapshot
+    ? `CPU ${formatPercentageLabel(snapshot.cpuPercent)} • Memory ${formatPercentageLabel(snapshot.memoryPercent)}`
+    : uiState.systemHealthError
+      ? `System monitoring error: ${uiState.systemHealthError}`
+      : uiState.systemHealthLoading
+        ? "Loading system health"
+        : "Open system health";
+  const label = hasReadySnapshot
+    ? `CPU ${formatPercentageLabel(snapshot.cpuPercent)} · MEM ${formatPercentageLabel(snapshot.memoryPercent)}`
+    : uiState.systemHealthLoading
+      ? "System loading"
+      : "System";
+  const tone = uiState.systemHealthError ? "error" : "neutral";
+
+  return `
+    <button
+      class="workspace-statusbar-item workspace-statusbar-button is-${tone} ${uiState.systemHealthPanelVisible ? "is-panel-open" : ""}"
+      type="button"
+      data-action="toggle-system-health-panel"
+      title="${escapeHtml(title)}"
+      aria-label="${escapeHtml(title)}"
+      aria-pressed="${uiState.systemHealthPanelVisible ? "true" : "false"}"
+    >
+      <span class="workspace-statusbar-icon" aria-hidden="true">${renderSystemIcon()}</span>
+      <span>${escapeHtml(label)}</span>
+    </button>
+  `;
+}
+
+function renderSystemHealthPanel() {
+  const snapshot = uiState.systemHealthSnapshot;
+  const errorMessage = uiState.systemHealthError || snapshot?.errorMessage || "";
+  const isReady = snapshot?.availability === "ready";
+  const metrics = [];
+
+  if (isReady) {
+    metrics.push(
+      renderSystemHealthMetricCard("CPU", formatPercentageLabel(snapshot.cpuPercent), "Current processor load"),
+      renderSystemHealthMetricCard(
+        "Memory",
+        `${formatBytes(snapshot.memoryUsedBytes)} / ${formatBytes(snapshot.memoryTotalBytes)}`,
+        `${formatPercentageLabel(snapshot.memoryPercent)} used`,
+      ),
+      renderSystemHealthMetricCard(
+        "Disk",
+        `${formatBytes(snapshot.diskUsedBytes)} / ${formatBytes(snapshot.diskTotalBytes)}`,
+        `${formatPercentageLabel(snapshot.diskPercent)} used`,
+      ),
+    );
+
+    if (snapshot.batteryPercent != null) {
+      metrics.push(
+        renderSystemHealthMetricCard(
+          "Battery",
+          `${formatPercentageLabel(snapshot.batteryPercent)}`,
+          formatBatteryStateLabel(snapshot.batteryState),
+        ),
+      );
+    }
+  }
+
+  const refreshedLabel = snapshot?.lastRefreshedAtMs
+    ? `Last refreshed ${formatRelativeTime(snapshot.lastRefreshedAtMs)}`
+    : uiState.systemHealthLoading
+      ? "Refreshing system health"
+      : "Waiting for first system sample";
+
+  return `
+    <section
+      class="workspace-system-health-panel"
+      data-system-health-panel
+      role="dialog"
+      aria-modal="false"
+      aria-labelledby="system-health-title"
+    >
+      <header class="workspace-system-health-header">
+        <div>
+          <p class="workspace-system-health-mark">System</p>
+          <h3 id="system-health-title">System health</h3>
+          <p class="workspace-system-health-copy">${escapeHtml(refreshedLabel)}</p>
+        </div>
+        <div class="workspace-system-health-actions">
+          <button
+            class="workspace-system-health-action"
+            type="button"
+            data-action="refresh-system-health"
+            ${uiState.systemHealthLoading ? "disabled" : ""}
+          >
+            <span aria-hidden="true">${renderRefreshIcon()}</span>
+            <span>${uiState.systemHealthLoading ? "Refreshing..." : "Refresh"}</span>
+          </button>
+          <button
+            class="workspace-system-health-close"
+            type="button"
+            data-action="close-system-health-panel"
+            aria-label="Close system health"
+            title="Close system health"
+          >
+            ${renderCloseIcon()}
+          </button>
+        </div>
+      </header>
+      ${
+        isReady
+          ? `
+            <div class="workspace-system-health-grid">
+              ${metrics.join("")}
+            </div>
+          `
+          : `
+            <div class="workspace-system-health-empty ${errorMessage ? "is-error" : ""}">
+              <strong>${escapeHtml(errorMessage ? "System monitoring unavailable" : "Loading system metrics")}</strong>
+              <span>${escapeHtml(errorMessage || "CrewDock is collecting a current system snapshot.")}</span>
+            </div>
+          `
+      }
+    </section>
+  `;
+}
+
+function renderSystemHealthMetricCard(label, value, detail) {
+  return `
+    <article class="workspace-system-health-card">
+      <span class="workspace-system-health-card-label">${escapeHtml(label)}</span>
+      <strong class="workspace-system-health-card-value">${escapeHtml(value)}</strong>
+      <span class="workspace-system-health-card-detail">${escapeHtml(detail)}</span>
+    </article>
+  `;
+}
+
 function formatStatusBarState(summary) {
   if (!summary) {
     return "Checking";
@@ -4577,6 +4818,74 @@ function formatStatusBarSync(summary) {
   }
 
   return `+${ahead} / -${behind}`;
+}
+
+function formatPercentageLabel(value) {
+  const percent = Number(value);
+  if (!Number.isFinite(percent)) {
+    return "--";
+  }
+
+  return `${Math.round(percent)}%`;
+}
+
+function formatBytes(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue) || numericValue <= 0) {
+    return "0 B";
+  }
+
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = numericValue;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+
+  const decimals = size >= 100 || unitIndex === 0 ? 0 : size >= 10 ? 1 : 2;
+  return `${size.toFixed(decimals).replace(/\.?0+$/, "")} ${units[unitIndex]}`;
+}
+
+function formatBatteryStateLabel(state) {
+  switch (state) {
+    case "charging":
+      return "Charging";
+    case "discharging":
+      return "On battery";
+    case "full":
+      return "Fully charged";
+    default:
+      return "Battery status unavailable";
+  }
+}
+
+function formatRelativeTime(timestampMs) {
+  const deltaMs = Date.now() - Number(timestampMs || 0);
+  if (!Number.isFinite(deltaMs)) {
+    return "just now";
+  }
+
+  const deltaSeconds = Math.max(0, Math.round(deltaMs / 1000));
+  if (deltaSeconds < 10) {
+    return "just now";
+  }
+  if (deltaSeconds < 60) {
+    return `${deltaSeconds}s ago`;
+  }
+
+  const deltaMinutes = Math.round(deltaSeconds / 60);
+  if (deltaMinutes < 60) {
+    return `${deltaMinutes}m ago`;
+  }
+
+  const deltaHours = Math.round(deltaMinutes / 60);
+  if (deltaHours < 24) {
+    return `${deltaHours}h ago`;
+  }
+
+  const deltaDays = Math.round(deltaHours / 24);
+  return `${deltaDays}d ago`;
 }
 
 function renderQuickSwitcher(snapshot) {
@@ -6597,6 +6906,75 @@ function formatGitFileStatusLabel(status) {
 
 function syncGitRefreshLoop() {
   // Git refresh is explicit now so workspace navigation is not blocked by background status checks.
+}
+
+function clearSystemHealthLoop() {
+  if (runtimeStore.systemHealthRefreshTimer) {
+    clearTimeout(runtimeStore.systemHealthRefreshTimer);
+    runtimeStore.systemHealthRefreshTimer = 0;
+  }
+  runtimeStore.systemHealthRefreshMode = "";
+}
+
+function syncSystemHealthLoop() {
+  if (!supportsSystemHealth() || !document.hasFocus()) {
+    clearSystemHealthLoop();
+    return;
+  }
+
+  const nextMode = uiState.systemHealthPanelVisible ? "panel" : "status";
+  if (
+    runtimeStore.systemHealthRefreshTimer
+    && runtimeStore.systemHealthRefreshMode === nextMode
+  ) {
+    return;
+  }
+
+  clearSystemHealthLoop();
+  runtimeStore.systemHealthRefreshMode = nextMode;
+  runtimeStore.systemHealthRefreshTimer = window.setTimeout(() => {
+    runtimeStore.systemHealthRefreshTimer = 0;
+    void loadSystemHealthSnapshot({ silent: true });
+    syncSystemHealthLoop();
+  }, uiState.systemHealthPanelVisible ? SYSTEM_HEALTH_PANEL_REFRESH_MS : SYSTEM_HEALTH_IDLE_REFRESH_MS);
+}
+
+async function loadSystemHealthSnapshot({ force = false, silent = false } = {}) {
+  if (!supportsSystemHealth() || !bridge.loadSystemHealthSnapshot) {
+    return uiState.systemHealthSnapshot;
+  }
+
+  if (runtimeStore.systemHealthRefreshInFlight) {
+    return runtimeStore.systemHealthRefreshInFlight;
+  }
+
+  if (!silent || !uiState.systemHealthSnapshot) {
+    uiState.systemHealthLoading = true;
+    render({ refreshVisibleTerminals: false });
+  }
+
+  runtimeStore.systemHealthRefreshInFlight = (async () => {
+    try {
+      const snapshot = await bridge.loadSystemHealthSnapshot();
+      uiState.systemHealthSnapshot = snapshot;
+      uiState.systemHealthError = snapshot?.availability === "error"
+        ? String(snapshot.errorMessage || "System monitoring is unavailable.")
+        : "";
+      return snapshot;
+    } catch (error) {
+      if (force) {
+        console.error(error);
+      }
+      uiState.systemHealthError = error instanceof Error ? error.message : String(error || "System monitoring failed.");
+      return uiState.systemHealthSnapshot;
+    } finally {
+      uiState.systemHealthLoading = false;
+      runtimeStore.systemHealthRefreshInFlight = null;
+      render({ refreshVisibleTerminals: false });
+    }
+  })();
+
+  return runtimeStore.systemHealthRefreshInFlight;
 }
 
 async function refreshActiveWorkspaceGitStatus({ force = false } = {}) {
