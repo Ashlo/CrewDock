@@ -19,7 +19,15 @@
   --strip-start: rgba(34, 39, 46, 0.96);
   --strip-end: rgba(24, 28, 34, 0.92);
   --strip-border: rgba(171, 178, 191, 0.1);
-  --strip-shadow: 0 12px 28px rgba(0, 0, 0, 0.14);
+  --strip-shadow: 0 10px 24px rgba(0, 0, 0, 0.1);
+  --strip-top-gloss: color-mix(in srgb, var(--text) 3%, transparent);
+  --strip-window-rule: color-mix(in srgb, var(--accent) 16%, transparent);
+  --strip-tab-hover-surface: color-mix(in srgb, var(--tab-text-active) 5%, transparent);
+  --strip-tab-active-surface: color-mix(in srgb, var(--tab-text-active) 7%, transparent);
+  --strip-tab-active-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  --strip-tab-ring: color-mix(in srgb, var(--tab-text-active) 8%, transparent);
+  --strip-control-surface: transparent;
+  --strip-control-surface-hover: color-mix(in srgb, var(--tab-text-active) 6%, transparent);
   --tab-bg: rgba(29, 33, 39, 0.76);
   --tab-bg-hover: rgba(36, 41, 48, 0.9);
   --tab-bg-active: rgba(42, 47, 55, 0.98);
@@ -57,12 +65,12 @@
   --context-bg: rgba(26, 30, 36, 0.98);
   --context-divider: rgba(255, 255, 255, 0.12);
   --context-item-hover: rgba(255, 255, 255, 0.06);
-  --scrollbar-thumb: rgba(255, 255, 255, 0.1);
-  --theme-card-bg: rgba(255, 255, 255, 0.02);
-  --theme-card-hover-bg: rgba(255, 255, 255, 0.035);
-  --theme-card-shadow: rgba(0, 0, 0, 0.18);
-  --swatch-ring: rgba(255, 255, 255, 0.14);
-  --create-button-text: rgba(237, 241, 245, 0.92);
+  --scrollbar-thumb: color-mix(in srgb, var(--text) 14%, transparent);
+  --theme-card-bg: color-mix(in srgb, var(--text) 2.5%, transparent);
+  --theme-card-hover-bg: color-mix(in srgb, var(--text) 4%, transparent);
+  --theme-card-shadow: color-mix(in srgb, black 18%, transparent);
+  --swatch-ring: color-mix(in srgb, var(--text) 14%, transparent);
+  --create-button-text: color-mix(in srgb, var(--text) 92%, white 8%);
   --chrome-fade: color-mix(in srgb, var(--strip-start) 94%, transparent);
   --chrome-surface: color-mix(in srgb, var(--panel) 96%, transparent);
   --chrome-divider: color-mix(in srgb, var(--surface-card-border) 78%, transparent);
@@ -75,10 +83,16 @@
   --overlay-divider: color-mix(in srgb, var(--surface-card-border) 72%, transparent);
   --pane-border-ready: color-mix(in srgb, var(--surface-card-border) 96%, transparent);
   --pane-border-closed: color-mix(in srgb, var(--surface-card-border) 54%, transparent);
+  --pane-surface: color-mix(in srgb, var(--pane-bg) 90%, black 10%);
+  --pane-outline: color-mix(in srgb, var(--text) 7%, transparent);
+  --pane-outline-soft: color-mix(in srgb, black 42%, transparent);
   --pane-header-bg: color-mix(in srgb, var(--panel) 34%, var(--pane-bg) 66%);
   --pane-header-gloss: color-mix(in srgb, var(--tab-text-active) 4%, transparent);
   --pane-header-border: color-mix(in srgb, var(--surface-card-border) 68%, transparent);
   --pane-title-text: color-mix(in srgb, var(--text) 82%, transparent);
+  --pane-title-muted: color-mix(in srgb, var(--surface-soft-text) 88%, var(--text) 12%);
+  --pane-active-line: color-mix(in srgb, var(--text) 18%, transparent);
+  --pane-active-wash: color-mix(in srgb, var(--text) 1.2%, transparent);
   --radius-xl: 28px;
   --radius-lg: 18px;
   --radius-md: 14px;
@@ -154,24 +168,26 @@ button {
 .workspace-strip {
   position: relative;
   z-index: 3;
-  padding: 3px 10px 0;
+  padding: 4px 12px 1px;
   background:
+    radial-gradient(circle at top left, color-mix(in srgb, var(--accent) 10%, transparent), transparent 28%),
     linear-gradient(180deg, var(--strip-start), var(--strip-end)),
     var(--panel);
   border-bottom: 1px solid var(--strip-border);
   backdrop-filter: blur(18px);
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.03),
-    0 6px 16px rgba(0, 0, 0, 0.08);
+    inset 0 1px 0 var(--strip-top-gloss),
+    0 4px 14px rgba(0, 0, 0, 0.06);
 }
 
 .workspace-strip-track {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
   min-height: var(--chrome-height);
-  padding: 2px 0 5px;
+  padding: 0 0 5px;
 }
 
 .workspace-strip-leading {
@@ -181,41 +197,54 @@ button {
 
 .workspace-window-summary {
   flex: 0 0 auto;
+  position: relative;
   min-width: 0;
-  max-width: 132px;
+  max-width: 140px;
   display: grid;
-  gap: 1px;
-  padding: 0 12px 0 0;
-  margin-right: 8px;
+  gap: 2px;
+  padding: 2px 14px 2px 0;
+  margin-right: 6px;
   border-right: 1px solid var(--chrome-divider);
-  color: var(--surface-soft-text);
+  color: color-mix(in srgb, var(--surface-soft-text) 88%, var(--text) 12%);
+}
+
+.workspace-window-summary::before {
+  display: none;
 }
 
 .workspace-window-mark {
   margin: 0;
-  font-size: 0.58rem;
+  font-size: 0.54rem;
   font-weight: 700;
-  letter-spacing: 0.14em;
+  letter-spacing: 0.16em;
   text-transform: uppercase;
-  color: var(--muted);
+  color: color-mix(in srgb, var(--muted) 88%, var(--text) 12%);
 }
 
-.workspace-window-summary strong,
-.workspace-window-summary span {
+.workspace-window-copy {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.workspace-window-title,
+.workspace-window-count {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.workspace-window-summary strong {
-  font-size: 0.74rem;
+.workspace-window-title {
+  font-size: 0.8rem;
   font-weight: 600;
+  letter-spacing: -0.015em;
   color: var(--tab-text-active);
 }
 
-.workspace-window-summary span {
-  font-size: 0.65rem;
+.workspace-window-count {
+  font-size: 0.62rem;
+  letter-spacing: 0.01em;
 }
 
 .workspace-tabs-shell {
@@ -225,11 +254,18 @@ button {
   display: flex;
   align-items: center;
   gap: 4px;
+  min-height: 32px;
   padding: 0;
   overflow: hidden;
   border: 0;
+  border-radius: 0;
   background: none;
   box-shadow: none;
+  isolation: auto;
+}
+
+.workspace-tabs-shell::before {
+  display: none;
 }
 
 .workspace-tabs-viewport {
@@ -237,7 +273,7 @@ button {
   min-width: 0;
   flex: 1;
   overflow: hidden;
-  border-radius: 10px;
+  border-radius: 0;
 }
 
 .workspace-tabs-viewport::before,
@@ -280,9 +316,9 @@ button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 8px;
+  border-radius: 999px;
   border: 1px solid transparent;
-  background: rgba(255, 255, 255, 0.025);
+  background: var(--strip-control-surface);
   color: var(--control-text);
   opacity: 0;
   pointer-events: none;
@@ -304,12 +340,11 @@ button {
   opacity: 1;
   pointer-events: auto;
   transform: scale(1);
-  border-color: rgba(255, 255, 255, 0.06);
+  border-color: transparent;
 }
 
 .workspace-tabs-scroll:hover:not(:disabled) {
-  border-color: var(--control-border-strong);
-  background: rgba(255, 255, 255, 0.045);
+  background: var(--strip-control-surface-hover);
   color: var(--control-text-strong);
 }
 
@@ -327,12 +362,17 @@ button {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
   min-width: 0;
+  padding-left: 8px;
 }
 
 .workspace-strip-actions::before {
-  display: none;
+  content: "";
+  width: 1px;
+  height: 16px;
+  margin-right: 4px;
+  background: linear-gradient(180deg, transparent, var(--chrome-divider), transparent);
 }
 
 .workspace-tabs {
@@ -345,7 +385,7 @@ button {
   overscroll-behavior-x: contain;
   scroll-behavior: smooth;
   scrollbar-width: none;
-  padding: 1px 0;
+  padding: 0;
 }
 
 .workspace-tabs::-webkit-scrollbar {
@@ -369,35 +409,59 @@ button {
   display: flex;
   align-items: center;
   gap: 2px;
-  max-width: 220px;
+  max-width: 232px;
   min-height: 30px;
-  border-radius: 9px;
+  border-radius: 999px;
   border: 1px solid transparent;
-  background: rgba(255, 255, 255, 0.02);
+  background: transparent;
   box-shadow: none;
+  transform: translateY(0);
   transition:
     border-color 160ms ease,
     background 160ms ease,
-    color 160ms ease;
+    color 160ms ease,
+    box-shadow 160ms ease,
+    transform 160ms ease;
 }
 
 .workspace-tab-shell::after {
-  display: none;
+  content: "";
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: 2px;
+  height: 1.5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 54%, transparent);
+  opacity: 0;
+  transform: scaleX(0.42);
+  transition:
+    opacity 160ms ease,
+    transform 160ms ease;
 }
 
 .workspace-tab-shell:hover {
-  border-color: rgba(255, 255, 255, 0.07);
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--strip-tab-hover-surface);
+  border-color: transparent;
+  box-shadow: none;
+  transform: translateY(0);
 }
 
 .workspace-tab-shell.is-active {
-  border-color: rgba(255, 255, 255, 0.1);
-  background: rgba(255, 255, 255, 0.06);
+  border-color: var(--strip-tab-ring);
+  background: var(--strip-tab-active-surface);
+  box-shadow: var(--strip-tab-active-shadow);
+}
+
+.workspace-tab-shell.is-active::after {
+  opacity: 0.96;
+  transform: scaleX(1);
 }
 
 .workspace-tab-shell.is-renaming {
   border-color: var(--control-border-strong);
-  background: rgba(255, 255, 255, 0.06);
+  background: var(--strip-tab-active-surface);
+  box-shadow: var(--strip-tab-active-shadow);
 }
 
 .workspace-tab-shell.has-attention[data-attention-tone="ready"]:not(.is-active) {
@@ -420,23 +484,27 @@ button {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 10px 0 11px;
+  padding: 0 12px;
   min-height: 30px;
 }
 
 .workspace-tab-status {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
   flex: 0 0 auto;
   border-radius: 999px;
   background: var(--surface-soft-text);
-  opacity: 0.4;
+  opacity: 0.46;
   box-shadow: none;
 }
 
 .workspace-tab-status.is-live {
   background: var(--accent);
-  opacity: 0.76;
+  opacity: 0.86;
+}
+
+.workspace-tab-shell.is-active .workspace-tab-status.is-live {
+  opacity: 1;
   box-shadow: none;
 }
 
@@ -450,11 +518,12 @@ button {
   color: var(--tab-text);
   font-size: 0.8rem;
   letter-spacing: -0.01em;
-  font-weight: 540;
+  font-weight: 560;
 }
 
 .workspace-tab-shell.is-active .workspace-tab-name {
   color: var(--tab-text-active);
+  font-weight: 600;
 }
 
 .workspace-tab-attention {
@@ -466,9 +535,9 @@ button {
   justify-content: center;
   padding: 0 6px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.1);
+  background: rgba(255, 255, 255, 0.09);
   color: var(--tab-text-active);
-  font-size: 0.63rem;
+  font-size: 0.61rem;
   font-weight: 700;
   letter-spacing: 0.01em;
   line-height: 1;
@@ -494,8 +563,8 @@ button {
 }
 
 .workspace-tab-git {
-  width: 6px;
-  height: 6px;
+  width: 5px;
+  height: 5px;
   flex: 0 0 auto;
   border-radius: 999px;
   background: rgba(255, 255, 255, 0.18);
@@ -530,14 +599,14 @@ button {
   height: 22px;
   padding: 0 8px;
   border: 0;
-  border-radius: 7px;
-  background: rgba(255, 255, 255, 0.045);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.04);
   color: var(--tab-text-active);
   font: inherit;
   font-size: 0.78rem;
-  font-weight: 540;
-  letter-spacing: -0.01em;
+  font-weight: 560;
+  letter-spacing: -0.012em;
   outline: none;
   appearance: none;
 }
@@ -556,7 +625,7 @@ button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 6px;
+  border-radius: 999px;
   color: var(--tab-close);
   opacity: 0;
   transform: scale(0.92);
@@ -595,14 +664,14 @@ button {
 .workspace-strip-button,
 .workspace-add {
   flex: 0 0 auto;
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  background: rgba(255, 255, 255, 0.025);
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: var(--strip-control-surface);
   color: var(--control-text);
   box-shadow: none;
   font-size: 1.1rem;
@@ -614,20 +683,28 @@ button {
 }
 
 .workspace-add {
-  color: var(--control-text);
+  color: color-mix(in srgb, var(--accent) 66%, var(--text) 34%);
 }
 
 .workspace-strip-button:hover,
 .workspace-add:hover {
-  border-color: var(--control-border-strong);
-  background: rgba(255, 255, 255, 0.045);
+  background: var(--strip-control-surface-hover);
   color: var(--control-text-strong);
 }
 
 .workspace-strip-button svg,
 .workspace-add svg {
-  width: 14px;
-  height: 14px;
+  width: 13px;
+  height: 13px;
+}
+
+.workspace-tab-main:focus-visible,
+.workspace-tab-action:focus-visible,
+.workspace-tabs-scroll:focus-visible,
+.workspace-strip-button:focus-visible,
+.workspace-add:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
 .workspace-stage {
@@ -2584,17 +2661,20 @@ button {
   gap: 12px;
   padding: 12px;
   border-radius: 14px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--surface-card-border);
+  background: var(--theme-card-bg);
+  box-shadow: 0 18px 38px -32px var(--theme-card-shadow);
   text-align: left;
   transition:
     border-color 160ms ease,
-    background 160ms ease;
+    background 160ms ease,
+    box-shadow 160ms ease;
 }
 
 .settings-theme-card:hover {
-  border-color: rgba(255, 255, 255, 0.12);
-  background: rgba(255, 255, 255, 0.035);
+  border-color: color-mix(in srgb, var(--surface-card-border) 72%, var(--text) 28%);
+  background: var(--theme-card-hover-bg);
+  box-shadow: 0 22px 46px -30px var(--theme-card-shadow);
 }
 
 .settings-theme-card.is-active {
@@ -4739,17 +4819,17 @@ button {
   height: 100%;
   min-height: 0;
   overflow: hidden;
-  padding: 1px;
-  border-radius: 10px;
-  background: var(--pane-seam);
+  padding: 0;
+  border-radius: 12px;
+  background: transparent;
 }
 
 .pane-split {
   display: flex;
   flex: 1;
-  gap: 1px;
+  gap: 0;
   overflow: hidden;
-  background: var(--pane-seam);
+  background: transparent;
 }
 
 .pane-split[data-axis="horizontal"] {
@@ -4780,71 +4860,110 @@ button {
   position: relative;
   overflow: hidden;
   border-radius: 0;
-  border: 1px solid transparent;
-  background: var(--pane-bg);
-  box-shadow:
-    inset 0 1px 0 var(--pane-top-gloss);
+  border: 0;
+  background: var(--pane-surface);
+  box-shadow: inset 0 0 0 0.5px color-mix(in srgb, var(--text) 4%, transparent);
   transition:
     border-color 160ms ease,
     box-shadow 160ms ease,
     background 160ms ease;
 }
 
+.terminal-pane::before {
+  content: "";
+  position: absolute;
+  top: 8px;
+  left: 10px;
+  width: 14px;
+  height: 1px;
+  border-radius: 999px;
+  background: transparent;
+  opacity: 0;
+  pointer-events: none;
+  z-index: 2;
+  transition:
+    opacity 160ms ease,
+    background 160ms ease;
+}
+
 .terminal-pane[data-status="ready"] {
-  border-color: var(--pane-border-ready);
+  border-color: transparent;
 }
 
 .terminal-pane[data-status="closed"] {
-  border-color: var(--pane-border-closed);
+  border-color: transparent;
 }
 
 .terminal-pane[data-status="failed"] {
-  border-color: color-mix(in srgb, var(--danger) 34%, transparent);
+  border-color: transparent;
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--danger) 14%, transparent);
 }
 
 .terminal-pane[data-active="true"] {
-  border-color: var(--control-border-strong);
-  box-shadow:
-    inset 0 0 0 1px var(--control-border-strong),
-    inset 0 1px 0 var(--pane-top-gloss);
+  border-color: transparent;
+  background: linear-gradient(180deg, var(--pane-active-wash), transparent 22%), var(--pane-surface);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--text) 8%, transparent);
+}
+
+.terminal-pane[data-active="true"]::before {
+  opacity: 1;
+  background: var(--pane-active-line);
 }
 
 .terminal-pane-header {
-  min-height: 28px;
+  position: absolute;
+  top: 7px;
+  left: 10px;
+  z-index: 2;
+  min-height: 0;
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  gap: 12px;
-  padding: 0 10px;
-  border-bottom: 1px solid var(--pane-header-border);
-  background:
-    linear-gradient(180deg, var(--pane-header-gloss), transparent 100%),
-    var(--pane-header-bg);
-  transition:
-    border-color 160ms ease,
-    background 160ms ease,
-    color 160ms ease;
+  gap: 0;
+  padding: 0;
+  border-bottom: 0;
+  background: none;
+  pointer-events: none;
+  transition: color 160ms ease;
 }
 
 .terminal-pane[data-density="compact"] .terminal-pane-header {
-  min-height: 24px;
-  padding: 0 8px;
+  top: 6px;
+  left: 9px;
+  min-height: 0;
+  padding: 0;
 }
 
 .terminal-pane[data-active="true"] .terminal-pane-header {
-  border-bottom-color: var(--control-border-strong);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 100%),
-    var(--accent-soft);
+  background: none;
 }
 
 .terminal-pane-title {
   min-width: 0;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   overflow: hidden;
   white-space: nowrap;
+}
+
+.terminal-pane-title::before {
+  display: none;
+}
+
+.terminal-pane-kicker {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--pane-title-muted);
+  font-size: 0.44rem;
+  font-weight: 620;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  opacity: 0.52;
+  transition:
+    color 160ms ease,
+    opacity 160ms ease;
 }
 
 .terminal-pane-title strong {
@@ -4852,24 +4971,34 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--pane-title-text);
-  font-size: 0.66rem;
-  font-weight: 600;
-  letter-spacing: 0.05em;
+  font-size: 0.44rem;
+  font-weight: 620;
+  letter-spacing: 0.12em;
   text-transform: uppercase;
-  transition: color 160ms ease;
+  opacity: 0.72;
+  transition:
+    color 160ms ease,
+    opacity 160ms ease;
 }
 
 .terminal-pane[data-density="compact"] .terminal-pane-title {
-  gap: 5px;
+  gap: 4px;
 }
 
+.terminal-pane[data-active="true"] .terminal-pane-kicker,
 .terminal-pane[data-active="true"] .terminal-pane-title strong {
   color: var(--tab-text-active);
+  opacity: 0.92;
+}
+
+.terminal-pane[data-density="compact"] .terminal-pane-kicker {
+  font-size: 0.41rem;
+  letter-spacing: 0.1em;
 }
 
 .terminal-pane[data-density="compact"] .terminal-pane-title strong {
-  font-size: 0.61rem;
-  letter-spacing: 0.04em;
+  font-size: 0.41rem;
+  letter-spacing: 0.1em;
 }
 
 .terminal-host {
@@ -4877,12 +5006,12 @@ button {
   flex: 1;
   min-height: 0;
   min-width: 0;
-  padding: 8px 12px 10px;
-  background: linear-gradient(180deg, var(--pane-top-gloss), transparent 10%);
+  padding: 20px 10px 10px;
+  background: none;
 }
 
 .terminal-pane[data-density="compact"] .terminal-host {
-  padding: 6px 10px 8px;
+  padding: 18px 9px 9px;
 }
 
 .terminal-host .xterm {
@@ -4894,17 +5023,11 @@ button {
   overflow-x: hidden;
   overflow-y: auto;
   scrollbar-width: thin;
-  scrollbar-color: var(--control-border-strong) transparent;
-}
-
-.terminal-host .xterm-screen,
-.terminal-host .xterm-helpers,
-.terminal-host .xterm-viewport {
-  height: 100%;
+  scrollbar-color: color-mix(in srgb, var(--surface-soft-text) 32%, transparent) transparent;
 }
 
 .terminal-host .xterm-viewport::-webkit-scrollbar {
-  width: 10px;
+  width: 8px;
 }
 
 .terminal-host .xterm-viewport::-webkit-scrollbar-track {
@@ -4914,12 +5037,12 @@ button {
 .terminal-host .xterm-viewport::-webkit-scrollbar-thumb {
   border: 2px solid transparent;
   border-radius: 999px;
-  background: color-mix(in srgb, var(--control-border-strong) 76%, transparent);
+  background: color-mix(in srgb, var(--surface-soft-text) 24%, transparent);
   background-clip: padding-box;
 }
 
 .terminal-host .xterm-viewport::-webkit-scrollbar-thumb:hover {
-  background: color-mix(in srgb, var(--control-text) 82%, transparent);
+  background: color-mix(in srgb, var(--control-text) 54%, transparent);
   background-clip: padding-box;
 }
 
@@ -5106,24 +5229,37 @@ button {
   }
 
   .workspace-strip {
-    padding: 4px 8px 0;
+    padding: 4px 8px 1px;
   }
 
   .workspace-strip-track {
-    gap: 8px;
+    gap: 6px;
     padding-bottom: 4px;
   }
 
   .workspace-tabs-shell {
+    gap: 3px;
     padding: 0;
   }
 
   .workspace-tab-shell {
-    max-width: 180px;
+    max-width: 160px;
   }
 
   .workspace-strip-actions {
-    gap: 8px;
+    gap: 3px;
+    padding-left: 6px;
+  }
+
+  .workspace-strip-actions::before {
+    height: 14px;
+  }
+
+  .workspace-strip-button,
+  .workspace-add,
+  .workspace-tabs-scroll {
+    width: 22px;
+    height: 22px;
   }
 
   .workspace-stage {

@@ -99,8 +99,10 @@ function renderWindowSummary(windowSummary, workspaceCount, escapeHtml) {
       aria-label="${escapeHtml(`${label} window with ${meta}`)}"
     >
       <span class="workspace-window-mark">Window</span>
-      <strong>${escapeHtml(label)}</strong>
-      <span>${escapeHtml(meta)}</span>
+      <div class="workspace-window-copy">
+        <strong class="workspace-window-title">${escapeHtml(label)}</strong>
+        <span class="workspace-window-count">${escapeHtml(meta)}</span>
+      </div>
     </div>
   `;
 }

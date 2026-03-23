@@ -81,7 +81,6 @@ export function createRuntimeStore() {
     browserHandledDropAt: 0,
     launcherCardTransitionTimer: 0,
     launcherCardAnimationFrame: 0,
-    gitRefreshIntervalTimer: 0,
     gitRefreshInFlight: null,
     gitRefreshQueuedWorkspaceId: null,
   };

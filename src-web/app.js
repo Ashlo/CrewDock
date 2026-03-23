@@ -21,7 +21,6 @@ const MAX_PENDING_TERMINAL_BYTES = 4 * 1024 * 1024;
 const MAX_RUNTIME_ACTIVITY_ITEMS = 80;
 const MAX_WORKSPACE_ATTENTION_COUNT = 99;
 const LAUNCHER_CARD_TRANSITION_MS = 360;
-const GIT_REFRESH_INTERVAL_MS = 3000;
 const DEFAULT_THEME_ID = "one-dark";
 const DEFAULT_INTERFACE_TEXT_SCALE = 1;
 const MIN_INTERFACE_TEXT_SCALE = 0.85;
@@ -1154,7 +1153,7 @@ function applyRenderedSettings(snapshot = uiState.snapshot) {
   applySettingsAppearance(
     useDraft ? getDraftThemeId(snapshot) : getActiveThemeId(snapshot),
     useDraft ? getDraftInterfaceTextScale(snapshot) : getInterfaceTextScale(snapshot),
-    getTerminalFontSize(snapshot),
+    useDraft ? getDraftTerminalFontSize(snapshot) : getTerminalFontSize(snapshot),
   );
 }
 
@@ -1340,6 +1339,7 @@ function previewTerminalFontSize(value) {
   }
 
   uiState.settingsDraft.terminalFontSize = normalizeTerminalFontSize(value);
+  applyRenderedSettings(uiState.snapshot);
   syncSettingsPreviewDom(document);
   syncSettingsActionDom(document);
 }
@@ -1610,12 +1610,12 @@ function syncMountedTerminalAppearance(
     let shouldRefit = false;
     let shouldRefresh = false;
     if (state.themeId !== theme.id) {
-      state.terminal.setOption("theme", { ...theme.terminalTheme });
+      state.terminal.options.theme = { ...theme.terminalTheme };
       state.themeId = theme.id;
       shouldRefresh = true;
     }
     if (state.fontSize !== terminalFontSize) {
-      state.terminal.setOption("fontSize", terminalFontSize);
+      state.terminal.options.fontSize = terminalFontSize;
       state.fontSize = terminalFontSize;
       shouldRefit = true;
       shouldRefresh = true;
@@ -1912,7 +1912,6 @@ async function handleClick(event) {
     uiState.pendingWorkspaceDraft = null;
     clearLauncherCommandState();
     render();
-    void refreshActiveWorkspaceGitStatus({ force: true });
     return;
   }
 
@@ -1954,7 +1953,6 @@ async function handleClick(event) {
 
     uiState.snapshot = await bridge.closeWorkspace(workspaceId);
     render();
-    void refreshActiveWorkspaceGitStatus({ force: true });
   }
 }
 
@@ -2180,7 +2178,6 @@ function handleWindowFocus() {
     render();
   }
   scheduleVisibleTerminalRefresh();
-  void refreshActiveWorkspaceGitStatus({ force: true });
 }
 
 function handleWindowBlur() {
@@ -2573,7 +2570,6 @@ async function activateWorkspace(workspaceId) {
     resetSourceControlState();
     void loadActiveWorkspaceSourceControl({ force: true });
   }
-  void refreshActiveWorkspaceGitStatus({ force: true });
 }
 
 function openQuickSwitcher() {
@@ -2951,23 +2947,6 @@ function restoreSettingsScrollState(states, root = document) {
       element.scrollLeft = state.scrollLeft;
     }
   }
-}
-
-function isSourceControlTextEntryActive() {
-  const activeElement = document.activeElement;
-  return Boolean(
-    activeElement instanceof HTMLInputElement || activeElement instanceof HTMLTextAreaElement
-      ? activeElement.matches(
-          [
-            "[data-scm-commit-input]",
-            "[data-scm-branch-search]",
-            "[data-scm-create-branch-name]",
-            "[data-scm-create-branch-start]",
-            "[data-scm-task-input-value]",
-          ].join(","),
-        )
-      : false,
-  );
 }
 
 async function openSourceControlPanel({ force = false } = {}) {
@@ -6617,30 +6596,7 @@ function formatGitFileStatusLabel(status) {
 }
 
 function syncGitRefreshLoop() {
-  const shouldRefresh = Boolean(
-    uiState.snapshot?.activeWorkspaceId
-      && document.hasFocus()
-      && bridge.refreshWorkspaceGitStatus,
-  );
-
-  if (!shouldRefresh) {
-    if (runtimeStore.gitRefreshIntervalTimer) {
-      window.clearInterval(runtimeStore.gitRefreshIntervalTimer);
-      runtimeStore.gitRefreshIntervalTimer = 0;
-    }
-    return;
-  }
-
-  if (runtimeStore.gitRefreshIntervalTimer) {
-    return;
-  }
-
-  runtimeStore.gitRefreshIntervalTimer = window.setInterval(() => {
-    if (isSourceControlTextEntryActive()) {
-      return;
-    }
-    void refreshActiveWorkspaceGitStatus();
-  }, GIT_REFRESH_INTERVAL_MS);
+  // Git refresh is explicit now so workspace navigation is not blocked by background status checks.
 }
 
 async function refreshActiveWorkspaceGitStatus({ force = false } = {}) {
@@ -6868,6 +6824,7 @@ function workspaceLayoutSignature(workspace) {
 }
 
 function renderPaneShell(pane, paneIndex) {
+  const paneNumber = String(paneIndex + 1).padStart(2, "0");
   return `
     <article
       class="terminal-pane"
@@ -6878,7 +6835,8 @@ function renderPaneShell(pane, paneIndex) {
     >
       <header class="terminal-pane-header">
         <div class="terminal-pane-title">
-          <strong>Terminal ${paneIndex + 1}</strong>
+          <span class="terminal-pane-kicker">Terminal</span>
+          <strong>${paneNumber}</strong>
         </div>
       </header>
       <div class="terminal-host" data-terminal-host="${escapeHtml(pane.id)}"></div>
@@ -7039,8 +6997,10 @@ function mountWorkspaceTerminals(workspace, root = document) {
       convertEol: true,
       fontFamily: '"SF Mono", "SFMono-Regular", "Menlo", monospace',
       fontSize: terminalFontSize,
-      fontWeight: "450",
-      lineHeight: 1.18,
+      fontWeight: "400",
+      fontWeightBold: "560",
+      letterSpacing: 0,
+      lineHeight: 1.24,
       scrollback: 8000,
       theme: { ...theme.terminalTheme },
     });
