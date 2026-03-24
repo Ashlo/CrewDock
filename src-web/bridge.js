@@ -33,6 +33,12 @@ export function createBridge({
         tauriApi.core.invoke("set_terminal_font_size", { terminalFontSize }),
       setOpenAiApiKey: (openaiApiKey) =>
         tauriApi.core.invoke("set_openai_api_key", { openaiApiKey }),
+      setCodexCliPath: (codexCliPath) =>
+        tauriApi.core.invoke("set_codex_cli_path", { codexCliPath }),
+      refreshCodexCliCatalog: () =>
+        tauriApi.core.invoke("refresh_codex_cli_catalog"),
+      loadSystemHealthSnapshot: () =>
+        tauriApi.core.invoke("load_system_health_snapshot"),
       createWorkspace: (path, paneCount) =>
         tauriApi.core.invoke("create_workspace", { path, paneCount }),
       renameWorkspace: (workspaceId, name) =>
@@ -69,8 +75,8 @@ export function createBridge({
         tauriApi.core.invoke("git_pull", { workspaceId }),
       gitPush: (workspaceId) =>
         tauriApi.core.invoke("git_push", { workspaceId }),
-      gitPublishBranch: (workspaceId, branchName) =>
-        tauriApi.core.invoke("git_publish_branch", { workspaceId, branchName }),
+      gitPublishBranch: (workspaceId, branchName, remoteName = null) =>
+        tauriApi.core.invoke("git_publish_branch", { workspaceId, branchName, remoteName }),
       gitSetUpstream: (workspaceId, branchName, upstreamName) =>
         tauriApi.core.invoke("git_set_upstream", { workspaceId, branchName, upstreamName }),
       gitTaskWriteStdin: (workspaceId, data) =>
@@ -176,6 +182,28 @@ function createMockBridge({
     terminalFontSize: 13.5,
     hasStoredOpenAiApiKey: false,
     hasEnvironmentOpenAiApiKey: false,
+    codexCli: {
+      status: "ready",
+      selectionMode: "auto",
+      configuredPath: null,
+      effectivePath: "/usr/local/bin/codex",
+      effectiveVersion: "0.116.0",
+      message: "Using the newest detected Codex CLI on PATH.",
+      candidates: [
+        {
+          path: "/usr/local/bin/codex",
+          version: "0.116.0",
+          source: "npmGlobal",
+          isSelected: true,
+        },
+        {
+          path: "/opt/homebrew/bin/codex",
+          version: "0.42.0",
+          source: "homebrew",
+          isSelected: false,
+        },
+      ],
+    },
   };
 
   let workspaceCounter = 0;
@@ -303,12 +331,13 @@ function createMockBridge({
     return parts[parts.length - 1] || path;
   }
 
-  function buildMockGitDetail(path) {
+  function buildMockGitDetail(path, { branch = "main", upstream } = {}) {
+    const resolvedUpstream = upstream === undefined ? `origin/${branch}` : upstream;
     return {
       summary: {
         state: "clean",
-        branch: "main",
-        upstream: "origin/main",
+        branch,
+        upstream: resolvedUpstream,
         ahead: 0,
         behind: 0,
         counts: {
@@ -329,14 +358,37 @@ function createMockBridge({
     };
   }
 
+  function syncMockGitDetail(workspace, updates = {}) {
+    if (!workspace) {
+      return null;
+    }
+
+    const detail = workspace.gitDetail || buildMockGitDetail(workspace.path);
+    const branch = updates.branch ?? detail.summary?.branch ?? "main";
+    const hasExplicitUpstream = Object.prototype.hasOwnProperty.call(updates, "upstream");
+    const upstream = hasExplicitUpstream ? updates.upstream : detail.summary?.upstream;
+    workspace.gitDetail = buildMockGitDetail(workspace.path, { branch, upstream });
+    return workspace.gitDetail;
+  }
+
+  function buildMockRemotes() {
+    return [
+      {
+        name: "origin",
+        isDefault: true,
+      },
+    ];
+  }
+
   function buildMockBranches(workspace) {
-    const currentBranch = workspace.gitDetail?.summary?.branch || "main";
+    const currentBranch = workspace?.gitDetail?.summary?.branch || "main";
+    const currentUpstream = workspace?.gitDetail?.summary?.upstream ?? null;
     return {
       local: [
         {
           name: currentBranch,
           fullName: `refs/heads/${currentBranch}`,
-          upstream: `origin/${currentBranch}`,
+          upstream: currentUpstream,
           shortOid: "a1b2c3d",
           subject: "Current workspace branch",
           relativeDate: "just now",
@@ -356,8 +408,8 @@ function createMockBridge({
       ],
       remote: [
         {
-          name: `origin/${currentBranch}`,
-          fullName: `refs/remotes/origin/${currentBranch}`,
+          name: currentUpstream || "origin/main",
+          fullName: `refs/remotes/${currentUpstream || "origin/main"}`,
           upstream: null,
           shortOid: "a1b2c3d",
           subject: "Remote tracking branch",
@@ -371,6 +423,8 @@ function createMockBridge({
 
   function buildMockGraph(workspace, graphCursor) {
     const skip = Number.parseInt(graphCursor || "0", 10) || 0;
+    const currentBranch = workspace.gitDetail?.summary?.branch || "main";
+    const currentUpstream = workspace.gitDetail?.summary?.upstream || null;
     const base = [
       {
         oid: "a1b2c3d4",
@@ -381,8 +435,8 @@ function createMockBridge({
         graphPrefix: "*",
         refs: [
           { label: "HEAD", kind: "head" },
-          { label: workspace.gitDetail?.summary?.branch || "main", kind: "local-branch" },
-          { label: `origin/${workspace.gitDetail?.summary?.branch || "main"}`, kind: "remote-branch" },
+          { label: currentBranch, kind: "local-branch" },
+          ...(currentUpstream ? [{ label: currentUpstream, kind: "remote-branch" }] : []),
         ],
       },
       {
@@ -414,6 +468,7 @@ function createMockBridge({
   function buildMockSourceControl(workspace, graphCursor = null) {
     const detail = workspace?.gitDetail || buildMockGitDetail(workspace?.path || "");
     const branches = buildMockBranches(workspace);
+    const remotes = buildMockRemotes();
     return {
       workspaceId: workspace.id,
       workspaceName: workspace.name,
@@ -422,6 +477,8 @@ function createMockBridge({
       workspaceRelativePath: detail.workspaceRelativePath,
       summary: detail.summary,
       changes: detail.files || [],
+      remotes,
+      defaultRemote: remotes.find((remote) => remote.isDefault)?.name || remotes[0]?.name || null,
       localBranches: branches.local,
       remoteBranches: branches.remote,
       graph: buildMockGraph(workspace, graphCursor),
@@ -494,8 +551,37 @@ function createMockBridge({
     return `update ${primary.replace(/\.[^.]+$/, "")}`;
   }
 
+  function buildMockSystemHealthSnapshot() {
+    const now = Date.now();
+    const tick = Math.floor(now / 1000);
+    const cpuPercent = 18 + (tick % 17);
+    const memoryPercent = 46 + ((tick * 3) % 22);
+    const memoryTotalBytes = 32 * 1024 * 1024 * 1024;
+    const memoryUsedBytes = Math.round(memoryTotalBytes * (memoryPercent / 100));
+    const diskPercent = 61;
+    const diskTotalBytes = 512 * 1024 * 1024 * 1024;
+    const diskUsedBytes = Math.round(diskTotalBytes * (diskPercent / 100));
+    const batteryPercent = 84;
+
+    return {
+      availability: "ready",
+      cpuPercent,
+      memoryUsedBytes,
+      memoryTotalBytes,
+      memoryPercent,
+      diskUsedBytes,
+      diskTotalBytes,
+      diskPercent,
+      batteryPercent,
+      batteryState: "charging",
+      lastRefreshedAtMs: now,
+      errorMessage: null,
+    };
+  }
+
   return {
     getAppSnapshot: async () => emitState(),
+    loadSystemHealthSnapshot: async () => buildMockSystemHealthSnapshot(),
     listenState: async (handler) => {
       stateListeners.add(handler);
       return () => stateListeners.delete(handler);
@@ -540,6 +626,26 @@ function createMockBridge({
       settings.hasStoredOpenAiApiKey = Boolean(String(openaiApiKey || "").trim());
       return emitState();
     },
+    setCodexCliPath: async (codexCliPath) => {
+      const normalized = typeof codexCliPath === "string" ? codexCliPath.trim() : "";
+      settings.codexCli.configuredPath = normalized || null;
+      settings.codexCli.selectionMode = settings.codexCli.configuredPath ? "custom" : "auto";
+      settings.codexCli.message = settings.codexCli.configuredPath
+        ? "Using the configured Codex CLI path."
+        : "Using the newest detected Codex CLI on PATH.";
+      const selectedPath = settings.codexCli.configuredPath || settings.codexCli.candidates[0]?.path || null;
+      const selectedCandidate = settings.codexCli.candidates.find((candidate) => candidate.path === selectedPath)
+        || settings.codexCli.candidates[0]
+        || null;
+      settings.codexCli.effectivePath = selectedCandidate?.path || normalized || null;
+      settings.codexCli.effectiveVersion = selectedCandidate?.version || null;
+      settings.codexCli.candidates = settings.codexCli.candidates.map((candidate) => ({
+        ...candidate,
+        isSelected: candidate.path === settings.codexCli.effectivePath,
+      }));
+      return emitState();
+    },
+    refreshCodexCliCatalog: async () => emitState(),
     openDirectory: async (defaultPath) => {
       const value = window.prompt(
         "Workspace folder",
@@ -597,7 +703,7 @@ function createMockBridge({
     refreshWorkspaceGitStatus: async (workspaceId) => {
       const workspace = workspaces.find((entry) => entry.id === workspaceId);
       if (workspace) {
-        workspace.gitDetail = buildMockGitDetail(workspace.path);
+        syncMockGitDetail(workspace);
       }
       return emitState();
     },
@@ -647,8 +753,9 @@ function createMockBridge({
         startedAt: Date.now(),
         finishedAt: Date.now(),
         exitCode: 0,
+        recovery: null,
       };
-      workspace.gitDetail = buildMockGitDetail(workspace.path);
+      syncMockGitDetail(workspace);
       emitState();
       emitRuntimeEvent({
         kind: "gitTaskSnapshot",
@@ -659,22 +766,28 @@ function createMockBridge({
     },
     gitCheckoutBranch: async (workspaceId, branchName) => {
       const workspace = workspaces.find((entry) => entry.id === workspaceId);
-      if (workspace?.gitDetail?.summary) {
-        workspace.gitDetail.summary.branch = branchName;
+      if (workspace) {
+        syncMockGitDetail(workspace, {
+          branch: branchName,
+          upstream: branchName === "main" ? "origin/main" : null,
+        });
       }
       return buildMockSourceControl(workspace);
     },
     gitCreateBranch: async (workspaceId, branchName) => {
       const workspace = workspaces.find((entry) => entry.id === workspaceId);
-      if (workspace?.gitDetail?.summary) {
-        workspace.gitDetail.summary.branch = branchName;
+      if (workspace) {
+        syncMockGitDetail(workspace, { branch: branchName, upstream: null });
       }
       return buildMockSourceControl(workspace);
     },
     gitRenameBranch: async (workspaceId, currentName, nextName) => {
       const workspace = workspaces.find((entry) => entry.id === workspaceId);
       if (workspace?.gitDetail?.summary?.branch === currentName) {
-        workspace.gitDetail.summary.branch = nextName;
+        const upstream = workspace.gitDetail.summary.upstream
+          ? workspace.gitDetail.summary.upstream.replace(`/${currentName}`, `/${nextName}`)
+          : null;
+        syncMockGitDetail(workspace, { branch: nextName, upstream });
       }
       return buildMockSourceControl(workspace);
     },
@@ -694,14 +807,21 @@ function createMockBridge({
       const workspace = workspaces.find((entry) => entry.id === workspaceId);
       return buildMockSourceControl(workspace);
     },
-    gitPublishBranch: async (workspaceId) => {
+    gitPublishBranch: async (workspaceId, branchName, remoteName = null) => {
       const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      if (workspace) {
+        const remote = remoteName || "origin";
+        syncMockGitDetail(workspace, {
+          branch: branchName,
+          upstream: `${remote}/${branchName}`,
+        });
+      }
       return buildMockSourceControl(workspace);
     },
     gitSetUpstream: async (workspaceId, branchName, upstreamName) => {
       const workspace = workspaces.find((entry) => entry.id === workspaceId);
       if (workspace?.gitDetail?.summary?.branch === branchName) {
-        workspace.gitDetail.summary.upstream = upstreamName;
+        syncMockGitDetail(workspace, { branch: branchName, upstream: upstreamName });
       }
       return buildMockSourceControl(workspace);
     },

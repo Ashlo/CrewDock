@@ -35,6 +35,8 @@ pub(crate) struct PersistedSettings {
     #[serde(default)]
     #[serde(rename = "openAiApiKey")]
     pub(crate) openai_api_key: Option<String>,
+    #[serde(default)]
+    pub(crate) codex_cli_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -100,6 +102,7 @@ pub(crate) fn build_persisted_state(runtime: &RuntimeState) -> PersistedWorkspac
             interface_text_scale: Some(runtime.settings.interface_text_scale),
             terminal_font_size: Some(runtime.settings.terminal_font_size),
             openai_api_key: runtime.settings.openai_api_key.clone(),
+            codex_cli_path: runtime.settings.codex_cli_path.clone(),
         },
         workspaces: runtime
             .workspaces
@@ -238,6 +241,8 @@ pub(crate) fn load_persisted_from_disk(
         runtime.settings.terminal_font_size =
             crate::normalize_terminal_font_size(terminal_font_size);
     }
+    runtime.settings.codex_cli_path =
+        crate::normalize_optional_codex_cli_path(persisted.settings.codex_cli_path);
 
     runtime.settings.openai_api_key =
         crate::normalize_optional_openai_api_key(persisted.settings.openai_api_key);

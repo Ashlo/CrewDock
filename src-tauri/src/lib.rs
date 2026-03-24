@@ -5,16 +5,19 @@ mod source_control;
 mod workspace_manager;
 
 use std::{
-    collections::HashMap,
+    cmp::Ordering,
+    collections::{HashMap, HashSet},
     env, fs,
     io::Write,
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
     sync::{Arc, Mutex},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use portable_pty::{ChildKiller, PtySize};
 use serde::{Deserialize, Serialize};
+use sysinfo::{CpuRefreshKind, DiskRefreshKind, Disks, MemoryRefreshKind, RefreshKind, System};
 use tauri::{AppHandle, Manager, State};
 
 const MAX_LAUNCHER_COMPLETION_MATCHES: usize = 24;
@@ -32,12 +35,12 @@ use persistence::resolve_persistence_path;
 use session_manager::{prepare_workspace_launch, spawn_pane_jobs, LiveSession, PaneJob};
 use source_control::{
     build_commit_message_generation_request, discard_paths, generate_commit_message_with_openai,
-    git_task_write_stdin as write_git_task_input,
+    git_task_write_stdin as write_git_task_input, load_git_remotes,
     load_workspace_git_commit_detail as build_workspace_git_commit_detail,
     load_workspace_git_diff as build_workspace_git_diff,
-    load_workspace_source_control as build_workspace_source_control, stage_paths, start_git_task,
-    unstage_paths, GitCommitDetailSnapshot, GitDiffMode, GitDiffSnapshot, GitTaskRecord,
-    WorkspaceSourceControlSnapshot,
+    load_workspace_source_control as build_workspace_source_control, select_default_git_remote,
+    stage_paths, start_git_task, unstage_paths, GitCommitDetailSnapshot, GitDiffMode,
+    GitDiffSnapshot, GitTaskRecord, WorkspaceSourceControlSnapshot,
 };
 
 #[derive(Clone)]
@@ -53,17 +56,36 @@ impl Default for AppState {
     }
 }
 
+#[derive(Clone)]
+struct SystemHealthState {
+    inner: Arc<Mutex<SystemHealthMonitor>>,
+}
+
+impl Default for SystemHealthState {
+    fn default() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(SystemHealthMonitor::new())),
+        }
+    }
+}
+
 struct RuntimeState {
     next_id: u64,
     shell: String,
     launcher: LauncherSnapshot,
     settings: SettingsRecord,
+    codex_cli: CodexCliSnapshot,
     workspaces: Vec<WorkspaceRecord>,
     active_workspace_id: Option<String>,
     activity_history: Vec<persistence::ActivityEventRecord>,
     sessions: HashMap<String, LiveSession>,
     git_tasks: HashMap<String, GitTaskRecord>,
     persistence_path: Option<PathBuf>,
+}
+
+struct SystemHealthMonitor {
+    system: System,
+    disks: Disks,
 }
 
 #[derive(Debug, Clone)]
@@ -84,6 +106,7 @@ struct SettingsRecord {
     interface_text_scale: f64,
     terminal_font_size: f64,
     openai_api_key: Option<String>,
+    codex_cli_path: Option<String>,
 }
 
 impl Default for SettingsRecord {
@@ -93,6 +116,7 @@ impl Default for SettingsRecord {
             interface_text_scale: DEFAULT_INTERFACE_TEXT_SCALE,
             terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
             openai_api_key: None,
+            codex_cli_path: None,
         }
     }
 }
@@ -107,6 +131,7 @@ impl RuntimeState {
                 base_path: default_launcher_path(),
             },
             settings: SettingsRecord::default(),
+            codex_cli: CodexCliSnapshot::unavailable("CrewDock has not scanned for Codex CLI yet."),
             workspaces: Vec::new(),
             active_workspace_id: None,
             activity_history: Vec::new(),
@@ -158,6 +183,7 @@ impl RuntimeState {
                 terminal_font_size: self.settings.terminal_font_size,
                 has_stored_openai_api_key: self.settings.openai_api_key.is_some(),
                 has_environment_openai_api_key: has_openai_api_key_in_environment(),
+                codex_cli: self.codex_cli.clone(),
             },
             activity: persistence::build_activity_snapshot(self),
             workspaces: self
@@ -196,6 +222,10 @@ impl RuntimeState {
 
     fn active_workspace_index(&self) -> Option<usize> {
         workspace_manager::active_workspace_index(self)
+    }
+
+    fn refresh_codex_cli(&mut self) {
+        self.codex_cli = detect_codex_cli_snapshot(self.settings.codex_cli_path.as_deref());
     }
 
     fn persisted_state(&self) -> persistence::PersistedWorkspaceState {
@@ -280,6 +310,102 @@ struct SettingsSnapshot {
     has_stored_openai_api_key: bool,
     #[serde(rename = "hasEnvironmentOpenAiApiKey")]
     has_environment_openai_api_key: bool,
+    codex_cli: CodexCliSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexCliSnapshot {
+    status: CodexCliStatus,
+    selection_mode: CodexCliSelectionMode,
+    configured_path: Option<String>,
+    effective_path: Option<String>,
+    effective_version: Option<String>,
+    message: Option<String>,
+    candidates: Vec<CodexCliCandidateSnapshot>,
+}
+
+impl CodexCliSnapshot {
+    fn unavailable(message: impl Into<String>) -> Self {
+        Self {
+            status: CodexCliStatus::Unavailable,
+            selection_mode: CodexCliSelectionMode::Auto,
+            configured_path: None,
+            effective_path: None,
+            effective_version: None,
+            message: Some(message.into()),
+            candidates: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexCliCandidateSnapshot {
+    path: String,
+    version: String,
+    source: CodexCliSource,
+    is_selected: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum CodexCliStatus {
+    Ready,
+    Unavailable,
+    InvalidSelection,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum CodexCliSelectionMode {
+    Auto,
+    Custom,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum CodexCliSource {
+    Homebrew,
+    NpmGlobal,
+    Nvm,
+    Volta,
+    Path,
+    Custom,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SystemHealthSnapshot {
+    availability: SystemHealthAvailability,
+    cpu_percent: f64,
+    memory_used_bytes: u64,
+    memory_total_bytes: u64,
+    memory_percent: f64,
+    disk_used_bytes: u64,
+    disk_total_bytes: u64,
+    disk_percent: f64,
+    battery_percent: Option<f64>,
+    battery_state: Option<BatteryState>,
+    last_refreshed_at_ms: u64,
+    error_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum SystemHealthAvailability {
+    Ready,
+    Unavailable,
+    Error,
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum BatteryState {
+    Charging,
+    Discharging,
+    Full,
+    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -534,6 +660,522 @@ fn has_openai_api_key_in_environment() -> bool {
         .unwrap_or(false)
 }
 
+fn normalize_optional_codex_cli_path(value: Option<String>) -> Option<String> {
+    value.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn detect_codex_cli_snapshot(configured_path: Option<&str>) -> CodexCliSnapshot {
+    let configured_path = configured_path
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let candidates = discover_codex_cli_candidates();
+    let mut configured_candidate = None;
+    let mut configured_error = None;
+
+    if let Some(path) = configured_path.as_deref() {
+        match probe_codex_cli_candidate(Path::new(path), CodexCliSource::Custom) {
+            Ok(candidate) => configured_candidate = Some(candidate),
+            Err(error) => configured_error = Some(error),
+        }
+    }
+
+    build_codex_cli_snapshot(
+        configured_path,
+        candidates,
+        configured_candidate,
+        configured_error,
+    )
+}
+
+fn build_codex_cli_snapshot(
+    configured_path: Option<String>,
+    mut candidates: Vec<CodexCliCandidateSnapshot>,
+    configured_candidate: Option<CodexCliCandidateSnapshot>,
+    configured_error: Option<String>,
+) -> CodexCliSnapshot {
+    if let Some(candidate) = configured_candidate {
+        merge_codex_cli_candidate(&mut candidates, candidate);
+    }
+
+    sort_codex_cli_candidates(&mut candidates);
+
+    let selection_mode = if configured_path.is_some() {
+        CodexCliSelectionMode::Custom
+    } else {
+        CodexCliSelectionMode::Auto
+    };
+
+    let effective_path = configured_path
+        .as_ref()
+        .and_then(|path| {
+            let configured_key = canonical_codex_path_key(Path::new(path));
+            candidates
+                .iter()
+                .find(|candidate| {
+                    canonical_codex_path_key(Path::new(&candidate.path)) == configured_key
+                })
+                .map(|candidate| candidate.path.clone())
+        })
+        .or_else(|| candidates.first().map(|candidate| candidate.path.clone()));
+
+    let effective_version = effective_path.as_ref().and_then(|selected_path| {
+        candidates
+            .iter()
+            .find(|candidate| candidate.path == *selected_path)
+            .map(|candidate| candidate.version.clone())
+    });
+
+    for candidate in &mut candidates {
+        candidate.is_selected = effective_path
+            .as_ref()
+            .map(|selected_path| selected_path == &candidate.path)
+            .unwrap_or(false);
+    }
+
+    let (status, message) = match (
+        configured_path.as_ref(),
+        configured_error.as_ref(),
+        effective_path.as_ref(),
+    ) {
+        (Some(_), Some(error), Some(_)) => (
+            CodexCliStatus::InvalidSelection,
+            Some(format!(
+                "{error} CrewDock fell back to the newest detected Codex CLI."
+            )),
+        ),
+        (Some(_), Some(error), None) => (CodexCliStatus::InvalidSelection, Some(error.clone())),
+        (Some(_), None, Some(_)) => (
+            CodexCliStatus::Ready,
+            Some("Using the configured Codex CLI path.".to_string()),
+        ),
+        (Some(_), None, None) => (
+            CodexCliStatus::InvalidSelection,
+            Some("CrewDock could not resolve the configured Codex CLI path.".to_string()),
+        ),
+        (None, _, Some(_)) => (
+            CodexCliStatus::Ready,
+            if candidates.len() > 1 {
+                Some("Using the newest detected Codex CLI on PATH.".to_string())
+            } else {
+                Some("Using the detected Codex CLI on PATH.".to_string())
+            },
+        ),
+        (None, _, None) => (
+            CodexCliStatus::Unavailable,
+            Some("No Codex CLI installation was detected on PATH.".to_string()),
+        ),
+    };
+
+    CodexCliSnapshot {
+        status,
+        selection_mode,
+        configured_path,
+        effective_path,
+        effective_version,
+        message,
+        candidates,
+    }
+}
+
+fn discover_codex_cli_candidates() -> Vec<CodexCliCandidateSnapshot> {
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+
+    for path in discover_codex_cli_candidate_paths() {
+        let key = canonical_codex_path_key(&path);
+        if !seen.insert(key) {
+            continue;
+        }
+
+        if let Ok(candidate) = probe_codex_cli_candidate(&path, infer_codex_cli_source(&path)) {
+            candidates.push(candidate);
+        }
+    }
+
+    candidates
+}
+
+fn discover_codex_cli_candidate_paths() -> Vec<PathBuf> {
+    let mut results = Vec::new();
+    let Some(raw_path) = env::var_os("PATH") else {
+        return results;
+    };
+
+    let executable_names: &[&str] = if cfg!(target_os = "windows") {
+        &["codex.exe", "codex.cmd", "codex.bat", "codex"]
+    } else {
+        &["codex"]
+    };
+
+    for directory in env::split_paths(&raw_path) {
+        for executable_name in executable_names {
+            let candidate = directory.join(executable_name);
+            if candidate.is_file() {
+                results.push(candidate);
+            }
+        }
+    }
+
+    results
+}
+
+fn probe_codex_cli_candidate(
+    path: &Path,
+    source: CodexCliSource,
+) -> Result<CodexCliCandidateSnapshot, String> {
+    if !path.is_absolute() {
+        return Err("Enter an absolute path to the Codex CLI binary.".to_string());
+    }
+
+    if !path.is_file() {
+        return Err(format!("Codex CLI was not found at {}.", path.display()));
+    }
+
+    let output = ProcessCommand::new(path)
+        .arg("--version")
+        .output()
+        .map_err(|error| format!("Failed to run {}: {error}", path.display()))?;
+    let combined_output = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    if !output.status.success() {
+        let reason = combined_output
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("Codex CLI exited with an error.");
+        return Err(format!(
+            "Configured Codex CLI path is not usable: {}",
+            reason
+        ));
+    }
+
+    let version = parse_codex_cli_version(&combined_output).ok_or_else(|| {
+        format!(
+            "CrewDock could not parse a Codex CLI version from {}.",
+            path.display()
+        )
+    })?;
+
+    Ok(CodexCliCandidateSnapshot {
+        path: path.display().to_string(),
+        version,
+        source,
+        is_selected: false,
+    })
+}
+
+fn parse_codex_cli_version(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let mut parts = line.split_whitespace();
+        while let Some(part) = parts.next() {
+            if part == "codex-cli" {
+                return parts.next().map(str::to_string);
+            }
+        }
+        None
+    })
+}
+
+fn infer_codex_cli_source(path: &Path) -> CodexCliSource {
+    let display = path.display().to_string().to_lowercase();
+    if display.contains("/.volta/") {
+        CodexCliSource::Volta
+    } else if display.contains("/.nvm/") {
+        CodexCliSource::Nvm
+    } else if display.contains("/cellar/") || display.contains("/linuxbrew/") {
+        CodexCliSource::Homebrew
+    } else if display.contains("node_modules") {
+        CodexCliSource::NpmGlobal
+    } else {
+        CodexCliSource::Path
+    }
+}
+
+fn merge_codex_cli_candidate(
+    candidates: &mut Vec<CodexCliCandidateSnapshot>,
+    incoming: CodexCliCandidateSnapshot,
+) {
+    let incoming_key = canonical_codex_path_key(Path::new(&incoming.path));
+    if let Some(existing) = candidates
+        .iter_mut()
+        .find(|candidate| canonical_codex_path_key(Path::new(&candidate.path)) == incoming_key)
+    {
+        if compare_codex_cli_versions(&incoming.version, &existing.version).is_gt() {
+            existing.version = incoming.version;
+        }
+        if incoming.source == CodexCliSource::Custom {
+            existing.source = CodexCliSource::Custom;
+        }
+        return;
+    }
+
+    candidates.push(incoming);
+}
+
+fn sort_codex_cli_candidates(candidates: &mut [CodexCliCandidateSnapshot]) {
+    candidates.sort_by(|left, right| {
+        compare_codex_cli_versions(&right.version, &left.version)
+            .then_with(|| left.path.cmp(&right.path))
+    });
+}
+
+fn compare_codex_cli_versions(left: &str, right: &str) -> Ordering {
+    let left_parts = parse_codex_cli_version_parts(left);
+    let right_parts = parse_codex_cli_version_parts(right);
+    let max_len = left_parts.len().max(right_parts.len());
+
+    for index in 0..max_len {
+        let left_value = *left_parts.get(index).unwrap_or(&0);
+        let right_value = *right_parts.get(index).unwrap_or(&0);
+        match left_value.cmp(&right_value) {
+            Ordering::Equal => continue,
+            ordering => return ordering,
+        }
+    }
+
+    Ordering::Equal
+}
+
+fn parse_codex_cli_version_parts(version: &str) -> Vec<u64> {
+    version
+        .split('.')
+        .filter_map(|part| {
+            let digits = part
+                .chars()
+                .take_while(|character| character.is_ascii_digit())
+                .collect::<String>();
+            if digits.is_empty() {
+                None
+            } else {
+                digits.parse::<u64>().ok()
+            }
+        })
+        .collect()
+}
+
+fn canonical_codex_path_key(path: &Path) -> String {
+    fs::canonicalize(path)
+        .unwrap_or_else(|_| path.to_path_buf())
+        .display()
+        .to_string()
+}
+
+impl SystemHealthSnapshot {
+    fn unavailable(message: impl Into<String>) -> Self {
+        Self {
+            availability: SystemHealthAvailability::Unavailable,
+            cpu_percent: 0.0,
+            memory_used_bytes: 0,
+            memory_total_bytes: 0,
+            memory_percent: 0.0,
+            disk_used_bytes: 0,
+            disk_total_bytes: 0,
+            disk_percent: 0.0,
+            battery_percent: None,
+            battery_state: None,
+            last_refreshed_at_ms: current_timestamp_ms(),
+            error_message: Some(message.into()),
+        }
+    }
+
+    fn error(message: impl Into<String>) -> Self {
+        Self {
+            availability: SystemHealthAvailability::Error,
+            cpu_percent: 0.0,
+            memory_used_bytes: 0,
+            memory_total_bytes: 0,
+            memory_percent: 0.0,
+            disk_used_bytes: 0,
+            disk_total_bytes: 0,
+            disk_percent: 0.0,
+            battery_percent: None,
+            battery_state: None,
+            last_refreshed_at_ms: current_timestamp_ms(),
+            error_message: Some(message.into()),
+        }
+    }
+}
+
+impl SystemHealthMonitor {
+    fn new() -> Self {
+        let mut system = System::new_with_specifics(
+            RefreshKind::nothing()
+                .with_cpu(CpuRefreshKind::everything())
+                .with_memory(MemoryRefreshKind::everything()),
+        );
+        system.refresh_cpu_usage();
+        system.refresh_memory();
+
+        Self {
+            system,
+            disks: Disks::new_with_refreshed_list_specifics(DiskRefreshKind::everything()),
+        }
+    }
+
+    fn collect_snapshot(&mut self) -> Result<SystemHealthSnapshot, String> {
+        if !cfg!(target_os = "macos") {
+            return Ok(SystemHealthSnapshot::unavailable(
+                "System monitoring is available on macOS only.",
+            ));
+        }
+
+        self.system.refresh_cpu_usage();
+        self.system.refresh_memory();
+        self.disks.refresh(true);
+
+        let cpu_percent = round_percentage(self.system.global_cpu_usage() as f64);
+        let memory_total_bytes = self.system.total_memory();
+        let memory_used_bytes = self.system.used_memory();
+        let memory_percent = percentage(memory_used_bytes, memory_total_bytes);
+        let (disk_used_bytes, disk_total_bytes) = primary_disk_usage(&self.disks).unwrap_or((0, 0));
+        let disk_percent = percentage(disk_used_bytes, disk_total_bytes);
+        let (battery_percent, battery_state) = collect_battery_snapshot();
+
+        Ok(SystemHealthSnapshot {
+            availability: SystemHealthAvailability::Ready,
+            cpu_percent,
+            memory_used_bytes,
+            memory_total_bytes,
+            memory_percent,
+            disk_used_bytes,
+            disk_total_bytes,
+            disk_percent,
+            battery_percent,
+            battery_state,
+            last_refreshed_at_ms: current_timestamp_ms(),
+            error_message: None,
+        })
+    }
+}
+
+fn current_timestamp_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+fn round_percentage(value: f64) -> f64 {
+    if !value.is_finite() {
+        return 0.0;
+    }
+
+    ((value * 10.0).round() / 10.0).clamp(0.0, 100.0)
+}
+
+fn percentage(value: u64, total: u64) -> f64 {
+    if total == 0 {
+        return 0.0;
+    }
+
+    round_percentage((value as f64 / total as f64) * 100.0)
+}
+
+fn primary_disk_usage(disks: &Disks) -> Option<(u64, u64)> {
+    let current_dir = env::current_dir().ok();
+    let disk = current_dir
+        .as_ref()
+        .and_then(|path| {
+            disks
+                .list()
+                .iter()
+                .filter(|disk| path.starts_with(disk.mount_point()))
+                .max_by_key(|disk| disk.mount_point().as_os_str().len())
+        })
+        .or_else(|| {
+            disks
+                .list()
+                .iter()
+                .find(|disk| disk.mount_point() == Path::new("/"))
+        })
+        .or_else(|| disks.list().iter().next())?;
+
+    let total = disk.total_space();
+    let available = disk.available_space();
+    Some((total.saturating_sub(available), total))
+}
+
+fn collect_battery_snapshot() -> (Option<f64>, Option<BatteryState>) {
+    #[cfg(target_os = "macos")]
+    {
+        let output = ProcessCommand::new("pmset")
+            .args(["-g", "batt"])
+            .output()
+            .ok();
+
+        let Some(output) = output else {
+            return (None, None);
+        };
+
+        if !output.status.success() {
+            return (None, None);
+        }
+
+        return parse_battery_snapshot(&String::from_utf8_lossy(&output.stdout));
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        (None, None)
+    }
+}
+
+fn parse_battery_snapshot(output: &str) -> (Option<f64>, Option<BatteryState>) {
+    for line in output.lines() {
+        let Some(percent_index) = line.find('%') else {
+            continue;
+        };
+
+        let percent_digits = line[..percent_index]
+            .chars()
+            .rev()
+            .take_while(|character| character.is_ascii_digit())
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>();
+
+        let battery_percent = percent_digits.parse::<f64>().ok().map(round_percentage);
+        let state_fragment = line[percent_index + 1..]
+            .split(';')
+            .nth(1)
+            .map(str::trim)
+            .unwrap_or("");
+        let normalized_state = state_fragment.to_ascii_lowercase();
+        let battery_state = if normalized_state.contains("discharging") {
+            Some(BatteryState::Discharging)
+        } else if normalized_state.contains("charging") {
+            Some(BatteryState::Charging)
+        } else if normalized_state.contains("charged")
+            || normalized_state.contains("finishing charge")
+        {
+            Some(BatteryState::Full)
+        } else if battery_percent.is_some() {
+            Some(BatteryState::Unknown)
+        } else {
+            None
+        };
+
+        if battery_percent.is_some() || battery_state.is_some() {
+            return (battery_percent, battery_state);
+        }
+    }
+
+    (None, None)
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 enum PersistedPaneLayout {
@@ -554,6 +1196,24 @@ fn get_app_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
         .lock()
         .map_err(|_| "failed to acquire application state".to_string())?;
     Ok(runtime.build_snapshot())
+}
+
+#[tauri::command]
+fn load_system_health_snapshot(
+    state: State<'_, SystemHealthState>,
+) -> Result<SystemHealthSnapshot, String> {
+    let mut monitor = state
+        .inner
+        .lock()
+        .map_err(|_| "failed to acquire system monitor state".to_string())?;
+
+    monitor.collect_snapshot().or_else(|error| {
+        if cfg!(target_os = "macos") {
+            Ok(SystemHealthSnapshot::error(error))
+        } else {
+            Ok(SystemHealthSnapshot::unavailable(error))
+        }
+    })
 }
 
 #[tauri::command]
@@ -873,6 +1533,53 @@ fn set_openai_api_key(
 
         runtime.settings.openai_api_key = normalize_optional_openai_api_key(openai_api_key);
         runtime.persist_to_disk()?;
+        runtime.build_snapshot()
+    };
+
+    emit_snapshot(&app, &snapshot)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn set_codex_cli_path(
+    codex_cli_path: Option<String>,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let snapshot = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        let normalized = normalize_optional_codex_cli_path(codex_cli_path);
+        if let Some(path) = normalized.as_deref() {
+            let path = Path::new(path);
+            probe_codex_cli_candidate(path, CodexCliSource::Custom)?;
+        }
+
+        runtime.settings.codex_cli_path = normalized;
+        runtime.refresh_codex_cli();
+        runtime.persist_to_disk()?;
+        runtime.build_snapshot()
+    };
+
+    emit_snapshot(&app, &snapshot)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn refresh_codex_cli_catalog(
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let snapshot = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        runtime.refresh_codex_cli();
         runtime.build_snapshot()
     };
 
@@ -1219,11 +1926,14 @@ fn git_push(
 fn git_publish_branch(
     workspace_id: String,
     branch_name: String,
+    remote_name: Option<String>,
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<WorkspaceSourceControlSnapshot, String> {
     let branch_name = validate_git_cli_arg(branch_name, "branch name")?;
-    let remote = resolve_default_git_remote(&state.inner, &workspace_id)?;
+    let remote = validate_optional_git_cli_arg(remote_name, "remote name")?
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(resolve_default_git_remote(&state.inner, &workspace_id)?);
     start_git_task(
         state.inner.clone(),
         app,
@@ -1372,24 +2082,13 @@ fn resolve_default_git_remote(
         .iter()
         .find(|workspace| workspace.id == workspace_id)
         .ok_or_else(|| "workspace not found".to_string())?;
-    let output = run_git_command("git", Path::new(&workspace.path), &["remote"])
-        .map_err(|error| error.message)?;
-    let remotes = output
-        .lines()
-        .map(str::trim)
-        .filter(|entry| !entry.is_empty())
-        .map(str::to_string)
-        .collect::<Vec<_>>();
-
+    let remotes = load_git_remotes(Path::new(&workspace.path))?;
     if remotes.is_empty() {
         return Err("no git remote configured for this repository".to_string());
     }
 
-    Ok(remotes
-        .iter()
-        .find(|remote| remote.as_str() == "origin")
-        .cloned()
-        .unwrap_or_else(|| remotes[0].clone()))
+    select_default_git_remote(&remotes)
+        .ok_or_else(|| "no git remote configured for this repository".to_string())
 }
 
 fn execute_launcher_command(
@@ -2651,6 +3350,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(AppState::default())
+        .manage(SystemHealthState::default())
         .setup(|app| {
             let shared = app.state::<AppState>().inner.clone();
             let restore = (|| -> Result<(Vec<PaneJob>, String), String> {
@@ -2662,6 +3362,8 @@ pub fn run() {
                 if let Err(error) = runtime.load_persisted_from_disk(persistence_path) {
                     eprintln!("{error}");
                 }
+
+                runtime.refresh_codex_cli();
 
                 let pane_jobs = runtime
                     .active_workspace_id
@@ -2683,6 +3385,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_app_snapshot,
+            load_system_health_snapshot,
             reset_to_launcher,
             create_workspace,
             rename_workspace,
@@ -2692,6 +3395,8 @@ pub fn run() {
             set_interface_text_scale,
             set_terminal_font_size,
             set_openai_api_key,
+            set_codex_cli_path,
+            refresh_codex_cli_catalog,
             refresh_workspace_git_status,
             load_workspace_source_control,
             load_workspace_git_diff,
@@ -2734,11 +3439,13 @@ mod tests {
     };
 
     use super::{
-        collect_git_detail, collect_git_detail_with_binary, complete_launcher_input_for_base,
-        default_launcher_path, execute_launcher_command, extract_navigation_target,
-        layout_for_pane_count, layout_presets, normalize_workspace_path,
+        build_codex_cli_snapshot, collect_git_detail, collect_git_detail_with_binary,
+        compare_codex_cli_versions, complete_launcher_input_for_base, default_launcher_path,
+        execute_launcher_command, extract_navigation_target, layout_for_pane_count, layout_presets,
+        normalize_workspace_path, parse_battery_snapshot, parse_codex_cli_version,
         parse_git_status_porcelain, persistence::ActivityEventKind, prepare_workspace_launch,
-        resolve_navigation_path, validate_git_cli_arg, GitFileKind, GitState, RuntimeState,
+        resolve_navigation_path, validate_git_cli_arg, BatteryState, CodexCliCandidateSnapshot,
+        CodexCliSelectionMode, CodexCliSource, CodexCliStatus, GitFileKind, GitState, RuntimeState,
         ThemeId, DEFAULT_INTERFACE_TEXT_SCALE, DEFAULT_TERMINAL_FONT_SIZE,
     };
 
@@ -2768,6 +3475,16 @@ mod tests {
         assert_eq!(presets[3].pane_count, 8);
         assert_eq!(presets[4].pane_count, 12);
         assert_eq!(presets[5].pane_count, 16);
+    }
+
+    #[test]
+    fn battery_snapshot_is_parsed_from_pmset_output() {
+        let output =
+            "Now drawing from 'AC Power'\n -InternalBattery-0 (id=22216803)\t100%; charged; 0:00 remaining present: true\n";
+        let (battery_percent, battery_state) = parse_battery_snapshot(output);
+
+        assert_eq!(battery_percent, Some(100.0));
+        assert!(matches!(battery_state, Some(BatteryState::Full)));
     }
 
     #[test]
@@ -2914,6 +3631,27 @@ mod tests {
             Some("sk-test-123")
         );
         assert!(runtime.build_snapshot().settings.has_stored_openai_api_key);
+    }
+
+    #[test]
+    fn persisted_codex_cli_path_is_restored_from_disk() {
+        let fixture = TestWorkspace::new();
+        let persistence_path = fixture.root_dir().join("workspaces.json");
+        fs::write(
+            &persistence_path,
+            r#"{"settings":{"codexCliPath":"/usr/local/bin/codex"},"workspaces":[]}"#,
+        )
+        .expect("should write persisted state");
+
+        let mut runtime = RuntimeState::seeded();
+        runtime
+            .load_persisted_from_disk(persistence_path)
+            .expect("should load persisted state");
+
+        assert_eq!(
+            runtime.settings.codex_cli_path.as_deref(),
+            Some("/usr/local/bin/codex")
+        );
     }
 
     #[test]
@@ -3086,6 +3824,57 @@ mod tests {
         assert_eq!(parsed.ahead, 2);
         assert_eq!(parsed.behind, 1);
         assert!(parsed.files.is_empty());
+    }
+
+    #[test]
+    fn codex_cli_version_parser_handles_noisy_output() {
+        let version =
+            parse_codex_cli_version("WARNING: could not update PATH\ncodex-cli 0.116.0\n");
+
+        assert_eq!(version.as_deref(), Some("0.116.0"));
+    }
+
+    #[test]
+    fn codex_cli_version_sort_prefers_newer_release() {
+        assert!(compare_codex_cli_versions("0.116.0", "0.42.0").is_gt());
+        assert!(compare_codex_cli_versions("0.116.0", "0.116.0").is_eq());
+        assert!(compare_codex_cli_versions("0.98.0", "0.116.0").is_lt());
+    }
+
+    #[test]
+    fn codex_cli_snapshot_falls_back_when_custom_path_is_invalid() {
+        let snapshot = build_codex_cli_snapshot(
+            Some("/custom/bin/codex".to_string()),
+            vec![
+                CodexCliCandidateSnapshot {
+                    path: "/usr/local/bin/codex".to_string(),
+                    version: "0.116.0".to_string(),
+                    source: CodexCliSource::NpmGlobal,
+                    is_selected: false,
+                },
+                CodexCliCandidateSnapshot {
+                    path: "/opt/homebrew/bin/codex".to_string(),
+                    version: "0.42.0".to_string(),
+                    source: CodexCliSource::Homebrew,
+                    is_selected: false,
+                },
+            ],
+            None,
+            Some("Configured Codex CLI path is not usable.".to_string()),
+        );
+
+        assert_eq!(snapshot.status, CodexCliStatus::InvalidSelection);
+        assert_eq!(snapshot.selection_mode, CodexCliSelectionMode::Custom);
+        assert_eq!(
+            snapshot.effective_path.as_deref(),
+            Some("/usr/local/bin/codex")
+        );
+        assert_eq!(snapshot.effective_version.as_deref(), Some("0.116.0"));
+        assert!(snapshot
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("fell back"));
     }
 
     #[test]

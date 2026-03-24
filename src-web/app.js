@@ -21,7 +21,8 @@ const MAX_PENDING_TERMINAL_BYTES = 4 * 1024 * 1024;
 const MAX_RUNTIME_ACTIVITY_ITEMS = 80;
 const MAX_WORKSPACE_ATTENTION_COUNT = 99;
 const LAUNCHER_CARD_TRANSITION_MS = 360;
-const GIT_REFRESH_INTERVAL_MS = 3000;
+const SYSTEM_HEALTH_IDLE_REFRESH_MS = 5000;
+const SYSTEM_HEALTH_PANEL_REFRESH_MS = 1000;
 const DEFAULT_THEME_ID = "one-dark";
 const DEFAULT_INTERFACE_TEXT_SCALE = 1;
 const MIN_INTERFACE_TEXT_SCALE = 0.85;
@@ -635,7 +636,11 @@ async function init() {
   document.addEventListener("submit", handleSubmit);
   document.addEventListener("input", handleInput);
   document.addEventListener("change", handleChange);
+  document.addEventListener("dragenter", handleDocumentDragHover, true);
+  document.addEventListener("dragover", handleDocumentDragHover, true);
+  document.addEventListener("drop", handleDocumentDrop, true);
   document.addEventListener("keydown", handleKeyDown);
+  document.addEventListener("paste", handlePaste, true);
   document.addEventListener("focusout", handleFocusOut, true);
   document.addEventListener("pointerdown", handlePointerDown, true);
   document.addEventListener("scroll", handleScroll, true);
@@ -646,6 +651,8 @@ async function init() {
 
   render();
   syncGitRefreshLoop();
+  syncSystemHealthLoop();
+  void loadSystemHealthSnapshot({ silent: true });
   void refreshActiveWorkspaceGitStatus();
 }
 
@@ -661,6 +668,10 @@ function detectPlatform() {
   }
 
   return "other";
+}
+
+function supportsSystemHealth() {
+  return detectPlatform() === "macos" && typeof bridge.loadSystemHealthSnapshot === "function";
 }
 
 function getActiveWorkspace() {
@@ -710,9 +721,109 @@ function focusPaneTerminal(paneId) {
     return;
   }
 
-  requestAnimationFrame(() => {
+  const focusTerminal = () => {
     paneTerminals.get(paneId)?.terminal.focus();
-  });
+  };
+
+  focusTerminal();
+  requestAnimationFrame(focusTerminal);
+}
+
+function claimPaneTerminalFocus(paneId, workspace = getActiveWorkspace()) {
+  const resolvedPaneId = setActivePaneId(paneId, workspace);
+  if (resolvedPaneId) {
+    focusPaneTerminal(resolvedPaneId);
+  }
+
+  return resolvedPaneId;
+}
+
+function clearDragHoverPaneId() {
+  uiState.dragHoverPaneId = null;
+}
+
+function syncDragHoverPaneId(paneId, workspace = getActiveWorkspace()) {
+  if (!paneId || !workspace) {
+    return null;
+  }
+
+  const didChange = uiState.dragHoverPaneId !== paneId;
+  uiState.dragHoverPaneId = paneId;
+  setActivePaneId(paneId, workspace);
+  if (didChange) {
+    focusPaneTerminal(paneId);
+  }
+  return paneId;
+}
+
+function isExternalFileDrag(dataTransfer) {
+  if (!dataTransfer) {
+    return false;
+  }
+
+  if ((dataTransfer.files?.length || 0) > 0) {
+    return true;
+  }
+
+  if (Array.from(dataTransfer.items || []).some((item) => item?.kind === "file")) {
+    return true;
+  }
+
+  const types = Array.from(dataTransfer?.types || []);
+  return types.some((type) =>
+    type === "Files"
+    || type === "public.file-url"
+    || type === "text/uri-list"
+    || type === "application/x-moz-file",
+  );
+}
+
+function isImageFileDrag(dataTransfer) {
+  if (!dataTransfer) {
+    return false;
+  }
+
+  if (
+    Array.from(dataTransfer.items || []).some(
+      (item) => item?.kind === "file" && typeof item.type === "string" && item.type.startsWith("image/"),
+    )
+  ) {
+    return true;
+  }
+
+  return Array.from(dataTransfer.files || []).some(
+    (file) => typeof file?.type === "string" && file.type.startsWith("image/"),
+  );
+}
+
+function resolvePaneIdFromViewportPoint(x, y) {
+  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+    return null;
+  }
+
+  const elements = typeof document.elementsFromPoint === "function"
+    ? document.elementsFromPoint(x, y)
+    : [document.elementFromPoint(x, y)];
+
+  for (const element of elements) {
+    const paneId = element?.closest?.("[data-pane-id]")?.dataset?.paneId || null;
+    if (paneId) {
+      return paneId;
+    }
+  }
+
+  return null;
+}
+
+function resolvePaneIdFromElement(element) {
+  return element?.closest?.("[data-pane-id]")?.dataset?.paneId || null;
+}
+
+function resolvePaneIdFromDragEvent(event) {
+  return (
+    resolvePaneIdFromViewportPoint(event.clientX, event.clientY)
+    || resolvePaneIdFromElement(event.target instanceof Element ? event.target : null)
+  );
 }
 
 function normalizeDropPosition(position) {
@@ -720,18 +831,34 @@ function normalizeDropPosition(position) {
     return null;
   }
 
-  const scaleFactor = window.devicePixelRatio || 1;
-  const logicalPosition = typeof position.toLogical === "function"
-    ? position.toLogical(scaleFactor)
-    : position;
-  const x = Number(logicalPosition?.x);
-  const y = Number(logicalPosition?.y);
-
-  if (!Number.isFinite(x) || !Number.isFinite(y)) {
+  const rawX = Number(position?.x);
+  const rawY = Number(position?.y);
+  if (!Number.isFinite(rawX) || !Number.isFinite(rawY)) {
     return null;
   }
 
-  return { x, y };
+  const withinViewport =
+    rawX >= 0
+    && rawY >= 0
+    && rawX <= window.innerWidth + 1
+    && rawY <= window.innerHeight + 1;
+  if (withinViewport) {
+    return { x: rawX, y: rawY };
+  }
+
+  // Some native drag payloads on macOS already arrive in logical coordinates.
+  // Only convert when the raw values are clearly outside the current viewport.
+  const scaleFactor = window.devicePixelRatio || 1;
+  const logicalPosition = typeof position.toLogical === "function"
+    ? position.toLogical(scaleFactor)
+    : { x: rawX / scaleFactor, y: rawY / scaleFactor };
+  const logicalX = Number(logicalPosition?.x);
+  const logicalY = Number(logicalPosition?.y);
+  if (!Number.isFinite(logicalX) || !Number.isFinite(logicalY)) {
+    return null;
+  }
+
+  return { x: logicalX, y: logicalY };
 }
 
 function resolvePaneIdFromDropPosition(position) {
@@ -740,8 +867,7 @@ function resolvePaneIdFromDropPosition(position) {
     return null;
   }
 
-  const element = document.elementFromPoint(logicalPosition.x, logicalPosition.y);
-  return element?.closest?.("[data-pane-id]")?.dataset?.paneId || null;
+  return resolvePaneIdFromViewportPoint(logicalPosition.x, logicalPosition.y);
 }
 
 function normalizeDroppedPaths(paths) {
@@ -762,25 +888,122 @@ function formatDroppedPathsForShell(paths) {
   return `${paths.map(quoteShellPath).join(" ")} `;
 }
 
+function rememberBrowserHandledDrop(paneId) {
+  runtimeStore.browserHandledDropPaneId = paneId || null;
+  runtimeStore.browserHandledDropAt = paneId ? Date.now() : 0;
+}
+
+function consumeBrowserHandledDrop(paneId) {
+  const isRecent =
+    runtimeStore.browserHandledDropPaneId
+    && runtimeStore.browserHandledDropPaneId === paneId
+    && Date.now() - runtimeStore.browserHandledDropAt < 1200;
+
+  runtimeStore.browserHandledDropPaneId = null;
+  runtimeStore.browserHandledDropAt = 0;
+  return Boolean(isRecent);
+}
+
+function resolveTerminalDropTarget(paneId) {
+  const terminalState = paneId ? paneTerminals.get(paneId) : null;
+  if (!terminalState?.element) {
+    return null;
+  }
+
+  return (
+    terminalState.terminal.textarea
+    || terminalState.element.querySelector(".xterm-helper-textarea")
+    || terminalState.element.querySelector(".xterm")
+    || terminalState.element.querySelector(`[data-terminal-host="${paneId}"]`)
+    || terminalState.element
+  );
+}
+
+function dispatchReroutedTerminalDrop(paneId, sourceEvent, workspace = getActiveWorkspace()) {
+  const target = resolveTerminalDropTarget(paneId);
+  if (!target || typeof DragEvent !== "function") {
+    return false;
+  }
+
+  claimPaneTerminalFocus(paneId, workspace);
+
+  try {
+    const reroutedEvent = new DragEvent("drop", {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+      dataTransfer: sourceEvent.dataTransfer,
+      clientX: sourceEvent.clientX,
+      clientY: sourceEvent.clientY,
+      screenX: sourceEvent.screenX,
+      screenY: sourceEvent.screenY,
+      ctrlKey: sourceEvent.ctrlKey,
+      shiftKey: sourceEvent.shiftKey,
+      altKey: sourceEvent.altKey,
+      metaKey: sourceEvent.metaKey,
+    });
+    Object.defineProperty(reroutedEvent, "__crewdockReroutedDrop", {
+      configurable: true,
+      value: true,
+    });
+    target.dispatchEvent(reroutedEvent);
+    return true;
+  } catch (error) {
+    console.error(error);
+    return false;
+  }
+}
+
 async function handleNativeDragDrop(payload) {
-  if (!payload || payload.type !== "drop") {
+  if (!payload) {
     return;
   }
 
   const workspace = getActiveWorkspace();
-  const paths = normalizeDroppedPaths(payload.paths);
-  if (!workspace || paths.length === 0) {
+  if (!workspace) {
+    clearDragHoverPaneId();
     return;
   }
 
-  const paneId = resolvePaneIdFromDropPosition(payload.position) || resolveActivePaneId(workspace);
+  if (payload.type === "over") {
+    const paneId = resolvePaneIdFromDropPosition(payload.position);
+    if (paneId) {
+      syncDragHoverPaneId(paneId, workspace);
+    }
+    return;
+  }
+
+  if (payload.type === "enter") {
+    return;
+  }
+
+  if (payload.type === "leave") {
+    clearDragHoverPaneId();
+    return;
+  }
+
+  if (payload.type !== "drop") {
+    return;
+  }
+
+  const paths = normalizeDroppedPaths(payload.paths);
+  const hoveredPaneId = uiState.dragHoverPaneId;
+  clearDragHoverPaneId();
+  if (paths.length === 0) {
+    return;
+  }
+
+  const paneId = hoveredPaneId || resolvePaneIdFromDropPosition(payload.position) || resolveActivePaneId(workspace);
   if (!paneId) {
     return;
   }
 
-  setActivePaneId(paneId, workspace);
+  if (consumeBrowserHandledDrop(paneId)) {
+    return;
+  }
+
+  claimPaneTerminalFocus(paneId, workspace);
   await bridge.writeToPane(paneId, formatDroppedPathsForShell(paths));
-  paneTerminals.get(paneId)?.terminal.focus();
 }
 
 function normalizeSettingsSection(section) {
@@ -833,7 +1056,20 @@ function hasEnvironmentOpenAiApiKey(snapshot = uiState.snapshot) {
   return Boolean(snapshot?.settings?.hasEnvironmentOpenAiApiKey);
 }
 
+function getCodexCliSnapshot(snapshot = uiState.snapshot) {
+  return snapshot?.settings?.codexCli || {
+    status: "unavailable",
+    selectionMode: "auto",
+    configuredPath: null,
+    effectivePath: null,
+    effectiveVersion: null,
+    message: "CrewDock has not scanned for Codex CLI yet.",
+    candidates: [],
+  };
+}
+
 function createSettingsDraft(snapshot = uiState.snapshot) {
+  const codexCli = getCodexCliSnapshot(snapshot);
   return {
     themeId: getActiveThemeId(snapshot),
     interfaceTextScale: getInterfaceTextScale(snapshot),
@@ -841,6 +1077,11 @@ function createSettingsDraft(snapshot = uiState.snapshot) {
     openAiApiKey: "",
     hasStoredOpenAiApiKey: hasStoredOpenAiApiKey(snapshot),
     hasEnvironmentOpenAiApiKey: hasEnvironmentOpenAiApiKey(snapshot),
+    codexCli,
+    codexCliSelectedPath: codexCli.configuredPath || "__auto__",
+    codexCliCustomPath: codexCli.configuredPath || "",
+    savingCodexCliPath: false,
+    refreshingCodexCli: false,
     savingOpenAiApiKey: false,
     applyingAppearance: false,
   };
@@ -881,6 +1122,18 @@ function getDraftHasEnvironmentOpenAiApiKey(snapshot = uiState.snapshot) {
   return Boolean(
     uiState.settingsDraft?.hasEnvironmentOpenAiApiKey ?? hasEnvironmentOpenAiApiKey(snapshot),
   );
+}
+
+function getDraftCodexCli(snapshot = uiState.snapshot) {
+  return uiState.settingsDraft?.codexCli || getCodexCliSnapshot(snapshot);
+}
+
+function getDraftCodexCliSelectedPath(snapshot = uiState.snapshot) {
+  return uiState.settingsDraft?.codexCliSelectedPath ?? getDraftCodexCli(snapshot).configuredPath ?? "__auto__";
+}
+
+function getDraftCodexCliCustomPath(snapshot = uiState.snapshot) {
+  return uiState.settingsDraft?.codexCliCustomPath ?? getDraftCodexCli(snapshot).configuredPath ?? "";
 }
 
 function getCurrentThemeDefinition() {
@@ -938,7 +1191,7 @@ function applyRenderedSettings(snapshot = uiState.snapshot) {
   applySettingsAppearance(
     useDraft ? getDraftThemeId(snapshot) : getActiveThemeId(snapshot),
     useDraft ? getDraftInterfaceTextScale(snapshot) : getInterfaceTextScale(snapshot),
-    getTerminalFontSize(snapshot),
+    useDraft ? getDraftTerminalFontSize(snapshot) : getTerminalFontSize(snapshot),
   );
 }
 
@@ -1124,6 +1377,7 @@ function previewTerminalFontSize(value) {
   }
 
   uiState.settingsDraft.terminalFontSize = normalizeTerminalFontSize(value);
+  applyRenderedSettings(uiState.snapshot);
   syncSettingsPreviewDom(document);
   syncSettingsActionDom(document);
 }
@@ -1246,6 +1500,73 @@ async function clearStoredOpenAiApiKey() {
   }
 }
 
+async function saveCodexCliPath(nextPath) {
+  if (!bridge.setCodexCliPath || !uiState.settingsVisible) {
+    return;
+  }
+
+  if (!uiState.settingsDraft) {
+    syncSettingsDraftFromSnapshot();
+  }
+
+  uiState.settingsDraft.savingCodexCliPath = true;
+  render();
+
+  try {
+    uiState.snapshot = await bridge.setCodexCliPath(nextPath);
+    syncSettingsDraftFromSnapshot(uiState.snapshot);
+    applySnapshotSettings(uiState.snapshot);
+  } catch (error) {
+    reportSourceControlError(error);
+  } finally {
+    if (uiState.settingsDraft) {
+      uiState.settingsDraft.savingCodexCliPath = false;
+    }
+    render();
+  }
+}
+
+async function saveSelectedCodexCliPath() {
+  const selectedPath = getDraftCodexCliSelectedPath();
+  await saveCodexCliPath(selectedPath === "__auto__" ? null : selectedPath);
+}
+
+async function saveCustomCodexCliPath() {
+  const customPath = getDraftCodexCliCustomPath().trim();
+  if (!customPath) {
+    window.alert("Enter an absolute path to the Codex CLI binary, or use Auto.");
+    return;
+  }
+
+  await saveCodexCliPath(customPath);
+}
+
+async function refreshCodexCliCatalog() {
+  if (!bridge.refreshCodexCliCatalog || !uiState.settingsVisible) {
+    return;
+  }
+
+  if (!uiState.settingsDraft) {
+    syncSettingsDraftFromSnapshot();
+  }
+
+  uiState.settingsDraft.refreshingCodexCli = true;
+  render();
+
+  try {
+    uiState.snapshot = await bridge.refreshCodexCliCatalog();
+    syncSettingsDraftFromSnapshot(uiState.snapshot);
+    applySnapshotSettings(uiState.snapshot);
+  } catch (error) {
+    reportSourceControlError(error);
+  } finally {
+    if (uiState.settingsDraft) {
+      uiState.settingsDraft.refreshingCodexCli = false;
+    }
+    render();
+  }
+}
+
 function bindSettingsSheetControls(root = document) {
   const settingsBackdrop = root.querySelector(".settings-sheet-backdrop");
   if (settingsBackdrop instanceof HTMLElement) {
@@ -1322,6 +1643,73 @@ function bindSettingsSheetControls(root = document) {
       void clearStoredOpenAiApiKey();
     });
   }
+
+  const codexSelect = root.querySelector("[data-settings-codex-select]");
+  if (codexSelect instanceof HTMLSelectElement) {
+    codexSelect.addEventListener("change", (event) => {
+      event.stopPropagation();
+      if (!uiState.settingsDraft) {
+        syncSettingsDraftFromSnapshot();
+      }
+      uiState.settingsDraft.codexCliSelectedPath = codexSelect.value || "__auto__";
+    });
+  }
+
+  const codexCustomInput = root.querySelector("[data-settings-codex-custom-path-input]");
+  if (codexCustomInput instanceof HTMLInputElement) {
+    codexCustomInput.addEventListener("input", (event) => {
+      event.stopPropagation();
+      if (!uiState.settingsDraft) {
+        syncSettingsDraftFromSnapshot();
+      }
+      uiState.settingsDraft.codexCliCustomPath = codexCustomInput.value;
+    });
+    codexCustomInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      void saveCustomCodexCliPath();
+    });
+  }
+
+  const codexSelectButton = root.querySelector("[data-settings-codex-apply-selection]");
+  if (codexSelectButton instanceof HTMLButtonElement) {
+    codexSelectButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void saveSelectedCodexCliPath();
+    });
+  }
+
+  const codexCustomButton = root.querySelector("[data-settings-codex-save-custom]");
+  if (codexCustomButton instanceof HTMLButtonElement) {
+    codexCustomButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void saveCustomCodexCliPath();
+    });
+  }
+
+  const codexAutoButton = root.querySelector("[data-settings-codex-auto]");
+  if (codexAutoButton instanceof HTMLButtonElement) {
+    codexAutoButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void saveCodexCliPath(null);
+    });
+  }
+
+  const codexRefreshButton = root.querySelector("[data-settings-codex-refresh]");
+  if (codexRefreshButton instanceof HTMLButtonElement) {
+    codexRefreshButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void refreshCodexCliCatalog();
+    });
+  }
 }
 
 function bindModalLayerControls(root = document) {
@@ -1355,7 +1743,7 @@ function bindModalLayerControls(root = document) {
     if (gitCloseButton) {
       event.preventDefault();
       event.stopPropagation();
-      uiState.gitPanelVisible = false;
+      closeSourceControlPanel();
       render();
       return;
     }
@@ -1363,7 +1751,7 @@ function bindModalLayerControls(root = document) {
     if (clickedElement.classList.contains("workspace-git-backdrop")) {
       event.preventDefault();
       event.stopPropagation();
-      uiState.gitPanelVisible = false;
+      closeSourceControlPanel();
       render();
       return;
     }
@@ -1394,12 +1782,12 @@ function syncMountedTerminalAppearance(
     let shouldRefit = false;
     let shouldRefresh = false;
     if (state.themeId !== theme.id) {
-      state.terminal.setOption("theme", { ...theme.terminalTheme });
+      state.terminal.options.theme = { ...theme.terminalTheme };
       state.themeId = theme.id;
       shouldRefresh = true;
     }
     if (state.fontSize !== terminalFontSize) {
-      state.terminal.setOption("fontSize", terminalFontSize);
+      state.terminal.options.fontSize = terminalFontSize;
       state.fontSize = terminalFontSize;
       shouldRefit = true;
       shouldRefresh = true;
@@ -1444,6 +1832,14 @@ async function handleClick(event) {
   }
 
   if (
+    target.dataset.action === "close-scm-publish-modal"
+    && target.classList.contains("workspace-scm-inline-modal")
+    && clickedElement?.closest(".workspace-scm-publish-dialog")
+  ) {
+    return;
+  }
+
+  if (
     target.dataset.action === "close-quick-switcher"
     && target.classList.contains("workspace-quick-switcher-backdrop")
     && clickedElement?.closest(".workspace-quick-switcher")
@@ -1456,7 +1852,10 @@ async function handleClick(event) {
     return;
   }
 
-  if (target.dataset.action?.startsWith("scm-")) {
+  if (
+    target.dataset.action?.startsWith("scm-")
+    || target.dataset.action === "close-scm-publish-modal"
+  ) {
     await handleSourceControlAction(target);
     return;
   }
@@ -1464,7 +1863,8 @@ async function handleClick(event) {
   if (target.dataset.action === "show-settings") {
     uiState.settingsVisible = true;
     uiState.settingsSection = "workbench";
-    uiState.gitPanelVisible = false;
+    closeSystemHealthPanel();
+    closeSourceControlPanel();
     uiState.activityRailVisible = false;
     closeQuickSwitcher();
     uiState.pendingWorkspaceDraft = null;
@@ -1490,7 +1890,8 @@ async function handleClick(event) {
   if (target.dataset.action === "show-launcher") {
     uiState.launcherVisible = true;
     hideSettingsSheet();
-    uiState.gitPanelVisible = false;
+    closeSystemHealthPanel();
+    closeSourceControlPanel();
     uiState.activityRailVisible = false;
     closeQuickSwitcher();
     uiState.pendingWorkspaceDraft = null;
@@ -1502,6 +1903,27 @@ async function handleClick(event) {
 
   if (target.dataset.action === "show-git-panel") {
     await openSourceControlPanel({ force: true });
+    return;
+  }
+
+  if (target.dataset.action === "toggle-system-health-panel") {
+    toggleSystemHealthPanel();
+    render({ refreshVisibleTerminals: false });
+    if (uiState.systemHealthPanelVisible) {
+      void loadSystemHealthSnapshot({ force: true });
+    }
+    return;
+  }
+
+  if (target.dataset.action === "close-system-health-panel") {
+    if (closeSystemHealthPanel()) {
+      render({ refreshVisibleTerminals: false });
+    }
+    return;
+  }
+
+  if (target.dataset.action === "refresh-system-health") {
+    await loadSystemHealthSnapshot({ force: true });
     return;
   }
 
@@ -1551,7 +1973,7 @@ async function handleClick(event) {
   }
 
   if (target.dataset.action === "close-git-panel") {
-    uiState.gitPanelVisible = false;
+    closeSourceControlPanel();
     render();
     return;
   }
@@ -1582,7 +2004,8 @@ async function handleClick(event) {
 
   if (target.dataset.action === "open-workspace") {
     hideSettingsSheet();
-    uiState.gitPanelVisible = false;
+    closeSystemHealthPanel();
+    closeSourceControlPanel();
     uiState.activityRailVisible = false;
     closeQuickSwitcher();
     await beginWorkspaceCreation();
@@ -1685,7 +2108,6 @@ async function handleClick(event) {
     uiState.pendingWorkspaceDraft = null;
     clearLauncherCommandState();
     render();
-    void refreshActiveWorkspaceGitStatus({ force: true });
     return;
   }
 
@@ -1727,7 +2149,6 @@ async function handleClick(event) {
 
     uiState.snapshot = await bridge.closeWorkspace(workspaceId);
     render();
-    void refreshActiveWorkspaceGitStatus({ force: true });
   }
 }
 
@@ -1774,23 +2195,137 @@ function handleMouseDown(event) {
 }
 
 function handlePointerDown(event) {
-  const paneId = event.target instanceof Element
-    ? event.target.closest("[data-pane-id]")?.dataset?.paneId || null
-    : null;
+  const target = event.target instanceof Element ? event.target : null;
+  const paneId = target?.closest("[data-pane-id]")?.dataset?.paneId || null;
   if (paneId) {
-    setActivePaneId(paneId);
+    if (event.button === 0) {
+      claimPaneTerminalFocus(paneId);
+    } else {
+      setActivePaneId(paneId);
+    }
   }
 
-  if (!uiState.contextMenu) {
+  let shouldRender = false;
+
+  if (uiState.sourceControl.activeRowMenuKey && !target?.closest("[data-scm-row-menu-shell]")) {
+    closeSourceControlRowMenu();
+    shouldRender = true;
+  }
+
+  if (uiState.contextMenu && !target?.closest(".terminal-context-menu")) {
+    uiState.contextMenu = null;
+    shouldRender = true;
+  }
+
+  if (
+    uiState.systemHealthPanelVisible
+    && !target?.closest("[data-system-health-panel]")
+    && target?.closest('[data-action="toggle-system-health-panel"]') == null
+  ) {
+    closeSystemHealthPanel();
+    shouldRender = true;
+  }
+
+  if (shouldRender) {
+    render({ refreshVisibleTerminals: false });
+  }
+}
+
+function handlePaste(event) {
+  const target = event.target instanceof Element ? event.target : null;
+  const isTerminalPaste = Boolean(
+    target?.closest(".xterm") || target?.classList?.contains("xterm-helper-textarea"),
+  );
+  if (!isTerminalPaste) {
     return;
   }
 
-  if (event.target.closest(".terminal-context-menu")) {
+  const clipboard = event.clipboardData;
+  const clipboardTypes = Array.from(clipboard?.types || []);
+  if (!clipboard || !clipboardTypes.includes("text/plain")) {
     return;
   }
 
-  uiState.contextMenu = null;
-  render();
+  const workspace = getActiveWorkspace();
+  const paneId = resolveActivePaneId(workspace);
+  const terminalState = paneId ? paneTerminals.get(paneId) : null;
+  if (!paneId || !terminalState) {
+    return;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+
+  claimPaneTerminalFocus(paneId, workspace);
+  terminalState.terminal.paste(clipboard.getData("text/plain"));
+}
+
+function handleDocumentDragHover(event) {
+  if (!isExternalFileDrag(event.dataTransfer)) {
+    return;
+  }
+
+  const workspace = getActiveWorkspace();
+  if (!workspace) {
+    return;
+  }
+
+  const paneId = resolvePaneIdFromDragEvent(event);
+  if (!paneId) {
+    return;
+  }
+
+  event.preventDefault();
+  if (event.dataTransfer) {
+    event.dataTransfer.dropEffect = "copy";
+  }
+
+  syncDragHoverPaneId(paneId, workspace);
+}
+
+function handleDocumentDrop(event) {
+  if (event.__crewdockReroutedDrop) {
+    return;
+  }
+
+  if (!isExternalFileDrag(event.dataTransfer)) {
+    return;
+  }
+
+  const workspace = getActiveWorkspace();
+  const target = event.target instanceof Element ? event.target : null;
+  const targetPaneId = resolvePaneIdFromElement(target);
+  const pointerPaneId = resolvePaneIdFromViewportPoint(event.clientX, event.clientY);
+  const paneId =
+    pointerPaneId
+    || uiState.dragHoverPaneId
+    || targetPaneId
+    || resolveActivePaneId(workspace);
+
+  if (paneId && workspace) {
+    syncDragHoverPaneId(paneId, workspace);
+    if (isImageFileDrag(event.dataTransfer)) {
+      // Let browser-handled image drops reach Codex while keeping the pane target in sync.
+      rememberBrowserHandledDrop(paneId);
+      if (
+        targetPaneId !== paneId
+        && dispatchReroutedTerminalDrop(paneId, event, workspace)
+      ) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      window.setTimeout(() => {
+        if (runtimeStore.browserHandledDropPaneId === paneId) {
+          rememberBrowserHandledDrop(null);
+        }
+      }, 1500);
+      clearDragHoverPaneId();
+      return;
+    }
+  }
+
+  event.preventDefault();
+  clearDragHoverPaneId();
 }
 
 function handleScroll(event) {
@@ -1842,17 +2377,19 @@ function handleWindowResize() {
 
 function handleWindowFocus() {
   syncGitRefreshLoop();
+  syncSystemHealthLoop();
+  void loadSystemHealthSnapshot({ force: true, silent: true });
   const activeWorkspaceId = uiState.snapshot?.activeWorkspaceId || null;
   const didClearAttention = markWorkspaceAttentionSeen(activeWorkspaceId);
   if (didClearAttention && activeWorkspaceId) {
     render();
   }
   scheduleVisibleTerminalRefresh();
-  void refreshActiveWorkspaceGitStatus({ force: true });
 }
 
 function handleWindowBlur() {
   syncGitRefreshLoop();
+  syncSystemHealthLoop();
 }
 
 function handleFocusOut(event) {
@@ -1967,6 +2504,12 @@ function handleInput(event) {
 }
 
 async function handleChange(event) {
+  const publishRemoteSelect = event.target.closest("[data-scm-publish-remote]");
+  if (publishRemoteSelect) {
+    uiState.sourceControl.publishModalSelectedRemote = publishRemoteSelect.value;
+    return;
+  }
+
   const countInput = event.target.closest("[data-terminal-count-input]");
   if (!countInput || !uiState.pendingWorkspaceDraft) {
     return;
@@ -2032,7 +2575,8 @@ async function handleKeyDown(event) {
     event.preventDefault();
     uiState.settingsVisible = true;
     uiState.settingsSection = "workbench";
-    uiState.gitPanelVisible = false;
+    closeSystemHealthPanel();
+    closeSourceControlPanel();
     uiState.activityRailVisible = false;
     closeQuickSwitcher();
     uiState.pendingWorkspaceDraft = null;
@@ -2058,11 +2602,18 @@ async function handleKeyDown(event) {
   if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "g") {
     event.preventDefault();
     if (uiState.gitPanelVisible) {
-      uiState.gitPanelVisible = false;
+      closeSourceControlPanel();
     } else {
       await openSourceControlPanel({ force: true });
     }
     render();
+    return;
+  }
+
+  if (uiState.systemHealthPanelVisible && event.key === "Escape") {
+    event.preventDefault();
+    closeSystemHealthPanel();
+    render({ refreshVisibleTerminals: false });
     return;
   }
 
@@ -2081,7 +2632,15 @@ async function handleKeyDown(event) {
 
   if (uiState.gitPanelVisible && event.key === "Escape") {
     event.preventDefault();
-    uiState.gitPanelVisible = false;
+    if (closeSourceControlPublishModal()) {
+      render();
+      return;
+    }
+    if (closeSourceControlRowMenu()) {
+      render();
+      return;
+    }
+    closeSourceControlPanel();
     render();
     return;
   }
@@ -2146,6 +2705,7 @@ async function handleKeyDown(event) {
     uiState.quickSwitcherVisible
     || uiState.settingsVisible
     || uiState.gitPanelVisible
+    || uiState.systemHealthPanelVisible
     || uiState.pendingWorkspaceDraft
   ) {
     return;
@@ -2227,7 +2787,6 @@ async function activateWorkspace(workspaceId) {
     resetSourceControlState();
     void loadActiveWorkspaceSourceControl({ force: true });
   }
-  void refreshActiveWorkspaceGitStatus({ force: true });
 }
 
 function openQuickSwitcher() {
@@ -2238,6 +2797,7 @@ function openQuickSwitcher() {
   uiState.quickSwitcherVisible = true;
   uiState.launcherVisible = false;
   uiState.activityRailVisible = false;
+  closeSystemHealthPanel();
   uiState.quickSwitcherQuery = "";
   uiState.quickSwitcherCursor = Math.max(
     0,
@@ -2245,7 +2805,7 @@ function openQuickSwitcher() {
   );
   uiState.quickSwitcherShouldFocus = true;
   hideSettingsSheet();
-  uiState.gitPanelVisible = false;
+  closeSourceControlPanel();
   uiState.pendingWorkspaceDraft = null;
   uiState.contextMenu = null;
 }
@@ -2255,6 +2815,209 @@ function closeQuickSwitcher() {
   uiState.quickSwitcherQuery = "";
   uiState.quickSwitcherCursor = 0;
   uiState.quickSwitcherShouldFocus = false;
+}
+
+function closeSystemHealthPanel() {
+  if (!uiState.systemHealthPanelVisible) {
+    return false;
+  }
+
+  uiState.systemHealthPanelVisible = false;
+  syncSystemHealthLoop();
+  return true;
+}
+
+function toggleSystemHealthPanel(forceVisible = !uiState.systemHealthPanelVisible) {
+  if (!supportsSystemHealth()) {
+    return;
+  }
+
+  if (!forceVisible) {
+    closeSystemHealthPanel();
+    return;
+  }
+
+  uiState.systemHealthPanelVisible = true;
+  hideSettingsSheet();
+  closeSourceControlPanel();
+  uiState.activityRailVisible = false;
+  closeQuickSwitcher();
+  uiState.pendingWorkspaceDraft = null;
+  uiState.contextMenu = null;
+  cancelWorkspaceRename();
+  syncSystemHealthLoop();
+}
+
+function closeSourceControlRowMenu() {
+  if (!uiState.sourceControl.activeRowMenuKey) {
+    return false;
+  }
+
+  uiState.sourceControl.activeRowMenuKey = "";
+  return true;
+}
+
+function isSourceControlRowMenuOpen(kind, key) {
+  return uiState.sourceControl.activeRowMenuKey === `${kind}:${key}`;
+}
+
+function toggleSourceControlRowMenu(kind, key) {
+  const nextKey = `${kind}:${key}`;
+  uiState.sourceControl.activeRowMenuKey = uiState.sourceControl.activeRowMenuKey === nextKey
+    ? ""
+    : nextKey;
+}
+
+function syncSourceControlTaskTray(task, previousTask = null) {
+  if (!task) {
+    uiState.sourceControl.taskTrayExpanded = false;
+    return;
+  }
+
+  const isNewTask = !previousTask || previousTask.id !== task.id;
+  if (task.canWriteInput || task.status === "failed") {
+    uiState.sourceControl.taskTrayExpanded = true;
+    return;
+  }
+
+  if (isNewTask) {
+    uiState.sourceControl.taskTrayExpanded = false;
+  }
+}
+
+function normalizeSourceControlRemoteOptions(remotes = [], defaultRemote = "") {
+  const seen = new Set();
+  const normalized = (Array.isArray(remotes) ? remotes : [])
+    .map((remote) => {
+      const name = typeof remote === "string"
+        ? remote.trim()
+        : String(remote?.name || "").trim();
+      if (!name || seen.has(name)) {
+        return null;
+      }
+      seen.add(name);
+      return {
+        name,
+        isDefault: Boolean(typeof remote === "object" && remote?.isDefault),
+      };
+    })
+    .filter(Boolean);
+
+  const resolvedDefault = normalized.find((remote) => remote.name === defaultRemote)?.name
+    || normalized.find((remote) => remote.isDefault)?.name
+    || normalized[0]?.name
+    || "";
+
+  return {
+    remotes: normalized.map((remote) => ({
+      ...remote,
+      isDefault: remote.name === resolvedDefault,
+    })),
+    defaultRemote: resolvedDefault,
+  };
+}
+
+function closeSourceControlPublishModal() {
+  if (!uiState.sourceControl.publishModalVisible) {
+    return false;
+  }
+
+  uiState.sourceControl.publishModalVisible = false;
+  uiState.sourceControl.publishModalBranchName = "";
+  uiState.sourceControl.publishModalRemotes = [];
+  uiState.sourceControl.publishModalSelectedRemote = "";
+  uiState.sourceControl.publishModalShouldFocus = false;
+  return true;
+}
+
+function openSourceControlPublishModal({
+  branchName,
+  remotes = [],
+  defaultRemote = "",
+} = {}) {
+  const options = normalizeSourceControlRemoteOptions(remotes, defaultRemote);
+  uiState.sourceControl.publishModalVisible = true;
+  uiState.sourceControl.publishModalBranchName = branchName;
+  uiState.sourceControl.publishModalRemotes = options.remotes;
+  uiState.sourceControl.publishModalSelectedRemote = options.defaultRemote;
+  uiState.sourceControl.publishModalShouldFocus = true;
+}
+
+function closeSourceControlPanel() {
+  closeSourceControlPublishModal();
+  uiState.gitPanelVisible = false;
+  closeSourceControlRowMenu();
+}
+
+function focusSourceControlPublishModal(root = document) {
+  if (!uiState.sourceControl.publishModalVisible || !uiState.sourceControl.publishModalShouldFocus) {
+    return;
+  }
+
+  const focusTarget =
+    root.querySelector("[data-scm-publish-remote]")
+    || root.querySelector('[data-action="scm-confirm-publish-branch"]');
+  if (focusTarget instanceof HTMLElement) {
+    focusTarget.focus({ preventScroll: true });
+  }
+  uiState.sourceControl.publishModalShouldFocus = false;
+}
+
+function captureSettingsFocusState(root = document) {
+  const activeElement = document.activeElement;
+  if (!(activeElement instanceof HTMLInputElement || activeElement instanceof HTMLTextAreaElement)) {
+    return null;
+  }
+
+  if (!root.contains(activeElement) || !activeElement.closest(".settings-sheet")) {
+    return null;
+  }
+
+  const selector = [
+    "[data-settings-openai-api-key-input]",
+    "[data-settings-interface-range]",
+    "[data-settings-terminal-range]",
+  ].find((candidate) => activeElement.matches(candidate));
+
+  if (!selector) {
+    return null;
+  }
+
+  return {
+    selector,
+    selectionStart: typeof activeElement.selectionStart === "number" ? activeElement.selectionStart : null,
+    selectionEnd: typeof activeElement.selectionEnd === "number" ? activeElement.selectionEnd : null,
+    scrollTop: "scrollTop" in activeElement ? activeElement.scrollTop : null,
+  };
+}
+
+function captureSettingsScrollState(root = document) {
+  const sheet = root.querySelector(".settings-sheet");
+  if (!(sheet instanceof HTMLElement)) {
+    return [];
+  }
+
+  const selectors = [
+    ".settings-sheet",
+    ".settings-nav",
+    ".settings-panel",
+  ];
+
+  return selectors.flatMap((selector) => Array
+    .from(root.querySelectorAll(selector))
+    .map((element, index) => {
+      if (!(element instanceof HTMLElement)) {
+        return null;
+      }
+
+      return {
+        selector,
+        index,
+        scrollTop: element.scrollTop,
+        scrollLeft: element.scrollLeft,
+      };
+    })
+    .filter(Boolean));
 }
 
 function captureSourceControlFocusState(root = document) {
@@ -2295,10 +3058,15 @@ function captureSourceControlScrollState(root = document) {
 
   const selectors = [
     ".workspace-git-panel-body",
+    ".workspace-scm-content",
     ".workspace-scm-column-list",
     ".workspace-scm-column-detail",
+    ".workspace-scm-section-list",
+    ".workspace-scm-branch-groups",
+    ".workspace-scm-graph-list",
     ".workspace-scm-diff",
     ".workspace-scm-task-output",
+    ".workspace-scm-task-tray-output",
     ".workspace-scm-commit-body",
   ];
 
@@ -2320,6 +3088,35 @@ function captureSourceControlScrollState(root = document) {
 }
 
 function restoreSourceControlFocusState(state, root = document) {
+  if (!state?.selector) {
+    return;
+  }
+
+  const input = root.querySelector(state.selector);
+  if (!(input instanceof HTMLInputElement || input instanceof HTMLTextAreaElement)) {
+    return;
+  }
+
+  input.focus({ preventScroll: true });
+
+  if (
+    typeof state.selectionStart === "number"
+    && typeof state.selectionEnd === "number"
+    && typeof input.setSelectionRange === "function"
+  ) {
+    try {
+      input.setSelectionRange(state.selectionStart, state.selectionEnd);
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
+  if (typeof state.scrollTop === "number" && "scrollTop" in input) {
+    input.scrollTop = state.scrollTop;
+  }
+}
+
+function restoreSettingsFocusState(state, root = document) {
   if (!state?.selector) {
     return;
   }
@@ -2377,21 +3174,28 @@ function restoreSourceControlScrollState(states, root = document) {
   }
 }
 
-function isSourceControlTextEntryActive() {
-  const activeElement = document.activeElement;
-  return Boolean(
-    activeElement instanceof HTMLInputElement || activeElement instanceof HTMLTextAreaElement
-      ? activeElement.matches(
-          [
-            "[data-scm-commit-input]",
-            "[data-scm-branch-search]",
-            "[data-scm-create-branch-name]",
-            "[data-scm-create-branch-start]",
-            "[data-scm-task-input-value]",
-          ].join(","),
-        )
-      : false,
-  );
+function restoreSettingsScrollState(states, root = document) {
+  if (!Array.isArray(states) || states.length === 0) {
+    return;
+  }
+
+  for (const state of states) {
+    if (!state?.selector) {
+      continue;
+    }
+
+    const element = root.querySelectorAll(state.selector)[state.index];
+    if (!(element instanceof HTMLElement)) {
+      continue;
+    }
+
+    if (typeof state.scrollTop === "number") {
+      element.scrollTop = state.scrollTop;
+    }
+    if (typeof state.scrollLeft === "number") {
+      element.scrollLeft = state.scrollLeft;
+    }
+  }
 }
 
 async function openSourceControlPanel({ force = false } = {}) {
@@ -2404,7 +3208,9 @@ async function openSourceControlPanel({ force = false } = {}) {
     && uiState.sourceControl.snapshot;
 
   uiState.gitPanelVisible = true;
+  closeSourceControlRowMenu();
   hideSettingsSheet();
+  closeSystemHealthPanel();
   uiState.activityRailVisible = false;
   closeQuickSwitcher();
   uiState.pendingWorkspaceDraft = null;
@@ -2423,6 +3229,7 @@ function resetSourceControlState({ keepTab = true } = {}) {
     ...uiState.sourceControl,
     snapshot: null,
     activeTab,
+    activeRowMenuKey: "",
     selectedPath: "",
     selectedDiffMode: "working-tree",
     diff: null,
@@ -2433,8 +3240,16 @@ function resetSourceControlState({ keepTab = true } = {}) {
     graphLoadingMore: false,
     createBranchName: "",
     createBranchStartPoint: "",
+    commitMessage: "",
     generatingCommitMessage: false,
+    branchSearch: "",
     taskInput: "",
+    taskTrayExpanded: false,
+    publishModalVisible: false,
+    publishModalBranchName: "",
+    publishModalRemotes: [],
+    publishModalSelectedRemote: "",
+    publishModalShouldFocus: false,
     submitting: false,
     lastLoadedWorkspaceId: "",
   };
@@ -2442,6 +3257,7 @@ function resetSourceControlState({ keepTab = true } = {}) {
 
 function applySourceControlSnapshot(snapshot, { appendGraph = false } = {}) {
   const previous = uiState.sourceControl.snapshot;
+  const previousTask = previous?.task || null;
   const nextSnapshot = appendGraph && previous?.workspaceId === snapshot.workspaceId
     ? {
         ...snapshot,
@@ -2459,6 +3275,7 @@ function applySourceControlSnapshot(snapshot, { appendGraph = false } = {}) {
   uiState.sourceControl.snapshot = nextSnapshot;
   uiState.sourceControl.lastLoadedWorkspaceId = nextSnapshot.workspaceId || "";
   uiState.sourceControl.graphLoadingMore = false;
+  syncSourceControlTaskTray(nextSnapshot.task || null, previousTask);
 
   if (
     uiState.sourceControl.selectedPath
@@ -2503,10 +3320,12 @@ function handleSourceControlRuntimeEvent(event) {
 
   const sourceControl = uiState.sourceControl;
   if (sourceControl.snapshot?.workspaceId === event.workspaceId) {
+    const previousTask = sourceControl.snapshot.task || null;
     sourceControl.snapshot = {
       ...sourceControl.snapshot,
       task: event.task,
     };
+    syncSourceControlTaskTray(event.task, previousTask);
   }
 
   if (uiState.snapshot?.activeWorkspaceId === event.workspaceId) {
@@ -2661,6 +3480,12 @@ function getSourceControlSummary(snapshot = uiState.sourceControl.snapshot) {
   return snapshot?.summary || null;
 }
 
+function getSourceControlCurrentBranch(snapshot = uiState.sourceControl.snapshot) {
+  return (snapshot?.localBranches || []).find((branch) => branch.isCurrent)?.name
+    || snapshot?.summary?.branch
+    || "";
+}
+
 function getSourceControlSection(key, snapshot = uiState.sourceControl.snapshot) {
   return getSourceControlSections(snapshot).find((section) => section.key === key) || null;
 }
@@ -2688,6 +3513,97 @@ function getSuggestedUpstream(branchName, snapshot = uiState.sourceControl.snaps
   }
 
   return snapshot?.remoteBranches?.[0]?.name || "";
+}
+
+function getSourceControlRemoteOptions(snapshot = uiState.sourceControl.snapshot) {
+  return normalizeSourceControlRemoteOptions(snapshot?.remotes || [], snapshot?.defaultRemote || "");
+}
+
+function getSourceControlDefaultRemote(snapshot = uiState.sourceControl.snapshot) {
+  return getSourceControlRemoteOptions(snapshot).defaultRemote;
+}
+
+async function executeSourceControlPublish(branchName, remoteName = null) {
+  const workspaceId = getSourceControlWorkspaceId();
+  const nextBranchName = String(branchName || "").trim();
+  if (!workspaceId || !bridge.gitPublishBranch) {
+    return null;
+  }
+
+  if (!nextBranchName) {
+    window.alert("Current branch is unavailable.");
+    return null;
+  }
+
+  closeSourceControlPublishModal();
+  return runSourceControlMutation(
+    () => bridge.gitPublishBranch(workspaceId, nextBranchName, remoteName || null),
+    { resetGraphSelection: true },
+  );
+}
+
+async function beginSourceControlPublish(
+  branchName,
+  { remotes = null, defaultRemote = null } = {},
+) {
+  const nextBranchName = String(branchName || "").trim();
+  if (!nextBranchName) {
+    window.alert("Current branch is unavailable.");
+    return null;
+  }
+
+  const remoteOptions = normalizeSourceControlRemoteOptions(
+    remotes === null ? getSourceControlRemoteOptions().remotes : remotes,
+    defaultRemote === null ? getSourceControlDefaultRemote() : defaultRemote,
+  );
+
+  if (!remoteOptions.remotes.length) {
+    window.alert("No remote is configured for this repository.");
+    return null;
+  }
+
+  if (remoteOptions.remotes.length === 1) {
+    return executeSourceControlPublish(
+      nextBranchName,
+      remoteOptions.defaultRemote || remoteOptions.remotes[0].name,
+    );
+  }
+
+  openSourceControlPublishModal({
+    branchName: nextBranchName,
+    remotes: remoteOptions.remotes,
+    defaultRemote: remoteOptions.defaultRemote,
+  });
+  render();
+  return null;
+}
+
+async function submitSourceControlPush() {
+  const workspaceId = getSourceControlWorkspaceId();
+  const summary = getSourceControlSummary();
+  if (!workspaceId || !bridge.gitPush) {
+    return null;
+  }
+
+  if (summary && !summary.upstream && summary.state !== "detached") {
+    return beginSourceControlPublish(getSourceControlCurrentBranch());
+  }
+
+  return runSourceControlMutation(() => bridge.gitPush(workspaceId), {
+    resetGraphSelection: true,
+  });
+}
+
+async function submitSourceControlTaskRecovery() {
+  const recovery = uiState.sourceControl.snapshot?.task?.recovery || null;
+  if (recovery?.kind !== "publish-branch") {
+    return null;
+  }
+
+  return beginSourceControlPublish(recovery.branchName, {
+    remotes: recovery.remotes || [],
+    defaultRemote: recovery.defaultRemote || "",
+  });
 }
 
 async function runSourceControlMutation(runner, { resetGraphSelection = false } = {}) {
@@ -2839,6 +3755,17 @@ async function handleSourceControlAction(target) {
   const branchName = target.dataset.branchName || "";
   const commitOid = target.dataset.oid || "";
 
+  if (action !== "scm-toggle-row-menu") {
+    closeSourceControlRowMenu();
+  }
+
+  if (action === "close-scm-publish-modal") {
+    if (closeSourceControlPublishModal()) {
+      render();
+    }
+    return;
+  }
+
   if (!workspaceId && action !== "scm-switch-tab") {
     return;
   }
@@ -2866,6 +3793,14 @@ async function handleSourceControlAction(target) {
       }
       return;
     }
+    case "scm-toggle-row-menu":
+      toggleSourceControlRowMenu(target.dataset.scmMenuKind || "file", target.dataset.scmMenuKey || "");
+      render();
+      return;
+    case "scm-toggle-task-tray":
+      uiState.sourceControl.taskTrayExpanded = !uiState.sourceControl.taskTrayExpanded;
+      render();
+      return;
     case "scm-select-path":
       await selectSourceControlPath(path, target.dataset.diffMode || null);
       render();
@@ -2929,7 +3864,7 @@ async function handleSourceControlAction(target) {
       await runSourceControlMutation(() => bridge.gitPull(workspaceId), { resetGraphSelection: true });
       return;
     case "scm-push":
-      await runSourceControlMutation(() => bridge.gitPush(workspaceId), { resetGraphSelection: true });
+      await submitSourceControlPush();
       return;
     case "scm-checkout-branch": {
       const summary = getSourceControlSummary();
@@ -2969,9 +3904,16 @@ async function handleSourceControlAction(target) {
       });
       return;
     case "scm-publish-branch":
-      await runSourceControlMutation(() => bridge.gitPublishBranch(workspaceId, branchName), {
-        resetGraphSelection: true,
-      });
+      await beginSourceControlPublish(branchName);
+      return;
+    case "scm-confirm-publish-branch":
+      await executeSourceControlPublish(
+        uiState.sourceControl.publishModalBranchName,
+        uiState.sourceControl.publishModalSelectedRemote,
+      );
+      return;
+    case "scm-run-task-recovery":
+      await submitSourceControlTaskRecovery();
       return;
     case "scm-set-upstream": {
       const suggested = target.dataset.upstreamName || getSuggestedUpstream(branchName);
@@ -3122,6 +4064,7 @@ function toggleActivityRail(forceVisible = !uiState.activityRailVisible) {
   uiState.activityRailVisible = true;
   uiState.activityRailScope = normalizeActivityScope(uiState.activityRailScope);
   hideSettingsSheet();
+  closeSystemHealthPanel();
   uiState.gitPanelVisible = false;
   closeQuickSwitcher();
   uiState.pendingWorkspaceDraft = null;
@@ -3460,7 +4403,7 @@ function stashMountedWorkspaceScreen(stageRegion) {
   uiState.mountedLayoutSignature = null;
 }
 
-function render() {
+function render({ refreshVisibleTerminals = true } = {}) {
   if (!uiState.snapshot) {
     return;
   }
@@ -3521,6 +4464,12 @@ function render() {
   const contextRegion = app.querySelector('[data-region="context"]');
   const modalRegion = app.querySelector('[data-region="modal"]');
   bindModalLayerControls(modalRegion);
+  const settingsFocusState = uiState.settingsVisible
+    ? captureSettingsFocusState(modalRegion)
+    : null;
+  const settingsScrollState = uiState.settingsVisible
+    ? captureSettingsScrollState(modalRegion)
+    : null;
   const sourceControlFocusState = uiState.gitPanelVisible
     ? captureSourceControlFocusState(modalRegion)
     : null;
@@ -3580,11 +4529,20 @@ function render() {
     bindSettingsSheetControls(modalRegion);
     syncSettingsActionDom(modalRegion);
   }
+  if (settingsScrollState && uiState.settingsVisible) {
+    restoreSettingsScrollState(settingsScrollState, modalRegion);
+  }
+  if (settingsFocusState && uiState.settingsVisible) {
+    restoreSettingsFocusState(settingsFocusState, modalRegion);
+  }
   if (sourceControlScrollState && uiState.gitPanelVisible) {
     restoreSourceControlScrollState(sourceControlScrollState, modalRegion);
   }
   if (sourceControlFocusState && uiState.gitPanelVisible) {
     restoreSourceControlFocusState(sourceControlFocusState, modalRegion);
+  }
+  if (uiState.gitPanelVisible && uiState.sourceControl.publishModalVisible) {
+    focusSourceControlPublishModal(modalRegion);
   }
   contextRegion.innerHTML =
     uiState.contextMenu && activeWorkspace
@@ -3594,6 +4552,7 @@ function render() {
     focusQuickSwitcherInput();
   }
   syncGitRefreshLoop();
+  syncSystemHealthLoop();
 
   if (shouldShowLauncher) {
     if (uiState.mountedWorkspaceId) {
@@ -3675,7 +4634,9 @@ function render() {
   }
 
   syncWorkspace(activeWorkspace);
-  scheduleVisibleTerminalRefresh(activeWorkspace);
+  if (refreshVisibleTerminals) {
+    scheduleVisibleTerminalRefresh(activeWorkspace);
+  }
 }
 
 function renderBranchIcon() {
@@ -3702,6 +4663,14 @@ function renderActivityIcon() {
   `;
 }
 
+function renderSystemIcon() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M12 4a8 8 0 1 1-8 8 8 8 0 0 1 8-8Zm0 3.2a1 1 0 0 0-1 1V12c0 .3.13.58.36.77l2.7 2.18 1.25-1.55L13 11.52V8.2a1 1 0 0 0-1-1Z" fill="currentColor"></path>
+    </svg>
+  `;
+}
+
 function renderFileIcon() {
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -3710,13 +4679,34 @@ function renderFileIcon() {
   `;
 }
 
+function renderMoreIcon() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M6 12a1.75 1.75 0 1 1 0 .01V12Zm6 0a1.75 1.75 0 1 1 0 .01V12Zm6 0a1.75 1.75 0 1 1 0 .01V12Z" fill="currentColor"></path>
+    </svg>
+  `;
+}
+
+function renderChevronIcon(direction = "down") {
+  const rotation = direction === "up" ? "rotate(180 12 12)" : "rotate(0 12 12)";
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M7 10.2 12 15l5-4.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" transform="${rotation}"></path>
+    </svg>
+  `;
+}
+
 function renderWorkspaceStatusBar(snapshot, activeWorkspace) {
   const leftItems = [`<span class="workspace-statusbar-brand">CrewDock</span>`];
   const rightItems = [];
   const activitySummary = getRuntimeActivitySummary(snapshot);
+  const shouldShowSystemHealth = supportsSystemHealth();
 
   if (!activeWorkspace) {
     leftItems.push(renderStatusBarItem("Launcher", "Source folders and workspace creation"));
+    if (shouldShowSystemHealth) {
+      leftItems.push(renderStatusBarSystemHealthButton());
+    }
     leftItems.push(renderStatusBarActivityButton(activitySummary));
 
     if (snapshot.workspaces.length > 0) {
@@ -3737,6 +4727,9 @@ function renderWorkspaceStatusBar(snapshot, activeWorkspace) {
 
     leftItems.push(renderStatusBarItem(pathLabel, activeWorkspace.path, "is-path is-primary"));
     leftItems.push(renderStatusBarGitButton(summary));
+    if (shouldShowSystemHealth) {
+      leftItems.push(renderStatusBarSystemHealthButton());
+    }
     leftItems.push(renderStatusBarActivityButton(activitySummary));
 
     const stateLabel = formatStatusBarState(summary);
@@ -3758,12 +4751,15 @@ function renderWorkspaceStatusBar(snapshot, activeWorkspace) {
   }
 
   return `
-    <div class="workspace-statusbar" role="status" aria-live="polite">
-      <div class="workspace-statusbar-group">
-        ${leftItems.join("")}
-      </div>
-      <div class="workspace-statusbar-group is-right">
-        ${rightItems.join("")}
+    <div class="workspace-statusbar-shell">
+      ${uiState.systemHealthPanelVisible && shouldShowSystemHealth ? renderSystemHealthPanel() : ""}
+      <div class="workspace-statusbar" role="status" aria-live="polite">
+        <div class="workspace-statusbar-group">
+          ${leftItems.join("")}
+        </div>
+        <div class="workspace-statusbar-group is-right">
+          ${rightItems.join("")}
+        </div>
       </div>
     </div>
   `;
@@ -3817,6 +4813,139 @@ function renderStatusBarActivityButton(summary) {
   `;
 }
 
+function renderStatusBarSystemHealthButton() {
+  const snapshot = uiState.systemHealthSnapshot;
+  const hasReadySnapshot = snapshot?.availability === "ready";
+  const title = hasReadySnapshot
+    ? `CPU ${formatPercentageLabel(snapshot.cpuPercent)} • Memory ${formatPercentageLabel(snapshot.memoryPercent)}`
+    : uiState.systemHealthError
+      ? `System monitoring error: ${uiState.systemHealthError}`
+      : uiState.systemHealthLoading
+        ? "Loading system health"
+        : "Open system health";
+  const label = hasReadySnapshot
+    ? `CPU ${formatPercentageLabel(snapshot.cpuPercent)} · MEM ${formatPercentageLabel(snapshot.memoryPercent)}`
+    : uiState.systemHealthLoading
+      ? "System loading"
+      : "System";
+  const tone = uiState.systemHealthError ? "error" : "neutral";
+
+  return `
+    <button
+      class="workspace-statusbar-item workspace-statusbar-button is-${tone} ${uiState.systemHealthPanelVisible ? "is-panel-open" : ""}"
+      type="button"
+      data-action="toggle-system-health-panel"
+      title="${escapeHtml(title)}"
+      aria-label="${escapeHtml(title)}"
+      aria-pressed="${uiState.systemHealthPanelVisible ? "true" : "false"}"
+    >
+      <span class="workspace-statusbar-icon" aria-hidden="true">${renderSystemIcon()}</span>
+      <span>${escapeHtml(label)}</span>
+    </button>
+  `;
+}
+
+function renderSystemHealthPanel() {
+  const snapshot = uiState.systemHealthSnapshot;
+  const errorMessage = uiState.systemHealthError || snapshot?.errorMessage || "";
+  const isReady = snapshot?.availability === "ready";
+  const metrics = [];
+
+  if (isReady) {
+    metrics.push(
+      renderSystemHealthMetricCard("CPU", formatPercentageLabel(snapshot.cpuPercent), "Current processor load"),
+      renderSystemHealthMetricCard(
+        "Memory",
+        `${formatBytes(snapshot.memoryUsedBytes)} / ${formatBytes(snapshot.memoryTotalBytes)}`,
+        `${formatPercentageLabel(snapshot.memoryPercent)} used`,
+      ),
+      renderSystemHealthMetricCard(
+        "Disk",
+        `${formatBytes(snapshot.diskUsedBytes)} / ${formatBytes(snapshot.diskTotalBytes)}`,
+        `${formatPercentageLabel(snapshot.diskPercent)} used`,
+      ),
+    );
+
+    if (snapshot.batteryPercent != null) {
+      metrics.push(
+        renderSystemHealthMetricCard(
+          "Battery",
+          `${formatPercentageLabel(snapshot.batteryPercent)}`,
+          formatBatteryStateLabel(snapshot.batteryState),
+        ),
+      );
+    }
+  }
+
+  const refreshedLabel = snapshot?.lastRefreshedAtMs
+    ? `Last refreshed ${formatRelativeTime(snapshot.lastRefreshedAtMs)}`
+    : uiState.systemHealthLoading
+      ? "Refreshing system health"
+      : "Waiting for first system sample";
+
+  return `
+    <section
+      class="workspace-system-health-panel"
+      data-system-health-panel
+      role="dialog"
+      aria-modal="false"
+      aria-labelledby="system-health-title"
+    >
+      <header class="workspace-system-health-header">
+        <div>
+          <p class="workspace-system-health-mark">System</p>
+          <h3 id="system-health-title">System health</h3>
+          <p class="workspace-system-health-copy">${escapeHtml(refreshedLabel)}</p>
+        </div>
+        <div class="workspace-system-health-actions">
+          <button
+            class="workspace-system-health-action"
+            type="button"
+            data-action="refresh-system-health"
+            ${uiState.systemHealthLoading ? "disabled" : ""}
+          >
+            <span aria-hidden="true">${renderRefreshIcon()}</span>
+            <span>${uiState.systemHealthLoading ? "Refreshing..." : "Refresh"}</span>
+          </button>
+          <button
+            class="workspace-system-health-close"
+            type="button"
+            data-action="close-system-health-panel"
+            aria-label="Close system health"
+            title="Close system health"
+          >
+            ${renderCloseIcon()}
+          </button>
+        </div>
+      </header>
+      ${
+        isReady
+          ? `
+            <div class="workspace-system-health-grid">
+              ${metrics.join("")}
+            </div>
+          `
+          : `
+            <div class="workspace-system-health-empty ${errorMessage ? "is-error" : ""}">
+              <strong>${escapeHtml(errorMessage ? "System monitoring unavailable" : "Loading system metrics")}</strong>
+              <span>${escapeHtml(errorMessage || "CrewDock is collecting a current system snapshot.")}</span>
+            </div>
+          `
+      }
+    </section>
+  `;
+}
+
+function renderSystemHealthMetricCard(label, value, detail) {
+  return `
+    <article class="workspace-system-health-card">
+      <span class="workspace-system-health-card-label">${escapeHtml(label)}</span>
+      <strong class="workspace-system-health-card-value">${escapeHtml(value)}</strong>
+      <span class="workspace-system-health-card-detail">${escapeHtml(detail)}</span>
+    </article>
+  `;
+}
+
 function formatStatusBarState(summary) {
   if (!summary) {
     return "Checking";
@@ -3853,6 +4982,74 @@ function formatStatusBarSync(summary) {
   }
 
   return `+${ahead} / -${behind}`;
+}
+
+function formatPercentageLabel(value) {
+  const percent = Number(value);
+  if (!Number.isFinite(percent)) {
+    return "--";
+  }
+
+  return `${Math.round(percent)}%`;
+}
+
+function formatBytes(value) {
+  const numericValue = Number(value);
+  if (!Number.isFinite(numericValue) || numericValue <= 0) {
+    return "0 B";
+  }
+
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let size = numericValue;
+  let unitIndex = 0;
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+
+  const decimals = size >= 100 || unitIndex === 0 ? 0 : size >= 10 ? 1 : 2;
+  return `${size.toFixed(decimals).replace(/\.?0+$/, "")} ${units[unitIndex]}`;
+}
+
+function formatBatteryStateLabel(state) {
+  switch (state) {
+    case "charging":
+      return "Charging";
+    case "discharging":
+      return "On battery";
+    case "full":
+      return "Fully charged";
+    default:
+      return "Battery status unavailable";
+  }
+}
+
+function formatRelativeTime(timestampMs) {
+  const deltaMs = Date.now() - Number(timestampMs || 0);
+  if (!Number.isFinite(deltaMs)) {
+    return "just now";
+  }
+
+  const deltaSeconds = Math.max(0, Math.round(deltaMs / 1000));
+  if (deltaSeconds < 10) {
+    return "just now";
+  }
+  if (deltaSeconds < 60) {
+    return `${deltaSeconds}s ago`;
+  }
+
+  const deltaMinutes = Math.round(deltaSeconds / 60);
+  if (deltaMinutes < 60) {
+    return `${deltaMinutes}m ago`;
+  }
+
+  const deltaHours = Math.round(deltaMinutes / 60);
+  if (deltaHours < 24) {
+    return `${deltaHours}h ago`;
+  }
+
+  const deltaDays = Math.round(deltaHours / 24);
+  return `${deltaDays}d ago`;
 }
 
 function renderQuickSwitcher(snapshot) {
@@ -4196,6 +5393,7 @@ function renderSettingsSheet(snapshot) {
                     preview: renderTerminalTextPreview(),
                   })}
                 </div>
+                ${renderSettingsCodexCard(getDraftCodexCli(snapshot))}
                 ${renderSettingsAiCard({
                   hasStoredKey,
                   hasEnvironmentKey,
@@ -4468,6 +5666,139 @@ function renderTerminalTextPreview() {
   `;
 }
 
+function labelCodexCliSource(source) {
+  switch (source) {
+    case "homebrew":
+      return "Homebrew";
+    case "npmGlobal":
+      return "npm global";
+    case "nvm":
+      return "nvm";
+    case "volta":
+      return "Volta";
+    case "custom":
+      return "Custom";
+    default:
+      return "PATH";
+  }
+}
+
+function renderSettingsCodexCard(codexCli) {
+  const isSaving = Boolean(uiState.settingsDraft?.savingCodexCliPath);
+  const isRefreshing = Boolean(uiState.settingsDraft?.refreshingCodexCli);
+  const selectedPath = getDraftCodexCliSelectedPath();
+  const customPath = getDraftCodexCliCustomPath();
+  const candidates = Array.isArray(codexCli?.candidates) ? codexCli.candidates : [];
+  const statusLabel = codexCli?.status === "ready"
+    ? codexCli.selectionMode === "custom"
+      ? "Custom"
+      : "Auto"
+    : codexCli?.status === "invalidSelection"
+      ? "Needs attention"
+      : "Unavailable";
+  const statusTone = codexCli?.status === "ready" ? "is-active" : codexCli?.status === "invalidSelection" ? "is-warning" : "";
+  const effectiveVersion = codexCli?.effectiveVersion ? `v${codexCli.effectiveVersion}` : "Not found";
+  const effectivePath = codexCli?.effectivePath || "No Codex CLI detected";
+
+  return `
+    <section class="settings-ai-card settings-codex-card">
+      <div class="settings-ai-head settings-codex-head">
+        <div>
+          <p class="settings-panel-kicker">Codex sessions</p>
+          <h4 class="settings-adjustment-title">Codex CLI selection</h4>
+          <p class="settings-adjustment-copy">CrewDock will use this binary for future Codex launch and resume actions. Auto mode always picks the newest detected version.</p>
+        </div>
+        <span class="settings-ai-status ${statusTone}">${escapeHtml(statusLabel)}</span>
+      </div>
+      <div class="settings-codex-summary">
+        <div class="settings-codex-summary-row">
+          <span class="settings-codex-summary-label">Effective binary</span>
+          <strong>${escapeHtml(effectiveVersion)}</strong>
+        </div>
+        <code class="settings-codex-path">${escapeHtml(effectivePath)}</code>
+        ${codexCli?.message ? `<p class="settings-codex-note">${escapeHtml(codexCli.message)}</p>` : ""}
+      </div>
+      <div class="settings-codex-controls">
+        <label class="settings-codex-field">
+          <span>Detected installs</span>
+          <select class="settings-codex-select" data-settings-codex-select>
+            <option value="__auto__" ${selectedPath === "__auto__" ? "selected" : ""}>Auto select newest detected version</option>
+            ${candidates.map((candidate) => `
+              <option value="${escapeHtml(candidate.path)}" ${selectedPath === candidate.path ? "selected" : ""}>
+                ${escapeHtml(`v${candidate.version} · ${labelCodexCliSource(candidate.source)} · ${candidate.path}`)}
+              </option>
+            `).join("")}
+          </select>
+        </label>
+        <div class="settings-ai-actions">
+          <button
+            type="button"
+            class="settings-ai-button settings-ai-button-primary"
+            data-settings-codex-apply-selection
+            ${isSaving || isRefreshing ? "disabled" : ""}
+          >
+            ${isSaving ? "Saving..." : "Use selection"}
+          </button>
+          <button
+            type="button"
+            class="settings-ai-button"
+            data-settings-codex-refresh
+            ${isSaving || isRefreshing ? "disabled" : ""}
+          >
+            ${isRefreshing ? "Scanning..." : "Rescan"}
+          </button>
+        </div>
+      </div>
+      <div class="settings-codex-controls">
+        <label class="settings-codex-field">
+          <span>Custom binary path</span>
+          <input
+            class="settings-ai-input"
+            type="text"
+            value="${escapeHtml(customPath)}"
+            data-settings-codex-custom-path-input
+            placeholder="/usr/local/bin/codex"
+            autocomplete="off"
+            autocapitalize="off"
+            spellcheck="false"
+          />
+        </label>
+        <div class="settings-ai-actions">
+          <button
+            type="button"
+            class="settings-ai-button settings-ai-button-primary"
+            data-settings-codex-save-custom
+            ${isSaving || isRefreshing ? "disabled" : ""}
+          >
+            ${isSaving ? "Saving..." : "Use custom path"}
+          </button>
+          <button
+            type="button"
+            class="settings-ai-button"
+            data-settings-codex-auto
+            ${isSaving || isRefreshing ? "disabled" : ""}
+          >
+            Use auto
+          </button>
+        </div>
+      </div>
+      <div class="settings-codex-detected">
+        ${candidates.length > 0
+          ? candidates.map((candidate) => `
+              <div class="settings-codex-detected-row ${candidate.isSelected ? "is-selected" : ""}">
+                <div class="settings-codex-detected-copy">
+                  <strong>${escapeHtml(`v${candidate.version}`)}</strong>
+                  <span>${escapeHtml(labelCodexCliSource(candidate.source))}</span>
+                </div>
+                <code class="settings-codex-path">${escapeHtml(candidate.path)}</code>
+              </div>
+            `).join("")
+          : '<p class="settings-codex-empty">No Codex CLI installations were detected on PATH. You can still paste an absolute binary path above.</p>'}
+      </div>
+    </section>
+  `;
+}
+
 function renderSettingsAiCard({ hasStoredKey, hasEnvironmentKey }) {
   const draftValue = getDraftOpenAiApiKey();
   const isSaving = Boolean(uiState.settingsDraft?.savingOpenAiApiKey);
@@ -4635,6 +5966,7 @@ function renderGitPanel(workspace) {
                   "Open the panel again once the active workspace finishes loading.",
                 )
         }
+        ${renderSourceControlPublishModal()}
       </section>
     </div>
   `;
@@ -4660,14 +5992,26 @@ function renderSourceControlBody(snapshot) {
     <div class="workspace-git-panel-body workspace-scm-shell">
       ${renderSourceControlToolbar(snapshot)}
       ${renderSourceControlTabs()}
-      ${
-        uiState.sourceControl.activeTab === "changes"
-          ? renderSourceControlChangesTab(snapshot)
-          : uiState.sourceControl.activeTab === "branches"
-            ? renderSourceControlBranchesTab(snapshot)
-            : renderSourceControlGraphTab(snapshot)
-      }
+      <div class="workspace-scm-content">
+        ${
+          uiState.sourceControl.activeTab === "changes"
+            ? renderSourceControlChangesTab(snapshot)
+            : uiState.sourceControl.activeTab === "branches"
+              ? renderSourceControlBranchesTab(snapshot)
+              : renderSourceControlGraphTab(snapshot)
+        }
+      </div>
       ${renderSourceControlTaskPanel(snapshot.task)}
+    </div>
+  `;
+}
+
+function renderSourceControlSummaryStat({ label, value, copy, tone = "" }) {
+  return `
+    <div class="workspace-scm-toolbar-stat ${tone ? `is-${tone}` : ""}">
+      <span class="workspace-scm-toolbar-stat-label">${escapeHtml(label)}</span>
+      <strong class="workspace-scm-toolbar-stat-value">${escapeHtml(value)}</strong>
+      <span class="workspace-scm-toolbar-stat-copy">${escapeHtml(copy)}</span>
     </div>
   `;
 }
@@ -4675,45 +6019,63 @@ function renderSourceControlBody(snapshot) {
 function renderSourceControlToolbar(snapshot) {
   const summary = snapshot.summary;
   const fileCount = snapshot.changes?.length || 0;
-  const metaItems = [
-    {
-      label: formatGitBranchLabel(summary),
-      title: summary.upstream || "Current branch",
-      tone: getGitTone(summary),
-      icon: renderBranchIcon(),
-    },
-    summary.upstream
-      ? { label: summary.upstream, title: "Upstream branch" }
-      : { label: "Local only", title: "No upstream configured" },
-    {
-      label: summary.upstream ? `+${summary.ahead || 0} / -${summary.behind || 0}` : "No sync",
-      title: "Ahead / behind",
-    },
-    {
-      label: fileCount === 0 ? "Clean" : `${fileCount} ${fileCount === 1 ? "change" : "changes"}`,
-      title: "Pending changes",
-      tone: fileCount ? getGitTone(summary) : "clean",
-    },
-  ];
+  const tone = getGitTone(summary);
+  const scopeValue = snapshot.workspaceRelativePath && snapshot.workspaceRelativePath !== "."
+    ? snapshot.workspaceRelativePath
+    : "Repository root";
+  const scopeCopy = snapshot.repoRoot || snapshot.workspacePath;
+  const syncValue = summary.upstream
+    ? (Number(summary.ahead || 0) > 0 || Number(summary.behind || 0) > 0
+      ? `+${summary.ahead || 0} / -${summary.behind || 0}`
+      : "Up to date")
+    : "Local only";
+  const syncCopy = summary.upstream || "No upstream configured";
+  const changeValue = fileCount === 0
+    ? "Clean"
+    : `${fileCount} ${fileCount === 1 ? "change" : "changes"}`;
+  const changeCopy = fileCount === 0
+    ? "Working tree has no pending edits."
+    : `${hasStagedSourceControlChanges(snapshot) ? "Ready to review and commit." : "Stage files to prepare a commit."}`;
 
   return `
     <section class="workspace-scm-toolbar">
-      <div class="workspace-scm-toolbar-meta">
-        ${metaItems
-          .map(
-            (item) => `
-              <span class="workspace-scm-toolbar-chip ${item.tone ? `is-${item.tone}` : ""}" title="${escapeHtml(item.title || item.label)}">
-                ${item.icon ? `<span class="workspace-scm-toolbar-chip-icon" aria-hidden="true">${item.icon}</span>` : ""}
-                <span>${escapeHtml(item.label)}</span>
-              </span>
-            `,
-          )
-          .join("")}
+      <div class="workspace-scm-toolbar-top">
+        <div class="workspace-scm-toolbar-hero">
+          <span class="workspace-scm-toolbar-label">Current branch</span>
+          <div class="workspace-scm-toolbar-branch-row">
+            <span class="workspace-scm-toolbar-branch-chip is-${tone}" title="${escapeHtml(summary.upstream || "Current branch")}">
+              <span class="workspace-scm-toolbar-chip-icon" aria-hidden="true">${renderBranchIcon()}</span>
+              <span>${escapeHtml(formatGitBranchLabel(summary))}</span>
+            </span>
+            <span class="workspace-scm-toolbar-state is-${tone}">
+              ${escapeHtml(formatGitStateText(summary))}
+            </span>
+          </div>
+        </div>
+        <div class="workspace-scm-toolbar-actions">
+          <button type="button" class="workspace-scm-toolbar-button" data-action="scm-fetch">Fetch</button>
+          <button type="button" class="workspace-scm-toolbar-button" data-action="scm-pull">Pull</button>
+          <button type="button" class="workspace-scm-toolbar-button" data-action="scm-push">Push</button>
+        </div>
       </div>
-      <div class="workspace-scm-toolbar-actions">
-        <button type="button" class="workspace-scm-toolbar-button" data-action="scm-fetch">Fetch</button>
-        <button type="button" class="workspace-scm-toolbar-button" data-action="scm-pull">Pull</button>
-        <button type="button" class="workspace-scm-toolbar-button" data-action="scm-push">Push</button>
+      <div class="workspace-scm-toolbar-stats">
+        ${renderSourceControlSummaryStat({
+          label: "Sync",
+          value: syncValue,
+          copy: syncCopy,
+          tone: summary.upstream ? tone : "",
+        })}
+        ${renderSourceControlSummaryStat({
+          label: "Workspace scope",
+          value: scopeValue,
+          copy: scopeCopy,
+        })}
+        ${renderSourceControlSummaryStat({
+          label: "Changes",
+          value: changeValue,
+          copy: changeCopy,
+          tone: fileCount ? tone : "clean",
+        })}
       </div>
     </section>
   `;
@@ -4751,77 +6113,11 @@ function renderSourceControlChangesTab(snapshot) {
   const sections = getSourceControlSections(snapshot);
   const selectedFile = getSourceControlFileByPath(uiState.sourceControl.selectedPath, snapshot);
   const stagedPaths = getSourceControlSectionPaths("staged", snapshot);
-  const commitDisabled = !hasStagedSourceControlChanges(snapshot) || uiState.sourceControl.submitting;
-  const commitAllDisabled = hasStagedSourceControlChanges(snapshot) || !hasPendingSourceControlChanges(snapshot) || uiState.sourceControl.submitting;
-  const generateDisabled = !hasPendingSourceControlChanges(snapshot) || uiState.sourceControl.generatingCommitMessage;
 
   return `
     <div class="workspace-scm-main workspace-scm-main-changes">
       <section class="workspace-scm-column workspace-scm-column-list">
-        <div class="workspace-scm-commit">
-          <div class="workspace-scm-commit-head">
-            <div>
-              <p class="workspace-scm-detail-kicker">Commit</p>
-              <strong>Message</strong>
-            </div>
-            <span>Staged changes commit by default</span>
-          </div>
-          <textarea
-            class="workspace-scm-commit-input"
-            data-scm-commit-input
-            placeholder="Commit message"
-            rows="4"
-            spellcheck="false"
-            autocapitalize="off"
-          >${escapeHtml(uiState.sourceControl.commitMessage)}</textarea>
-          <div class="workspace-scm-commit-actions">
-            <div class="workspace-scm-count-row">
-              ${renderSourceControlCountBadges(snapshot.summary)}
-            </div>
-            <div class="workspace-scm-action-row">
-              <button
-                type="button"
-                class="workspace-scm-ghost-button"
-                data-action="scm-generate-commit-message"
-                title="Generate with AI from staged changes when present, otherwise all pending changes."
-                ${generateDisabled ? "disabled" : ""}
-              >
-                ${uiState.sourceControl.generatingCommitMessage ? "Generating..." : "Generate"}
-              </button>
-              <button
-                type="button"
-                class="workspace-scm-primary-button"
-                data-action="scm-commit"
-                ${commitDisabled ? "disabled" : ""}
-              >
-                Commit
-              </button>
-              <button
-                type="button"
-                class="workspace-scm-secondary-button"
-                data-action="scm-commit-all"
-                ${commitAllDisabled ? "disabled" : ""}
-              >
-                Commit All
-              </button>
-              ${
-                stagedPaths.length
-                  ? `
-                    <button
-                      type="button"
-                      class="workspace-scm-ghost-button"
-                      data-action="scm-unstage-section"
-                      data-section="staged"
-                    >
-                      Unstage All
-                    </button>
-                  `
-                  : ""
-              }
-            </div>
-          </div>
-          <p class="workspace-scm-commit-hint">${escapeHtml(getPrimaryModifierLabel())}+Enter commits staged changes. AI generation uses <code>OPENAI_API_KEY</code> and staged changes when present.</p>
-        </div>
+        ${renderSourceControlCommitCard(snapshot, stagedPaths)}
         <div class="workspace-scm-section-list">
           ${
             sections.length
@@ -4836,6 +6132,86 @@ function renderSourceControlChangesTab(snapshot) {
       <aside class="workspace-scm-column workspace-scm-column-detail">
         ${renderSourceControlDiffPanel(selectedFile)}
       </aside>
+    </div>
+  `;
+}
+
+function renderSourceControlCommitCard(snapshot, stagedPaths) {
+  const stagedCount = stagedPaths.length;
+  const pendingCount = snapshot.changes?.length || 0;
+  const commitDisabled = stagedCount === 0 || uiState.sourceControl.submitting;
+  const commitAllDisabled = stagedCount > 0 || pendingCount === 0 || uiState.sourceControl.submitting;
+  const generateDisabled = pendingCount === 0 || uiState.sourceControl.generatingCommitMessage;
+  const summaryCopy = stagedCount
+    ? `${stagedCount} ${stagedCount === 1 ? "file is" : "files are"} staged and ready to commit.`
+    : pendingCount
+      ? "Review changes on the left, stage what matters, then commit."
+      : "Working tree clean. New edits will appear here automatically.";
+
+  return `
+    <div class="workspace-scm-commit">
+      <div class="workspace-scm-commit-head">
+        <div>
+          <p class="workspace-scm-detail-kicker">Commit</p>
+          <strong>Compose commit message</strong>
+        </div>
+        <span class="workspace-scm-commit-summary">${escapeHtml(summaryCopy)}</span>
+      </div>
+      <textarea
+        class="workspace-scm-commit-input"
+        data-scm-commit-input
+        placeholder="Summarize the change"
+        rows="4"
+        spellcheck="false"
+        autocapitalize="off"
+      >${escapeHtml(uiState.sourceControl.commitMessage)}</textarea>
+      <div class="workspace-scm-commit-actions">
+        <div class="workspace-scm-count-row">
+          ${renderSourceControlCountBadges(snapshot.summary)}
+        </div>
+        <div class="workspace-scm-action-row">
+          <button
+            type="button"
+            class="workspace-scm-ghost-button"
+            data-action="scm-generate-commit-message"
+            title="Generate with AI from staged changes when present, otherwise all pending changes."
+            ${generateDisabled ? "disabled" : ""}
+          >
+            ${uiState.sourceControl.generatingCommitMessage ? "Generating..." : "AI suggest"}
+          </button>
+          <button
+            type="button"
+            class="workspace-scm-primary-button"
+            data-action="scm-commit"
+            ${commitDisabled ? "disabled" : ""}
+          >
+            Commit staged
+          </button>
+          <button
+            type="button"
+            class="workspace-scm-secondary-button"
+            data-action="scm-commit-all"
+            ${commitAllDisabled ? "disabled" : ""}
+          >
+            Commit all
+          </button>
+          ${
+            stagedCount
+              ? `
+                <button
+                  type="button"
+                  class="workspace-scm-ghost-button"
+                  data-action="scm-unstage-section"
+                  data-section="staged"
+                >
+                  Unstage all
+                </button>
+              `
+              : ""
+          }
+        </div>
+      </div>
+      <p class="workspace-scm-commit-hint">${escapeHtml(getPrimaryModifierLabel())}+Enter commits staged changes.</p>
     </div>
   `;
 }
@@ -4912,6 +6288,55 @@ function renderSourceControlSection(section) {
   `;
 }
 
+function renderSourceControlRowMenu(kind, key, items) {
+  const isOpen = isSourceControlRowMenuOpen(kind, key);
+  if (!items.length) {
+    return "";
+  }
+
+  return `
+    <div class="workspace-scm-row-menu-shell ${isOpen ? "is-open" : ""}" data-scm-row-menu-shell>
+      <button
+        type="button"
+        class="workspace-scm-row-menu-toggle"
+        data-action="scm-toggle-row-menu"
+        data-scm-menu-kind="${escapeHtml(kind)}"
+        data-scm-menu-key="${escapeHtml(key)}"
+        aria-label="More actions"
+        aria-expanded="${isOpen ? "true" : "false"}"
+      >
+        ${renderMoreIcon()}
+      </button>
+      ${
+        isOpen
+          ? `
+            <div class="workspace-scm-row-menu">
+              ${items
+                .map(
+                  (item) => `
+                    <button
+                      type="button"
+                      class="workspace-scm-row-menu-item ${item.tone === "danger" ? "is-danger" : ""}"
+                      data-action="${escapeHtml(item.action)}"
+                      ${item.path ? `data-path="${escapeHtml(item.path)}"` : ""}
+                      ${item.branchName ? `data-branch-name="${escapeHtml(item.branchName)}"` : ""}
+                      ${item.startPoint ? `data-start-point="${escapeHtml(item.startPoint)}"` : ""}
+                      ${item.upstreamName ? `data-upstream-name="${escapeHtml(item.upstreamName)}"` : ""}
+                      ${item.oid ? `data-oid="${escapeHtml(item.oid)}"` : ""}
+                    >
+                      ${escapeHtml(item.label)}
+                    </button>
+                  `,
+                )
+                .join("")}
+            </div>
+          `
+          : ""
+      }
+    </div>
+  `;
+}
+
 function renderSourceControlFileRow(file, sectionKey) {
   const pathParts = splitGitFilePath(file.path);
   const presentation = getGitFilePresentation(file);
@@ -4927,6 +6352,14 @@ function renderSourceControlFileRow(file, sectionKey) {
   const primaryAction = sectionKey === "staged"
     ? { action: "scm-unstage-path", label: "Unstage" }
     : { action: "scm-stage-path", label: "Stage" };
+  const menu = renderSourceControlRowMenu("file", file.path, [
+    {
+      action: "scm-discard-path",
+      label: "Discard",
+      path: file.path,
+      tone: "danger",
+    },
+  ]);
 
   return `
     <article class="workspace-scm-file-row ${isSelected ? "is-selected" : ""}">
@@ -4946,20 +6379,13 @@ function renderSourceControlFileRow(file, sectionKey) {
       <div class="workspace-scm-file-actions">
         <button
           type="button"
-          class="workspace-scm-inline-action"
+          class="workspace-scm-row-primary"
           data-action="${primaryAction.action}"
           data-path="${escapeHtml(file.path)}"
         >
           ${primaryAction.label}
         </button>
-        <button
-          type="button"
-          class="workspace-scm-inline-action is-danger"
-          data-action="scm-discard-path"
-          data-path="${escapeHtml(file.path)}"
-        >
-          Discard
-        </button>
+        ${menu}
       </div>
     </article>
   `;
@@ -5119,86 +6545,52 @@ function renderSourceControlBranchGroup(title, branches, { remote = false } = {}
 }
 
 function renderSourceControlBranchRow(branch, { remote = false } = {}) {
-  const actions = [];
-
-  if (remote) {
-    const branchName = branch.name.split("/").slice(1).join("/") || branch.name;
-    actions.push(`
-      <button
-        type="button"
-        class="workspace-scm-inline-action"
-        data-action="scm-branch-from-remote"
-        data-branch-name="${escapeHtml(branchName)}"
-        data-start-point="${escapeHtml(branch.name)}"
-      >
-        Track
-      </button>
-    `);
-  } else if (!branch.isCurrent) {
-    actions.push(`
-      <button
-        type="button"
-        class="workspace-scm-inline-action"
-        data-action="scm-checkout-branch"
-        data-branch-name="${escapeHtml(branch.name)}"
-      >
-        Checkout
-      </button>
-    `);
-  }
-
-  if (!remote) {
-    actions.push(`
-      <button
-        type="button"
-        class="workspace-scm-inline-action"
-        data-action="scm-rename-branch"
-        data-branch-name="${escapeHtml(branch.name)}"
-      >
-        Rename
-      </button>
-    `);
-
-    if (!branch.isCurrent) {
-      actions.push(`
-        <button
-          type="button"
-          class="workspace-scm-inline-action is-danger"
-          data-action="scm-delete-branch"
-          data-branch-name="${escapeHtml(branch.name)}"
-        >
-          Delete
-        </button>
-      `);
-    }
-
-    if (branch.isCurrent && !branch.upstream) {
-      actions.push(`
-        <button
-          type="button"
-          class="workspace-scm-inline-action"
-          data-action="scm-publish-branch"
-          data-branch-name="${escapeHtml(branch.name)}"
-        >
-          Publish
-        </button>
-      `);
-    }
-
-    if (!branch.upstream) {
-      actions.push(`
-        <button
-          type="button"
-          class="workspace-scm-inline-action"
-          data-action="scm-set-upstream"
-          data-branch-name="${escapeHtml(branch.name)}"
-          data-upstream-name="${escapeHtml(getSuggestedUpstream(branch.name))}"
-        >
-          Set upstream
-        </button>
-      `);
-    }
-  }
+  const remoteBranchName = branch.name.split("/").slice(1).join("/") || branch.name;
+  const primaryAction = remote
+    ? {
+        action: "scm-branch-from-remote",
+        label: "Track",
+        branchName: remoteBranchName,
+        startPoint: branch.name,
+      }
+    : !branch.isCurrent
+      ? {
+          action: "scm-checkout-branch",
+          label: "Checkout",
+          branchName: branch.name,
+        }
+      : !branch.upstream
+        ? {
+            action: "scm-publish-branch",
+            label: "Publish",
+            branchName: branch.name,
+          }
+        : null;
+  const menuItems = remote
+    ? []
+    : [
+        {
+          action: "scm-rename-branch",
+          label: "Rename",
+          branchName: branch.name,
+        },
+        ...(!branch.isCurrent
+          ? [{
+              action: "scm-delete-branch",
+              label: "Delete",
+              branchName: branch.name,
+              tone: "danger",
+            }]
+          : []),
+        ...(!branch.upstream
+          ? [{
+              action: "scm-set-upstream",
+              label: "Set upstream",
+              branchName: branch.name,
+              upstreamName: getSuggestedUpstream(branch.name),
+            }]
+          : []),
+      ];
 
   return `
     <article class="workspace-scm-branch-row">
@@ -5211,7 +6603,22 @@ function renderSourceControlBranchRow(branch, { remote = false } = {}) {
         <span>${escapeHtml([branch.shortOid, branch.relativeDate, branch.upstream].filter(Boolean).join(" • "))}</span>
       </div>
       <div class="workspace-scm-branch-actions">
-        ${actions.join("")}
+        ${
+          primaryAction
+            ? `
+              <button
+                type="button"
+                class="workspace-scm-row-primary"
+                data-action="${escapeHtml(primaryAction.action)}"
+                data-branch-name="${escapeHtml(primaryAction.branchName || "")}"
+                ${primaryAction.startPoint ? `data-start-point="${escapeHtml(primaryAction.startPoint)}"` : ""}
+              >
+                ${escapeHtml(primaryAction.label)}
+              </button>
+            `
+            : ""
+        }
+        ${renderSourceControlRowMenu("branch", branch.fullName || branch.name, menuItems)}
       </div>
     </article>
   `;
@@ -5224,7 +6631,7 @@ function renderSourceControlGraphTab(snapshot) {
 
   return `
     <div class="workspace-scm-main workspace-scm-main-graph">
-      <section class="workspace-scm-column workspace-scm-column-list">
+      <section class="workspace-scm-column workspace-scm-column-list workspace-scm-column-list-graph">
         <div class="workspace-scm-graph-list">
           ${
             commits.length
@@ -5360,19 +6767,47 @@ function renderSourceControlTaskPanel(task) {
     return "";
   }
 
+  const isExpanded = uiState.sourceControl.taskTrayExpanded;
+  const tone = task.status === "failed" ? "failed" : task.status === "succeeded" ? "succeeded" : "running";
+  const summary = task.canWriteInput
+    ? "Waiting for input"
+    : task.status === "failed"
+      ? "Needs attention"
+      : task.status === "succeeded"
+        ? "Finished successfully"
+        : "Running";
+
   return `
-    <section class="workspace-scm-task">
-      <header class="workspace-scm-task-header">
-        <div>
-          <p class="workspace-scm-detail-kicker">Task</p>
+    <section class="workspace-scm-task-tray is-${tone} ${isExpanded ? "is-expanded" : ""}">
+      <button
+        type="button"
+        class="workspace-scm-task-tray-toggle"
+        data-action="scm-toggle-task-tray"
+        aria-expanded="${isExpanded ? "true" : "false"}"
+      >
+        <div class="workspace-scm-task-tray-copy">
+          <div class="workspace-scm-task-tray-title-row">
+            <p class="workspace-scm-detail-kicker">Task</p>
+            <span class="workspace-scm-task-tray-status is-${tone}">${escapeHtml(formatSourceControlTaskStatus(task))}</span>
+          </div>
           <strong>${escapeHtml(task.title)}</strong>
-          <span>${escapeHtml(formatSourceControlTaskStatus(task))}</span>
+          <span>${escapeHtml(summary)}</span>
         </div>
-        <span class="workspace-scm-task-command">${escapeHtml(task.command)}</span>
-      </header>
-      <pre class="workspace-scm-task-output">${escapeHtml(task.output || "Waiting for task output…")}</pre>
+        <div class="workspace-scm-task-tray-meta">
+          <span class="workspace-scm-task-command">${escapeHtml(task.command)}</span>
+          <span class="workspace-scm-task-tray-caret" aria-hidden="true">${renderChevronIcon(isExpanded ? "up" : "down")}</span>
+        </div>
+      </button>
       ${
-        task.canWriteInput
+        isExpanded
+          ? `
+            <div class="workspace-scm-task-tray-body">
+              <pre class="workspace-scm-task-output workspace-scm-task-tray-output">${escapeHtml(task.output || "Waiting for task output…")}</pre>
+          `
+          : ""
+      }
+      ${
+        isExpanded && task.canWriteInput
           ? `
             <form class="workspace-scm-task-form" data-action="scm-task-input">
               <input
@@ -5389,7 +6824,91 @@ function renderSourceControlTaskPanel(task) {
           `
           : ""
       }
+      ${isExpanded ? renderSourceControlTaskRecovery(task) : ""}
+      ${isExpanded ? "</div>" : ""}
     </section>
+  `;
+}
+
+function renderSourceControlTaskRecovery(task) {
+  const recovery = task?.recovery || null;
+  if (recovery?.kind !== "publish-branch") {
+    return "";
+  }
+
+  const remoteCount = recovery.remotes?.length || 0;
+  const copy = remoteCount > 1
+    ? "This branch has no upstream yet. Choose a remote and publish it to start tracking future pushes."
+    : "This branch has no upstream yet. Publish it now to start tracking future pushes.";
+
+  return `
+    <div class="workspace-scm-task-recovery">
+      <div class="workspace-scm-task-recovery-copy">
+        <strong>Publish ${escapeHtml(recovery.branchName)}</strong>
+        <span>${escapeHtml(copy)}</span>
+      </div>
+      <button type="button" class="workspace-scm-primary-button" data-action="scm-run-task-recovery">
+        Publish branch
+      </button>
+    </div>
+  `;
+}
+
+function renderSourceControlPublishModal() {
+  if (!uiState.sourceControl.publishModalVisible) {
+    return "";
+  }
+
+  const branchName = uiState.sourceControl.publishModalBranchName;
+  const remotes = uiState.sourceControl.publishModalRemotes || [];
+  const selectedRemote = uiState.sourceControl.publishModalSelectedRemote;
+
+  return `
+    <div class="workspace-scm-inline-modal" data-action="close-scm-publish-modal">
+      <section class="workspace-scm-publish-dialog" role="dialog" aria-modal="true" aria-labelledby="workspace-scm-publish-title">
+        <header class="workspace-scm-publish-head">
+          <div>
+            <p class="workspace-scm-detail-kicker">Publish branch</p>
+            <strong id="workspace-scm-publish-title">${escapeHtml(branchName)}</strong>
+            <span>Choose which remote should track this branch.</span>
+          </div>
+          <button
+            type="button"
+            class="workspace-git-panel-button"
+            data-action="close-scm-publish-modal"
+            aria-label="Close publish branch dialog"
+            title="Close publish branch dialog"
+          >
+            ${renderCloseIcon()}
+          </button>
+        </header>
+        <label class="workspace-scm-publish-field">
+          <span>Remote</span>
+          <select class="workspace-scm-input workspace-scm-select" data-scm-publish-remote>
+            ${remotes
+              .map(
+                (remote) => `
+                  <option
+                    value="${escapeHtml(remote.name)}"
+                    ${remote.name === selectedRemote ? "selected" : ""}
+                  >
+                    ${escapeHtml(remote.name)}${remote.isDefault ? " (default)" : ""}
+                  </option>
+                `,
+              )
+              .join("")}
+          </select>
+        </label>
+        <div class="workspace-scm-publish-actions">
+          <button type="button" class="workspace-scm-ghost-button" data-action="close-scm-publish-modal">
+            Cancel
+          </button>
+          <button type="button" class="workspace-scm-primary-button" data-action="scm-confirm-publish-branch">
+            Publish branch
+          </button>
+        </div>
+      </section>
+    </div>
   `;
 }
 
@@ -5684,30 +7203,76 @@ function formatGitFileStatusLabel(status) {
 }
 
 function syncGitRefreshLoop() {
-  const shouldRefresh = Boolean(
-    uiState.snapshot?.activeWorkspaceId
-      && document.hasFocus()
-      && bridge.refreshWorkspaceGitStatus,
-  );
+  // Git refresh is explicit now so workspace navigation is not blocked by background status checks.
+}
 
-  if (!shouldRefresh) {
-    if (runtimeStore.gitRefreshIntervalTimer) {
-      window.clearInterval(runtimeStore.gitRefreshIntervalTimer);
-      runtimeStore.gitRefreshIntervalTimer = 0;
-    }
+function clearSystemHealthLoop() {
+  if (runtimeStore.systemHealthRefreshTimer) {
+    clearTimeout(runtimeStore.systemHealthRefreshTimer);
+    runtimeStore.systemHealthRefreshTimer = 0;
+  }
+  runtimeStore.systemHealthRefreshMode = "";
+}
+
+function syncSystemHealthLoop() {
+  if (!supportsSystemHealth() || !document.hasFocus()) {
+    clearSystemHealthLoop();
     return;
   }
 
-  if (runtimeStore.gitRefreshIntervalTimer) {
+  const nextMode = uiState.systemHealthPanelVisible ? "panel" : "status";
+  if (
+    runtimeStore.systemHealthRefreshTimer
+    && runtimeStore.systemHealthRefreshMode === nextMode
+  ) {
     return;
   }
 
-  runtimeStore.gitRefreshIntervalTimer = window.setInterval(() => {
-    if (isSourceControlTextEntryActive()) {
-      return;
+  clearSystemHealthLoop();
+  runtimeStore.systemHealthRefreshMode = nextMode;
+  runtimeStore.systemHealthRefreshTimer = window.setTimeout(() => {
+    runtimeStore.systemHealthRefreshTimer = 0;
+    void loadSystemHealthSnapshot({ silent: true });
+    syncSystemHealthLoop();
+  }, uiState.systemHealthPanelVisible ? SYSTEM_HEALTH_PANEL_REFRESH_MS : SYSTEM_HEALTH_IDLE_REFRESH_MS);
+}
+
+async function loadSystemHealthSnapshot({ force = false, silent = false } = {}) {
+  if (!supportsSystemHealth() || !bridge.loadSystemHealthSnapshot) {
+    return uiState.systemHealthSnapshot;
+  }
+
+  if (runtimeStore.systemHealthRefreshInFlight) {
+    return runtimeStore.systemHealthRefreshInFlight;
+  }
+
+  if (!silent || !uiState.systemHealthSnapshot) {
+    uiState.systemHealthLoading = true;
+    render({ refreshVisibleTerminals: false });
+  }
+
+  runtimeStore.systemHealthRefreshInFlight = (async () => {
+    try {
+      const snapshot = await bridge.loadSystemHealthSnapshot();
+      uiState.systemHealthSnapshot = snapshot;
+      uiState.systemHealthError = snapshot?.availability === "error"
+        ? String(snapshot.errorMessage || "System monitoring is unavailable.")
+        : "";
+      return snapshot;
+    } catch (error) {
+      if (force) {
+        console.error(error);
+      }
+      uiState.systemHealthError = error instanceof Error ? error.message : String(error || "System monitoring failed.");
+      return uiState.systemHealthSnapshot;
+    } finally {
+      uiState.systemHealthLoading = false;
+      runtimeStore.systemHealthRefreshInFlight = null;
+      render({ refreshVisibleTerminals: false });
     }
-    void refreshActiveWorkspaceGitStatus();
-  }, GIT_REFRESH_INTERVAL_MS);
+  })();
+
+  return runtimeStore.systemHealthRefreshInFlight;
 }
 
 async function refreshActiveWorkspaceGitStatus({ force = false } = {}) {
@@ -5935,6 +7500,7 @@ function workspaceLayoutSignature(workspace) {
 }
 
 function renderPaneShell(pane, paneIndex) {
+  const paneNumber = String(paneIndex + 1).padStart(2, "0");
   return `
     <article
       class="terminal-pane"
@@ -5945,7 +7511,8 @@ function renderPaneShell(pane, paneIndex) {
     >
       <header class="terminal-pane-header">
         <div class="terminal-pane-title">
-          <strong>Terminal ${paneIndex + 1}</strong>
+          <span class="terminal-pane-kicker">Terminal</span>
+          <strong>${paneNumber}</strong>
         </div>
       </header>
       <div class="terminal-host" data-terminal-host="${escapeHtml(pane.id)}"></div>
@@ -6106,8 +7673,10 @@ function mountWorkspaceTerminals(workspace, root = document) {
       convertEol: true,
       fontFamily: '"SF Mono", "SFMono-Regular", "Menlo", monospace',
       fontSize: terminalFontSize,
-      fontWeight: "450",
-      lineHeight: 1.18,
+      fontWeight: "400",
+      fontWeightBold: "560",
+      letterSpacing: 0,
+      lineHeight: 1.24,
       scrollback: 8000,
       theme: { ...theme.terminalTheme },
     });
@@ -6125,13 +7694,14 @@ function mountWorkspaceTerminals(workspace, root = document) {
       element: host.closest(".terminal-pane"),
     };
 
+    const syncPaneFocusState = () => {
+      setActivePaneId(pane.id, getActiveWorkspace() || workspace);
+    };
+
     state.observer.observe(host);
-    host.addEventListener("focusin", () => {
-      setActivePaneId(pane.id, workspace);
-    });
-    host.addEventListener("pointerdown", () => {
-      setActivePaneId(pane.id, workspace);
-    });
+    host.addEventListener("focusin", syncPaneFocusState);
+    host.addEventListener("pointerdown", syncPaneFocusState);
+    terminal.textarea?.addEventListener("focus", syncPaneFocusState);
     terminal.onData((data) => {
       bridge.writeToPane(pane.id, data).catch((error) => console.error(error));
     });
