@@ -2346,6 +2346,12 @@ button {
   background: color-mix(in srgb, var(--accent-soft) 74%, rgba(255, 255, 255, 0.03));
 }
 
+.settings-ai-status.is-warning {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--warning) 24%, rgba(255, 255, 255, 0.06));
+  background: color-mix(in srgb, var(--warning-soft) 72%, rgba(255, 255, 255, 0.03));
+}
+
 .settings-ai-controls {
   display: grid;
   gap: 10px;
@@ -2413,6 +2419,116 @@ button {
   color: var(--text);
   border-color: color-mix(in srgb, var(--accent) 22%, rgba(255, 255, 255, 0.08));
   background: color-mix(in srgb, var(--accent-soft) 72%, rgba(255, 255, 255, 0.02));
+}
+
+.settings-codex-card {
+  gap: 14px;
+}
+
+.settings-codex-summary {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.settings-codex-summary-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.settings-codex-summary-label,
+.settings-codex-field span {
+  color: var(--surface-soft-text);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.settings-codex-note,
+.settings-codex-empty {
+  margin: 0;
+  color: var(--surface-soft-text);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.settings-codex-path {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 0.75rem;
+  font-family: "SFMono-Regular", "SF Mono", ui-monospace, monospace;
+}
+
+.settings-codex-controls {
+  display: grid;
+  gap: 10px;
+}
+
+.settings-codex-field {
+  display: grid;
+  gap: 8px;
+}
+
+.settings-codex-select {
+  width: 100%;
+  min-width: 0;
+  min-height: 40px;
+  padding: 0 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(0, 0, 0, 0.14);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+  outline: none;
+  appearance: none;
+}
+
+.settings-codex-select:focus {
+  border-color: color-mix(in srgb, var(--accent) 26%, rgba(255, 255, 255, 0.08));
+}
+
+.settings-codex-detected {
+  display: grid;
+  gap: 8px;
+}
+
+.settings-codex-detected-row {
+  display: grid;
+  gap: 4px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.settings-codex-detected-row.is-selected {
+  border-color: color-mix(in srgb, var(--accent) 22%, rgba(255, 255, 255, 0.07));
+  background: color-mix(in srgb, var(--accent-soft) 24%, rgba(255, 255, 255, 0.02));
+}
+
+.settings-codex-detected-copy {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.settings-codex-detected-copy strong {
+  color: var(--text);
+  font-size: 0.8rem;
+}
+
+.settings-codex-detected-copy span {
+  color: var(--surface-soft-text);
+  font-size: 0.72rem;
 }
 
 .settings-adjustment-head {

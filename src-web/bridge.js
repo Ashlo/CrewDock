@@ -33,6 +33,10 @@ export function createBridge({
         tauriApi.core.invoke("set_terminal_font_size", { terminalFontSize }),
       setOpenAiApiKey: (openaiApiKey) =>
         tauriApi.core.invoke("set_openai_api_key", { openaiApiKey }),
+      setCodexCliPath: (codexCliPath) =>
+        tauriApi.core.invoke("set_codex_cli_path", { codexCliPath }),
+      refreshCodexCliCatalog: () =>
+        tauriApi.core.invoke("refresh_codex_cli_catalog"),
       loadSystemHealthSnapshot: () =>
         tauriApi.core.invoke("load_system_health_snapshot"),
       createWorkspace: (path, paneCount) =>
@@ -178,6 +182,28 @@ function createMockBridge({
     terminalFontSize: 13.5,
     hasStoredOpenAiApiKey: false,
     hasEnvironmentOpenAiApiKey: false,
+    codexCli: {
+      status: "ready",
+      selectionMode: "auto",
+      configuredPath: null,
+      effectivePath: "/usr/local/bin/codex",
+      effectiveVersion: "0.116.0",
+      message: "Using the newest detected Codex CLI on PATH.",
+      candidates: [
+        {
+          path: "/usr/local/bin/codex",
+          version: "0.116.0",
+          source: "npmGlobal",
+          isSelected: true,
+        },
+        {
+          path: "/opt/homebrew/bin/codex",
+          version: "0.42.0",
+          source: "homebrew",
+          isSelected: false,
+        },
+      ],
+    },
   };
 
   let workspaceCounter = 0;
@@ -600,6 +626,26 @@ function createMockBridge({
       settings.hasStoredOpenAiApiKey = Boolean(String(openaiApiKey || "").trim());
       return emitState();
     },
+    setCodexCliPath: async (codexCliPath) => {
+      const normalized = typeof codexCliPath === "string" ? codexCliPath.trim() : "";
+      settings.codexCli.configuredPath = normalized || null;
+      settings.codexCli.selectionMode = settings.codexCli.configuredPath ? "custom" : "auto";
+      settings.codexCli.message = settings.codexCli.configuredPath
+        ? "Using the configured Codex CLI path."
+        : "Using the newest detected Codex CLI on PATH.";
+      const selectedPath = settings.codexCli.configuredPath || settings.codexCli.candidates[0]?.path || null;
+      const selectedCandidate = settings.codexCli.candidates.find((candidate) => candidate.path === selectedPath)
+        || settings.codexCli.candidates[0]
+        || null;
+      settings.codexCli.effectivePath = selectedCandidate?.path || normalized || null;
+      settings.codexCli.effectiveVersion = selectedCandidate?.version || null;
+      settings.codexCli.candidates = settings.codexCli.candidates.map((candidate) => ({
+        ...candidate,
+        isSelected: candidate.path === settings.codexCli.effectivePath,
+      }));
+      return emitState();
+    },
+    refreshCodexCliCatalog: async () => emitState(),
     openDirectory: async (defaultPath) => {
       const value = window.prompt(
         "Workspace folder",

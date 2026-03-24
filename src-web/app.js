@@ -1056,7 +1056,20 @@ function hasEnvironmentOpenAiApiKey(snapshot = uiState.snapshot) {
   return Boolean(snapshot?.settings?.hasEnvironmentOpenAiApiKey);
 }
 
+function getCodexCliSnapshot(snapshot = uiState.snapshot) {
+  return snapshot?.settings?.codexCli || {
+    status: "unavailable",
+    selectionMode: "auto",
+    configuredPath: null,
+    effectivePath: null,
+    effectiveVersion: null,
+    message: "CrewDock has not scanned for Codex CLI yet.",
+    candidates: [],
+  };
+}
+
 function createSettingsDraft(snapshot = uiState.snapshot) {
+  const codexCli = getCodexCliSnapshot(snapshot);
   return {
     themeId: getActiveThemeId(snapshot),
     interfaceTextScale: getInterfaceTextScale(snapshot),
@@ -1064,6 +1077,11 @@ function createSettingsDraft(snapshot = uiState.snapshot) {
     openAiApiKey: "",
     hasStoredOpenAiApiKey: hasStoredOpenAiApiKey(snapshot),
     hasEnvironmentOpenAiApiKey: hasEnvironmentOpenAiApiKey(snapshot),
+    codexCli,
+    codexCliSelectedPath: codexCli.configuredPath || "__auto__",
+    codexCliCustomPath: codexCli.configuredPath || "",
+    savingCodexCliPath: false,
+    refreshingCodexCli: false,
     savingOpenAiApiKey: false,
     applyingAppearance: false,
   };
@@ -1104,6 +1122,18 @@ function getDraftHasEnvironmentOpenAiApiKey(snapshot = uiState.snapshot) {
   return Boolean(
     uiState.settingsDraft?.hasEnvironmentOpenAiApiKey ?? hasEnvironmentOpenAiApiKey(snapshot),
   );
+}
+
+function getDraftCodexCli(snapshot = uiState.snapshot) {
+  return uiState.settingsDraft?.codexCli || getCodexCliSnapshot(snapshot);
+}
+
+function getDraftCodexCliSelectedPath(snapshot = uiState.snapshot) {
+  return uiState.settingsDraft?.codexCliSelectedPath ?? getDraftCodexCli(snapshot).configuredPath ?? "__auto__";
+}
+
+function getDraftCodexCliCustomPath(snapshot = uiState.snapshot) {
+  return uiState.settingsDraft?.codexCliCustomPath ?? getDraftCodexCli(snapshot).configuredPath ?? "";
 }
 
 function getCurrentThemeDefinition() {
@@ -1470,6 +1500,73 @@ async function clearStoredOpenAiApiKey() {
   }
 }
 
+async function saveCodexCliPath(nextPath) {
+  if (!bridge.setCodexCliPath || !uiState.settingsVisible) {
+    return;
+  }
+
+  if (!uiState.settingsDraft) {
+    syncSettingsDraftFromSnapshot();
+  }
+
+  uiState.settingsDraft.savingCodexCliPath = true;
+  render();
+
+  try {
+    uiState.snapshot = await bridge.setCodexCliPath(nextPath);
+    syncSettingsDraftFromSnapshot(uiState.snapshot);
+    applySnapshotSettings(uiState.snapshot);
+  } catch (error) {
+    reportSourceControlError(error);
+  } finally {
+    if (uiState.settingsDraft) {
+      uiState.settingsDraft.savingCodexCliPath = false;
+    }
+    render();
+  }
+}
+
+async function saveSelectedCodexCliPath() {
+  const selectedPath = getDraftCodexCliSelectedPath();
+  await saveCodexCliPath(selectedPath === "__auto__" ? null : selectedPath);
+}
+
+async function saveCustomCodexCliPath() {
+  const customPath = getDraftCodexCliCustomPath().trim();
+  if (!customPath) {
+    window.alert("Enter an absolute path to the Codex CLI binary, or use Auto.");
+    return;
+  }
+
+  await saveCodexCliPath(customPath);
+}
+
+async function refreshCodexCliCatalog() {
+  if (!bridge.refreshCodexCliCatalog || !uiState.settingsVisible) {
+    return;
+  }
+
+  if (!uiState.settingsDraft) {
+    syncSettingsDraftFromSnapshot();
+  }
+
+  uiState.settingsDraft.refreshingCodexCli = true;
+  render();
+
+  try {
+    uiState.snapshot = await bridge.refreshCodexCliCatalog();
+    syncSettingsDraftFromSnapshot(uiState.snapshot);
+    applySnapshotSettings(uiState.snapshot);
+  } catch (error) {
+    reportSourceControlError(error);
+  } finally {
+    if (uiState.settingsDraft) {
+      uiState.settingsDraft.refreshingCodexCli = false;
+    }
+    render();
+  }
+}
+
 function bindSettingsSheetControls(root = document) {
   const settingsBackdrop = root.querySelector(".settings-sheet-backdrop");
   if (settingsBackdrop instanceof HTMLElement) {
@@ -1544,6 +1641,73 @@ function bindSettingsSheetControls(root = document) {
       event.preventDefault();
       event.stopPropagation();
       void clearStoredOpenAiApiKey();
+    });
+  }
+
+  const codexSelect = root.querySelector("[data-settings-codex-select]");
+  if (codexSelect instanceof HTMLSelectElement) {
+    codexSelect.addEventListener("change", (event) => {
+      event.stopPropagation();
+      if (!uiState.settingsDraft) {
+        syncSettingsDraftFromSnapshot();
+      }
+      uiState.settingsDraft.codexCliSelectedPath = codexSelect.value || "__auto__";
+    });
+  }
+
+  const codexCustomInput = root.querySelector("[data-settings-codex-custom-path-input]");
+  if (codexCustomInput instanceof HTMLInputElement) {
+    codexCustomInput.addEventListener("input", (event) => {
+      event.stopPropagation();
+      if (!uiState.settingsDraft) {
+        syncSettingsDraftFromSnapshot();
+      }
+      uiState.settingsDraft.codexCliCustomPath = codexCustomInput.value;
+    });
+    codexCustomInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      void saveCustomCodexCliPath();
+    });
+  }
+
+  const codexSelectButton = root.querySelector("[data-settings-codex-apply-selection]");
+  if (codexSelectButton instanceof HTMLButtonElement) {
+    codexSelectButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void saveSelectedCodexCliPath();
+    });
+  }
+
+  const codexCustomButton = root.querySelector("[data-settings-codex-save-custom]");
+  if (codexCustomButton instanceof HTMLButtonElement) {
+    codexCustomButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void saveCustomCodexCliPath();
+    });
+  }
+
+  const codexAutoButton = root.querySelector("[data-settings-codex-auto]");
+  if (codexAutoButton instanceof HTMLButtonElement) {
+    codexAutoButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void saveCodexCliPath(null);
+    });
+  }
+
+  const codexRefreshButton = root.querySelector("[data-settings-codex-refresh]");
+  if (codexRefreshButton instanceof HTMLButtonElement) {
+    codexRefreshButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void refreshCodexCliCatalog();
     });
   }
 }
@@ -5229,6 +5393,7 @@ function renderSettingsSheet(snapshot) {
                     preview: renderTerminalTextPreview(),
                   })}
                 </div>
+                ${renderSettingsCodexCard(getDraftCodexCli(snapshot))}
                 ${renderSettingsAiCard({
                   hasStoredKey,
                   hasEnvironmentKey,
@@ -5498,6 +5663,139 @@ function renderTerminalTextPreview() {
       <div class="settings-preview-terminal-line is-muted">On branch main</div>
       <div class="settings-preview-terminal-line is-accent">modified: src-web/app.js</div>
     </div>
+  `;
+}
+
+function labelCodexCliSource(source) {
+  switch (source) {
+    case "homebrew":
+      return "Homebrew";
+    case "npmGlobal":
+      return "npm global";
+    case "nvm":
+      return "nvm";
+    case "volta":
+      return "Volta";
+    case "custom":
+      return "Custom";
+    default:
+      return "PATH";
+  }
+}
+
+function renderSettingsCodexCard(codexCli) {
+  const isSaving = Boolean(uiState.settingsDraft?.savingCodexCliPath);
+  const isRefreshing = Boolean(uiState.settingsDraft?.refreshingCodexCli);
+  const selectedPath = getDraftCodexCliSelectedPath();
+  const customPath = getDraftCodexCliCustomPath();
+  const candidates = Array.isArray(codexCli?.candidates) ? codexCli.candidates : [];
+  const statusLabel = codexCli?.status === "ready"
+    ? codexCli.selectionMode === "custom"
+      ? "Custom"
+      : "Auto"
+    : codexCli?.status === "invalidSelection"
+      ? "Needs attention"
+      : "Unavailable";
+  const statusTone = codexCli?.status === "ready" ? "is-active" : codexCli?.status === "invalidSelection" ? "is-warning" : "";
+  const effectiveVersion = codexCli?.effectiveVersion ? `v${codexCli.effectiveVersion}` : "Not found";
+  const effectivePath = codexCli?.effectivePath || "No Codex CLI detected";
+
+  return `
+    <section class="settings-ai-card settings-codex-card">
+      <div class="settings-ai-head settings-codex-head">
+        <div>
+          <p class="settings-panel-kicker">Codex sessions</p>
+          <h4 class="settings-adjustment-title">Codex CLI selection</h4>
+          <p class="settings-adjustment-copy">CrewDock will use this binary for future Codex launch and resume actions. Auto mode always picks the newest detected version.</p>
+        </div>
+        <span class="settings-ai-status ${statusTone}">${escapeHtml(statusLabel)}</span>
+      </div>
+      <div class="settings-codex-summary">
+        <div class="settings-codex-summary-row">
+          <span class="settings-codex-summary-label">Effective binary</span>
+          <strong>${escapeHtml(effectiveVersion)}</strong>
+        </div>
+        <code class="settings-codex-path">${escapeHtml(effectivePath)}</code>
+        ${codexCli?.message ? `<p class="settings-codex-note">${escapeHtml(codexCli.message)}</p>` : ""}
+      </div>
+      <div class="settings-codex-controls">
+        <label class="settings-codex-field">
+          <span>Detected installs</span>
+          <select class="settings-codex-select" data-settings-codex-select>
+            <option value="__auto__" ${selectedPath === "__auto__" ? "selected" : ""}>Auto select newest detected version</option>
+            ${candidates.map((candidate) => `
+              <option value="${escapeHtml(candidate.path)}" ${selectedPath === candidate.path ? "selected" : ""}>
+                ${escapeHtml(`v${candidate.version} · ${labelCodexCliSource(candidate.source)} · ${candidate.path}`)}
+              </option>
+            `).join("")}
+          </select>
+        </label>
+        <div class="settings-ai-actions">
+          <button
+            type="button"
+            class="settings-ai-button settings-ai-button-primary"
+            data-settings-codex-apply-selection
+            ${isSaving || isRefreshing ? "disabled" : ""}
+          >
+            ${isSaving ? "Saving..." : "Use selection"}
+          </button>
+          <button
+            type="button"
+            class="settings-ai-button"
+            data-settings-codex-refresh
+            ${isSaving || isRefreshing ? "disabled" : ""}
+          >
+            ${isRefreshing ? "Scanning..." : "Rescan"}
+          </button>
+        </div>
+      </div>
+      <div class="settings-codex-controls">
+        <label class="settings-codex-field">
+          <span>Custom binary path</span>
+          <input
+            class="settings-ai-input"
+            type="text"
+            value="${escapeHtml(customPath)}"
+            data-settings-codex-custom-path-input
+            placeholder="/usr/local/bin/codex"
+            autocomplete="off"
+            autocapitalize="off"
+            spellcheck="false"
+          />
+        </label>
+        <div class="settings-ai-actions">
+          <button
+            type="button"
+            class="settings-ai-button settings-ai-button-primary"
+            data-settings-codex-save-custom
+            ${isSaving || isRefreshing ? "disabled" : ""}
+          >
+            ${isSaving ? "Saving..." : "Use custom path"}
+          </button>
+          <button
+            type="button"
+            class="settings-ai-button"
+            data-settings-codex-auto
+            ${isSaving || isRefreshing ? "disabled" : ""}
+          >
+            Use auto
+          </button>
+        </div>
+      </div>
+      <div class="settings-codex-detected">
+        ${candidates.length > 0
+          ? candidates.map((candidate) => `
+              <div class="settings-codex-detected-row ${candidate.isSelected ? "is-selected" : ""}">
+                <div class="settings-codex-detected-copy">
+                  <strong>${escapeHtml(`v${candidate.version}`)}</strong>
+                  <span>${escapeHtml(labelCodexCliSource(candidate.source))}</span>
+                </div>
+                <code class="settings-codex-path">${escapeHtml(candidate.path)}</code>
+              </div>
+            `).join("")
+          : '<p class="settings-codex-empty">No Codex CLI installations were detected on PATH. You can still paste an absolute binary path above.</p>'}
+      </div>
+    </section>
   `;
 }
 
