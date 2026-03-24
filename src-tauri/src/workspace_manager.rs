@@ -41,6 +41,7 @@ pub(crate) fn build_workspace_record(
         pane_layout,
         started: false,
         git: None,
+        codex_session_id: None,
     })
 }
 

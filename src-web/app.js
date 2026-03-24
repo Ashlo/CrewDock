@@ -1863,6 +1863,7 @@ async function handleClick(event) {
   if (target.dataset.action === "show-settings") {
     uiState.settingsVisible = true;
     uiState.settingsSection = "workbench";
+    closeCodexModal();
     closeSystemHealthPanel();
     closeSourceControlPanel();
     uiState.activityRailVisible = false;
@@ -1890,6 +1891,7 @@ async function handleClick(event) {
   if (target.dataset.action === "show-launcher") {
     uiState.launcherVisible = true;
     hideSettingsSheet();
+    closeCodexModal();
     closeSystemHealthPanel();
     closeSourceControlPanel();
     uiState.activityRailVisible = false;
@@ -1903,6 +1905,42 @@ async function handleClick(event) {
 
   if (target.dataset.action === "show-git-panel") {
     await openSourceControlPanel({ force: true });
+    return;
+  }
+
+  if (target.dataset.action === "show-codex-modal") {
+    await openCodexModal();
+    return;
+  }
+
+  if (target.dataset.action === "close-codex-modal") {
+    if (closeCodexModal()) {
+      render({ refreshVisibleTerminals: false });
+    }
+    return;
+  }
+
+  if (target.dataset.action === "refresh-codex-sessions") {
+    await loadActiveWorkspaceCodexSessions({ force: true });
+    return;
+  }
+
+  if (target.dataset.action === "select-codex-session") {
+    const sessionId = String(target.dataset.sessionId || "");
+    if (sessionId && uiState.codexSelectedSessionId !== sessionId) {
+      uiState.codexSelectedSessionId = sessionId;
+      render({ refreshVisibleTerminals: false });
+    }
+    return;
+  }
+
+  if (target.dataset.action === "resume-codex-session") {
+    await resumeSelectedCodexSession();
+    return;
+  }
+
+  if (target.dataset.action === "start-codex-session") {
+    await startNewCodexSession();
     return;
   }
 
@@ -2004,6 +2042,7 @@ async function handleClick(event) {
 
   if (target.dataset.action === "open-workspace") {
     hideSettingsSheet();
+    closeCodexModal();
     closeSystemHealthPanel();
     closeSourceControlPanel();
     uiState.activityRailVisible = false;
@@ -2610,6 +2649,13 @@ async function handleKeyDown(event) {
     return;
   }
 
+  if (uiState.codexModalVisible && event.key === "Escape") {
+    event.preventDefault();
+    closeCodexModal();
+    render({ refreshVisibleTerminals: false });
+    return;
+  }
+
   if (uiState.systemHealthPanelVisible && event.key === "Escape") {
     event.preventDefault();
     closeSystemHealthPanel();
@@ -2762,6 +2808,7 @@ async function beginWorkspaceCreation() {
   );
   uiState.launcherVisible = true;
   closeQuickSwitcher();
+  closeCodexModal();
   render();
 }
 
@@ -2778,6 +2825,7 @@ async function activateWorkspace(workspaceId) {
 
   uiState.launcherVisible = false;
   hideSettingsSheet();
+  closeCodexModal();
   uiState.gitPanelVisible = keepSourceControlOpen;
   uiState.pendingWorkspaceDraft = null;
   uiState.contextMenu = null;
@@ -2797,6 +2845,7 @@ function openQuickSwitcher() {
   uiState.quickSwitcherVisible = true;
   uiState.launcherVisible = false;
   uiState.activityRailVisible = false;
+  closeCodexModal();
   closeSystemHealthPanel();
   uiState.quickSwitcherQuery = "";
   uiState.quickSwitcherCursor = Math.max(
@@ -2815,6 +2864,130 @@ function closeQuickSwitcher() {
   uiState.quickSwitcherQuery = "";
   uiState.quickSwitcherCursor = 0;
   uiState.quickSwitcherShouldFocus = false;
+}
+
+function closeCodexModal() {
+  if (!uiState.codexModalVisible) {
+    return false;
+  }
+
+  uiState.codexModalVisible = false;
+  uiState.codexSessionsLoading = false;
+  uiState.codexSessionsError = "";
+  uiState.codexSubmitting = false;
+  uiState.codexShouldFocus = false;
+  return true;
+}
+
+async function openCodexModal() {
+  const workspace = getActiveWorkspace();
+  if (!workspace) {
+    return;
+  }
+
+  uiState.codexModalVisible = true;
+  uiState.codexSessionsError = "";
+  uiState.codexSubmitting = false;
+  uiState.codexShouldFocus = false;
+  hideSettingsSheet();
+  closeSystemHealthPanel();
+  closeSourceControlPanel();
+  uiState.activityRailVisible = false;
+  closeQuickSwitcher();
+  uiState.pendingWorkspaceDraft = null;
+  uiState.contextMenu = null;
+  cancelWorkspaceRename();
+  render({ refreshVisibleTerminals: false });
+  await loadActiveWorkspaceCodexSessions({ force: true });
+}
+
+async function loadActiveWorkspaceCodexSessions({ force = false } = {}) {
+  const workspace = getActiveWorkspace();
+  if (!workspace || !bridge.loadWorkspaceCodexSessions) {
+    return null;
+  }
+
+  if (uiState.codexSessionsLoading && !force) {
+    return uiState.codexSessionsSnapshot;
+  }
+
+  uiState.codexSessionsLoading = true;
+  uiState.codexSessionsError = "";
+  if (uiState.codexModalVisible) {
+    render({ refreshVisibleTerminals: false });
+  }
+
+  try {
+    const snapshot = await bridge.loadWorkspaceCodexSessions(workspace.id);
+    const matchingSelection = snapshot.sessions?.some(
+      (session) => session.id === uiState.codexSelectedSessionId,
+    );
+    uiState.codexSessionsSnapshot = snapshot;
+    uiState.codexSelectedSessionId = matchingSelection
+      ? uiState.codexSelectedSessionId
+      : snapshot.rememberedSessionId && snapshot.sessions?.some((session) => session.id === snapshot.rememberedSessionId)
+        ? snapshot.rememberedSessionId
+        : snapshot.sessions?.[0]?.id || "";
+    uiState.codexShouldFocus = true;
+    return snapshot;
+  } catch (error) {
+    uiState.codexSessionsError = error instanceof Error ? error.message : String(error || "Failed to load Codex sessions");
+    return null;
+  } finally {
+    uiState.codexSessionsLoading = false;
+    if (uiState.codexModalVisible) {
+      render({ refreshVisibleTerminals: false });
+    }
+  }
+}
+
+async function resumeSelectedCodexSession() {
+  const workspace = getActiveWorkspace();
+  const paneId = resolveActivePaneId(workspace);
+  const sessionId = String(uiState.codexSelectedSessionId || "");
+  if (!workspace || !paneId || !bridge.resumeWorkspaceCodexSession) {
+    return;
+  }
+  if (!sessionId) {
+    window.alert("Choose a Codex session to resume first.");
+    return;
+  }
+
+  uiState.codexSubmitting = true;
+  render({ refreshVisibleTerminals: false });
+
+  try {
+    uiState.snapshot = await bridge.resumeWorkspaceCodexSession(workspace.id, paneId, sessionId);
+    closeCodexModal();
+    render({ refreshVisibleTerminals: false });
+    focusPaneTerminal(paneId);
+  } catch (error) {
+    reportSourceControlError(error);
+    uiState.codexSubmitting = false;
+    render({ refreshVisibleTerminals: false });
+  }
+}
+
+async function startNewCodexSession() {
+  const workspace = getActiveWorkspace();
+  const paneId = resolveActivePaneId(workspace);
+  if (!workspace || !paneId || !bridge.startWorkspaceCodexSession) {
+    return;
+  }
+
+  uiState.codexSubmitting = true;
+  render({ refreshVisibleTerminals: false });
+
+  try {
+    await bridge.startWorkspaceCodexSession(workspace.id, paneId);
+    closeCodexModal();
+    render({ refreshVisibleTerminals: false });
+    focusPaneTerminal(paneId);
+  } catch (error) {
+    reportSourceControlError(error);
+    uiState.codexSubmitting = false;
+    render({ refreshVisibleTerminals: false });
+  }
 }
 
 function closeSystemHealthPanel() {
@@ -3210,6 +3383,7 @@ async function openSourceControlPanel({ force = false } = {}) {
   uiState.gitPanelVisible = true;
   closeSourceControlRowMenu();
   hideSettingsSheet();
+  closeCodexModal();
   closeSystemHealthPanel();
   uiState.activityRailVisible = false;
   closeQuickSwitcher();
@@ -4064,6 +4238,7 @@ function toggleActivityRail(forceVisible = !uiState.activityRailVisible) {
   uiState.activityRailVisible = true;
   uiState.activityRailScope = normalizeActivityScope(uiState.activityRailScope);
   hideSettingsSheet();
+  closeCodexModal();
   closeSystemHealthPanel();
   uiState.gitPanelVisible = false;
   closeQuickSwitcher();
@@ -4453,6 +4628,10 @@ function render({ refreshVisibleTerminals = true } = {}) {
     uiState.gitPanelVisible = false;
   }
 
+  if (uiState.codexModalVisible && !activeWorkspace) {
+    closeCodexModal();
+  }
+
   if (uiState.quickSwitcherVisible && snapshot.workspaces.length === 0) {
     closeQuickSwitcher();
   }
@@ -4512,6 +4691,8 @@ function render({ refreshVisibleTerminals = true } = {}) {
             basename,
             escapeHtml,
           })
+        : uiState.codexModalVisible && activeWorkspace
+          ? renderCodexModal(activeWorkspace)
         : uiState.gitPanelVisible && activeWorkspace
           ? renderGitPanel(activeWorkspace)
           : "";
@@ -4521,6 +4702,7 @@ function render({ refreshVisibleTerminals = true } = {}) {
       uiState.quickSwitcherVisible
       || uiState.settingsVisible
       || uiState.pendingWorkspaceDraft
+      || (uiState.codexModalVisible && activeWorkspace)
       || (uiState.gitPanelVisible && activeWorkspace),
     ),
   );
@@ -4540,6 +4722,9 @@ function render({ refreshVisibleTerminals = true } = {}) {
   }
   if (sourceControlFocusState && uiState.gitPanelVisible) {
     restoreSourceControlFocusState(sourceControlFocusState, modalRegion);
+  }
+  if (uiState.codexModalVisible) {
+    focusCodexModal(modalRegion);
   }
   if (uiState.gitPanelVisible && uiState.sourceControl.publishModalVisible) {
     focusSourceControlPublishModal(modalRegion);
@@ -4663,6 +4848,14 @@ function renderActivityIcon() {
   `;
 }
 
+function renderCodexIcon() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M7 6h10v2H7V6Zm0 5h10v2H7v-2Zm0 5h6v2H7v-2Zm11.2-6.8L20 11l-1.8 1.8-1.4-1.4 1-1-1-1 1.4-1.4Z" fill="currentColor"></path>
+    </svg>
+  `;
+}
+
 function renderSystemIcon() {
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -4726,6 +4919,7 @@ function renderWorkspaceStatusBar(snapshot, activeWorkspace) {
     const pathLabel = compactWorkspacePath(activeWorkspace.path);
 
     leftItems.push(renderStatusBarItem(pathLabel, activeWorkspace.path, "is-path is-primary"));
+    leftItems.push(renderStatusBarCodexButton(activeWorkspace));
     leftItems.push(renderStatusBarGitButton(summary));
     if (shouldShowSystemHealth) {
       leftItems.push(renderStatusBarSystemHealthButton());
@@ -4785,6 +4979,28 @@ function renderStatusBarGitButton(summary) {
       aria-label="${escapeHtml(formatGitBadgeTitle(summary))}"
     >
       <span class="workspace-statusbar-icon" aria-hidden="true">${renderBranchIcon()}</span>
+      <span>${escapeHtml(label)}</span>
+    </button>
+  `;
+}
+
+function renderStatusBarCodexButton(activeWorkspace) {
+  const codexSnapshot = getCodexCliSnapshot();
+  const tone = codexSnapshot.effectivePath ? "clean" : "error";
+  const title = codexSnapshot.effectivePath
+    ? `Resume Codex in ${activeWorkspace.name}`
+    : codexSnapshot.message || "Codex CLI is not configured";
+  const label = codexSnapshot.effectivePath ? "Codex" : "Codex unavailable";
+  return `
+    <button
+      class="workspace-statusbar-item workspace-statusbar-button is-${tone} ${uiState.codexModalVisible ? "is-panel-open" : ""}"
+      type="button"
+      data-action="show-codex-modal"
+      title="${escapeHtml(title)}"
+      aria-label="${escapeHtml(title)}"
+      aria-pressed="${uiState.codexModalVisible ? "true" : "false"}"
+    >
+      <span class="workspace-statusbar-icon" aria-hidden="true">${renderCodexIcon()}</span>
       <span>${escapeHtml(label)}</span>
     </button>
   `;
@@ -5050,6 +5266,199 @@ function formatRelativeTime(timestampMs) {
 
   const deltaDays = Math.round(deltaHours / 24);
   return `${deltaDays}d ago`;
+}
+
+function renderCodexModal(workspace) {
+  const snapshot = uiState.codexSessionsSnapshot?.workspaceId === workspace.id
+    ? uiState.codexSessionsSnapshot
+    : null;
+  const codexCli = getCodexCliSnapshot();
+  const errorMessage = uiState.codexSessionsError || "";
+  const isUnavailable = !codexCli?.effectivePath;
+  const sessions = snapshot?.sessions || [];
+  const hasSelection = sessions.some((session) => session.id === uiState.codexSelectedSessionId);
+  const selectedSessionId = hasSelection ? uiState.codexSelectedSessionId : sessions[0]?.id || "";
+  const rememberedSessionId = snapshot?.rememberedSessionId || null;
+  const selectedSession = sessions.find((session) => session.id === selectedSessionId) || null;
+  const canResume = Boolean(selectedSessionId) && !uiState.codexSubmitting && !uiState.codexSessionsLoading && !isUnavailable;
+  const canStart = !uiState.codexSubmitting && !isUnavailable;
+  const refreshedLabel = snapshot
+    ? `${sessions.length} ${sessions.length === 1 ? "matching session" : "matching sessions"} found`
+    : uiState.codexSessionsLoading
+      ? "Scanning local Codex sessions"
+      : "Waiting for the first session scan";
+
+  return `
+    <div class="workspace-modal-backdrop" data-action="close-codex-modal">
+      <section class="workspace-modal workspace-codex-modal" role="dialog" aria-modal="true" aria-labelledby="codex-modal-title">
+        <header class="workspace-modal-header workspace-codex-modal-header">
+          <div>
+            <p class="workspace-modal-mark">Codex</p>
+            <h2 id="codex-modal-title">Resume Codex</h2>
+            <p class="workspace-modal-path">${escapeHtml(workspace.path)}</p>
+            <p class="workspace-codex-modal-copy">${escapeHtml(refreshedLabel)}</p>
+          </div>
+          <div class="workspace-codex-modal-actions">
+            <button
+              class="workspace-activity-action"
+              type="button"
+              data-action="refresh-codex-sessions"
+              ${uiState.codexSessionsLoading || uiState.codexSubmitting ? "disabled" : ""}
+            >
+              <span aria-hidden="true">${renderRefreshIcon()}</span>
+              <span>${uiState.codexSessionsLoading ? "Scanning..." : "Refresh"}</span>
+            </button>
+            <button
+              class="workspace-activity-close"
+              type="button"
+              data-action="close-codex-modal"
+              aria-label="Close Codex session picker"
+              title="Close Codex session picker"
+            >
+              ${renderCloseIcon()}
+            </button>
+          </div>
+        </header>
+        ${
+          isUnavailable
+            ? `
+              <div class="workspace-codex-modal-empty is-error">
+                <strong>Codex CLI is not ready</strong>
+                <span>${escapeHtml(codexCli?.message || "CrewDock could not find a working Codex CLI.")}</span>
+                <div class="workspace-codex-modal-footer">
+                  <button class="settings-ai-button settings-ai-button-primary" type="button" data-action="show-settings">
+                    Open settings
+                  </button>
+                </div>
+              </div>
+            `
+            : errorMessage
+              ? `
+                <div class="workspace-codex-modal-empty is-error">
+                  <strong>Could not load local Codex sessions</strong>
+                  <span>${escapeHtml(errorMessage)}</span>
+                </div>
+              `
+              : uiState.codexSessionsLoading && !snapshot
+                ? `
+                  <div class="workspace-codex-modal-empty">
+                    <strong>Scanning local Codex sessions</strong>
+                    <span>CrewDock is reading local session metadata from your Codex history.</span>
+                  </div>
+                `
+                : `
+                  <div class="workspace-codex-modal-grid">
+                    <div class="workspace-codex-modal-list" role="listbox" aria-label="Matching Codex sessions">
+                      ${
+                        sessions.length
+                          ? sessions.map((session) => renderCodexSessionRow(session, {
+                              isSelected: session.id === selectedSessionId,
+                              isRemembered: session.id === rememberedSessionId,
+                            })).join("")
+                          : `
+                            <div class="workspace-codex-modal-empty">
+                              <strong>No saved Codex session matches this workspace yet.</strong>
+                              <span>Start a fresh Codex session in the active pane, then come back here to resume it later.</span>
+                            </div>
+                          `
+                      }
+                    </div>
+                    <div class="workspace-codex-modal-detail">
+                      ${
+                        selectedSession
+                          ? `
+                            <div class="workspace-codex-modal-detail-card">
+                              <span class="workspace-codex-meta-label">Selected session</span>
+                              <strong>${escapeHtml(selectedSession.id)}</strong>
+                              <span>${escapeHtml(selectedSession.cliVersion ? `CLI ${selectedSession.cliVersion}` : "CLI version unavailable")}</span>
+                              <span>${escapeHtml(formatRelativeTime(selectedSession.lastActiveAtMs))}</span>
+                            </div>
+                          `
+                          : `
+                            <div class="workspace-codex-modal-detail-card is-empty">
+                              <span class="workspace-codex-meta-label">Selected session</span>
+                              <strong>Start new session</strong>
+                              <span>No saved session is selected for this workspace yet.</span>
+                            </div>
+                          `
+                      }
+                      ${snapshot?.rememberedSessionMissing
+                        ? `
+                          <div class="workspace-codex-modal-inline-note">
+                            CrewDock had a remembered session for this workspace, but it is no longer present in local Codex history.
+                          </div>
+                        `
+                        : ""}
+                      <div class="workspace-codex-modal-footer">
+                        <button
+                          class="settings-ai-button settings-ai-button-primary"
+                          type="button"
+                          data-action="resume-codex-session"
+                          ${canResume ? "" : "disabled"}
+                        >
+                          ${uiState.codexSubmitting ? "Starting..." : "Resume selected"}
+                        </button>
+                        <button
+                          class="settings-ai-button"
+                          type="button"
+                          data-action="start-codex-session"
+                          ${canStart ? "" : "disabled"}
+                        >
+                          ${uiState.codexSubmitting ? "Starting..." : "Start new session"}
+                        </button>
+                      </div>
+                      <p class="workspace-codex-modal-note">
+                        CrewDock sends the command into the active pane. Use an idle shell if you do not want to interrupt current terminal work.
+                      </p>
+                    </div>
+                  </div>
+                `
+        }
+      </section>
+    </div>
+  `;
+}
+
+function renderCodexSessionRow(session, { isSelected = false, isRemembered = false } = {}) {
+  const badges = [
+    isRemembered ? '<span class="workspace-codex-session-badge is-active">Remembered</span>' : "",
+    session.cliVersion ? `<span class="workspace-codex-session-badge">CLI ${escapeHtml(session.cliVersion)}</span>` : "",
+  ].filter(Boolean).join("");
+
+  return `
+    <button
+      class="workspace-codex-session-row ${isSelected ? "is-selected" : ""}"
+      type="button"
+      role="option"
+      aria-selected="${isSelected ? "true" : "false"}"
+      data-action="select-codex-session"
+      data-session-id="${escapeHtml(session.id)}"
+    >
+      <div class="workspace-codex-session-row-top">
+        <strong>${escapeHtml(session.id)}</strong>
+        <span>${escapeHtml(formatRelativeTime(session.lastActiveAtMs))}</span>
+      </div>
+      <div class="workspace-codex-session-row-meta">
+        <span>${escapeHtml(session.originator || session.source || "Codex CLI")}</span>
+        ${badges}
+      </div>
+    </button>
+  `;
+}
+
+function focusCodexModal(root = document) {
+  if (!uiState.codexModalVisible || !uiState.codexShouldFocus) {
+    return;
+  }
+
+  const target =
+    root.querySelector(".workspace-codex-session-row.is-selected")
+    || root.querySelector('[data-action="resume-codex-session"]')
+    || root.querySelector('[data-action="start-codex-session"]');
+  if (target instanceof HTMLElement) {
+    target.focus({ preventScroll: true });
+  }
+  uiState.codexShouldFocus = false;
 }
 
 function renderQuickSwitcher(snapshot) {

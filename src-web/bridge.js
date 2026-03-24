@@ -37,6 +37,12 @@ export function createBridge({
         tauriApi.core.invoke("set_codex_cli_path", { codexCliPath }),
       refreshCodexCliCatalog: () =>
         tauriApi.core.invoke("refresh_codex_cli_catalog"),
+      loadWorkspaceCodexSessions: (workspaceId) =>
+        tauriApi.core.invoke("load_workspace_codex_sessions", { workspaceId }),
+      resumeWorkspaceCodexSession: (workspaceId, paneId, sessionId) =>
+        tauriApi.core.invoke("resume_workspace_codex_session", { workspaceId, paneId, sessionId }),
+      startWorkspaceCodexSession: (workspaceId, paneId) =>
+        tauriApi.core.invoke("start_workspace_codex_session", { workspaceId, paneId }),
       loadSystemHealthSnapshot: () =>
         tauriApi.core.invoke("load_system_health_snapshot"),
       createWorkspace: (path, paneCount) =>
@@ -465,6 +471,35 @@ function createMockBridge({
     };
   }
 
+  function buildMockCodexSessionsSnapshot(workspace) {
+    const rememberedSessionId = workspace?.codexSessionId || null;
+    const sessions = Array.from({ length: 2 }, (_, index) => ({
+      id: `session-${workspace.id}-${index + 1}`,
+      cwd: workspace.path,
+      cliVersion: settings.codexCli.effectiveVersion || "0.116.0",
+      source: "cli",
+      originator: "codex_cli_rs",
+      lastActiveAtMs: Date.now() - index * 1000 * 60 * 14,
+      isRemembered: false,
+    })).map((session) => ({
+      ...session,
+      isRemembered: session.id === rememberedSessionId,
+    }));
+
+    return {
+      workspaceId: workspace.id,
+      workspacePath: workspace.path,
+      cliStatus: settings.codexCli.status,
+      cliMessage: settings.codexCli.message,
+      effectiveCliPath: settings.codexCli.effectivePath,
+      effectiveCliVersion: settings.codexCli.effectiveVersion,
+      rememberedSessionId,
+      rememberedSessionMissing: Boolean(rememberedSessionId)
+        && !sessions.some((session) => session.id === rememberedSessionId),
+      sessions,
+    };
+  }
+
   function buildMockSourceControl(workspace, graphCursor = null) {
     const detail = workspace?.gitDetail || buildMockGitDetail(workspace?.path || "");
     const branches = buildMockBranches(workspace);
@@ -646,6 +681,50 @@ function createMockBridge({
       return emitState();
     },
     refreshCodexCliCatalog: async () => emitState(),
+    loadWorkspaceCodexSessions: async (workspaceId) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      if (!workspace) {
+        throw new Error("workspace not found");
+      }
+
+      return buildMockCodexSessionsSnapshot(workspace);
+    },
+    resumeWorkspaceCodexSession: async (workspaceId, paneId, sessionId) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      if (!workspace) {
+        throw new Error("workspace not found");
+      }
+      const pane = workspace.panes.find((entry) => entry.id === paneId);
+      if (!pane) {
+        throw new Error("pane does not belong to the workspace");
+      }
+
+      workspace.codexSessionId = String(sessionId || "").trim() || null;
+      emitTerminal({
+        paneId,
+        data:
+          `\r\n$ ${settings.codexCli.effectivePath || "codex"} resume ${workspace.codexSessionId} -C ${workspace.path}\r\n`
+          + `Resuming Codex session for ${workspace.name} in the mock bridge.\r\n$ `,
+      });
+      return emitState();
+    },
+    startWorkspaceCodexSession: async (workspaceId, paneId) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      if (!workspace) {
+        throw new Error("workspace not found");
+      }
+      const pane = workspace.panes.find((entry) => entry.id === paneId);
+      if (!pane) {
+        throw new Error("pane does not belong to the workspace");
+      }
+
+      emitTerminal({
+        paneId,
+        data:
+          `\r\n$ ${settings.codexCli.effectivePath || "codex"} -C ${workspace.path}\r\n`
+          + `Starting a fresh Codex session for ${workspace.name} in the mock bridge.\r\n$ `,
+      });
+    },
     openDirectory: async (defaultPath) => {
       const value = window.prompt(
         "Workspace folder",
@@ -672,6 +751,7 @@ function createMockBridge({
         path: normalizedPath,
         layout,
         started: false,
+        codexSessionId: null,
         gitDetail: buildMockGitDetail(normalizedPath),
         panes: Array.from({ length: layout.paneCount }, (_, index) => ({
           id: `pane-${workspaceCounter}-${index + 1}`,

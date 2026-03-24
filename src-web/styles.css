@@ -1872,6 +1872,195 @@ button {
   text-overflow: ellipsis;
 }
 
+.workspace-codex-modal {
+  width: min(760px, 100%);
+  gap: 18px;
+}
+
+.workspace-codex-modal h2 {
+  font-size: clamp(1.45rem, 3vw, 2.2rem);
+  letter-spacing: -0.045em;
+}
+
+.workspace-codex-modal-copy {
+  margin: 12px 0 0;
+  color: var(--surface-soft-text);
+  font-size: 0.84rem;
+  line-height: 1.5;
+}
+
+.workspace-codex-modal-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.workspace-codex-modal-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(260px, 0.85fr);
+  gap: 16px;
+  min-height: 0;
+}
+
+.workspace-codex-modal-list,
+.workspace-codex-modal-detail {
+  min-height: 0;
+  border-radius: 18px;
+  border: 1px solid var(--surface-card-border);
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.workspace-codex-modal-list {
+  max-height: min(420px, 54vh);
+  overflow: auto;
+  padding: 6px;
+  display: grid;
+  align-content: start;
+  gap: 6px;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) transparent;
+}
+
+.workspace-codex-session-row {
+  width: 100%;
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid transparent;
+  border-radius: 14px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  transition:
+    border-color 140ms ease,
+    background 140ms ease,
+    color 140ms ease;
+}
+
+.workspace-codex-session-row:hover,
+.workspace-codex-session-row.is-selected {
+  border-color: color-mix(in srgb, var(--accent) 18%, rgba(255, 255, 255, 0.08));
+  background: color-mix(in srgb, var(--accent-soft) 18%, rgba(255, 255, 255, 0.02));
+}
+
+.workspace-codex-session-row-top,
+.workspace-codex-session-row-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.workspace-codex-session-row-top strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.82rem;
+}
+
+.workspace-codex-session-row-top span,
+.workspace-codex-session-row-meta span {
+  color: var(--surface-soft-text);
+  font-size: 0.68rem;
+}
+
+.workspace-codex-session-row-meta {
+  flex-wrap: wrap;
+  justify-content: flex-start;
+}
+
+.workspace-codex-session-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 20px;
+  padding: 0 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--surface-soft-text);
+  font-size: 0.62rem;
+  font-weight: 600;
+}
+
+.workspace-codex-session-badge.is-active {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 24%, rgba(255, 255, 255, 0.06));
+  background: color-mix(in srgb, var(--accent-soft) 68%, rgba(255, 255, 255, 0.03));
+}
+
+.workspace-codex-modal-detail {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  padding: 16px;
+}
+
+.workspace-codex-modal-detail-card {
+  display: grid;
+  gap: 6px;
+  padding: 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: rgba(0, 0, 0, 0.12);
+}
+
+.workspace-codex-modal-detail-card strong {
+  font-size: 0.94rem;
+  line-height: 1.35;
+}
+
+.workspace-codex-meta-label {
+  color: var(--muted);
+  font-size: 0.64rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.workspace-codex-modal-detail-card span,
+.workspace-codex-modal-note,
+.workspace-codex-modal-inline-note {
+  color: var(--surface-soft-text);
+  font-size: 0.76rem;
+  line-height: 1.5;
+}
+
+.workspace-codex-modal-inline-note {
+  padding: 0 2px;
+}
+
+.workspace-codex-modal-footer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.workspace-codex-modal-note {
+  margin: 0;
+}
+
+.workspace-codex-modal-empty {
+  display: grid;
+  gap: 6px;
+  padding: 18px;
+  border-radius: 16px;
+  border: 1px solid var(--surface-card-border);
+  background: rgba(255, 255, 255, 0.02);
+  color: var(--surface-soft-text);
+}
+
+.workspace-codex-modal-empty strong {
+  color: var(--tab-text-active);
+  font-size: 0.88rem;
+}
+
+.workspace-codex-modal-empty.is-error {
+  border-color: color-mix(in srgb, var(--danger) 22%, rgba(255, 255, 255, 0.08));
+}
+
 .workspace-layout-builder {
   width: 100%;
   display: grid;
@@ -5584,6 +5773,20 @@ button {
     width: 100%;
     padding: 12px;
     border-radius: 16px;
+  }
+
+  .workspace-codex-modal {
+    width: 100%;
+    padding: 18px;
+    border-radius: 18px;
+  }
+
+  .workspace-codex-modal-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .workspace-codex-modal-list {
+    max-height: none;
   }
 
   .workspace-git-backdrop {

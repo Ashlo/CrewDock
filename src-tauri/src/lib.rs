@@ -8,7 +8,7 @@ use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
     env, fs,
-    io::Write,
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
     sync::{Arc, Mutex},
@@ -98,6 +98,7 @@ struct WorkspaceRecord {
     pane_layout: PaneLayout,
     started: bool,
     git: Option<GitDetailSnapshot>,
+    codex_session_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -372,6 +373,51 @@ enum CodexCliSource {
     Volta,
     Path,
     Custom,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceCodexSessionsSnapshot {
+    workspace_id: String,
+    workspace_path: String,
+    cli_status: CodexCliStatus,
+    cli_message: Option<String>,
+    effective_cli_path: Option<String>,
+    effective_cli_version: Option<String>,
+    remembered_session_id: Option<String>,
+    remembered_session_missing: bool,
+    sessions: Vec<CodexSessionMatchSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexSessionMatchSnapshot {
+    id: String,
+    cwd: String,
+    cli_version: Option<String>,
+    source: Option<String>,
+    originator: Option<String>,
+    last_active_at_ms: u64,
+    is_remembered: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexSessionJsonLine {
+    #[serde(rename = "type")]
+    line_type: String,
+    payload: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexSessionMetaPayload {
+    id: String,
+    cwd: String,
+    #[serde(default)]
+    cli_version: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    originator: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -661,6 +707,17 @@ fn has_openai_api_key_in_environment() -> bool {
 }
 
 fn normalize_optional_codex_cli_path(value: Option<String>) -> Option<String> {
+    value.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
+fn normalize_optional_codex_session_id(value: Option<String>) -> Option<String> {
     value.and_then(|raw| {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
@@ -970,6 +1027,162 @@ fn canonical_codex_path_key(path: &Path) -> String {
         .unwrap_or_else(|_| path.to_path_buf())
         .display()
         .to_string()
+}
+
+fn load_workspace_codex_sessions_snapshot(
+    workspace_id: &str,
+    workspace_path: &str,
+    remembered_session_id: Option<&str>,
+    codex_cli: &CodexCliSnapshot,
+) -> WorkspaceCodexSessionsSnapshot {
+    let remembered_session_id = remembered_session_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let sessions =
+        discover_codex_sessions_for_workspace(workspace_path, remembered_session_id.as_deref());
+    let remembered_session_missing = remembered_session_id
+        .as_ref()
+        .map(|session_id| !sessions.iter().any(|session| session.id == *session_id))
+        .unwrap_or(false);
+
+    WorkspaceCodexSessionsSnapshot {
+        workspace_id: workspace_id.to_string(),
+        workspace_path: workspace_path.to_string(),
+        cli_status: codex_cli.status,
+        cli_message: codex_cli.message.clone(),
+        effective_cli_path: codex_cli.effective_path.clone(),
+        effective_cli_version: codex_cli.effective_version.clone(),
+        remembered_session_id,
+        remembered_session_missing,
+        sessions,
+    }
+}
+
+fn discover_codex_sessions_for_workspace(
+    workspace_path: &str,
+    remembered_session_id: Option<&str>,
+) -> Vec<CodexSessionMatchSnapshot> {
+    let Some(root) = codex_sessions_root() else {
+        return Vec::new();
+    };
+    if !root.is_dir() {
+        return Vec::new();
+    }
+
+    let workspace_key = normalize_path_for_comparison(workspace_path);
+    let mut matches = Vec::new();
+
+    for session_file in collect_codex_session_files(&root) {
+        let Some(meta) = read_codex_session_meta(&session_file) else {
+            continue;
+        };
+        if normalize_path_for_comparison(&meta.cwd) != workspace_key {
+            continue;
+        }
+
+        let last_active_at_ms = fs::metadata(&session_file)
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0);
+
+        matches.push(CodexSessionMatchSnapshot {
+            id: meta.id.clone(),
+            cwd: meta.cwd,
+            cli_version: meta.cli_version,
+            source: meta.source,
+            originator: meta.originator,
+            last_active_at_ms,
+            is_remembered: remembered_session_id
+                .map(|session_id| session_id == meta.id.as_str())
+                .unwrap_or(false),
+        });
+    }
+
+    matches.sort_by(|left, right| {
+        right
+            .last_active_at_ms
+            .cmp(&left.last_active_at_ms)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    matches
+}
+
+fn codex_sessions_root() -> Option<PathBuf> {
+    home_dir()
+        .ok()
+        .map(|path| path.join(".codex").join("sessions"))
+}
+
+fn collect_codex_session_files(root: &Path) -> Vec<PathBuf> {
+    let mut stack = vec![root.to_path_buf()];
+    let mut files = Vec::new();
+
+    while let Some(directory) = stack.pop() {
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+
+            if path
+                .extension()
+                .and_then(|value| value.to_str())
+                .map(|value| value.eq_ignore_ascii_case("jsonl"))
+                .unwrap_or(false)
+            {
+                files.push(path);
+            }
+        }
+    }
+
+    files
+}
+
+fn read_codex_session_meta(path: &Path) -> Option<CodexSessionMetaPayload> {
+    let file = fs::File::open(path).ok()?;
+    let reader = BufReader::new(file);
+
+    for line in reader.lines().take(12) {
+        let line = line.ok()?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let record: CodexSessionJsonLine = serde_json::from_str(trimmed).ok()?;
+        if record.line_type != "session_meta" {
+            continue;
+        }
+
+        return serde_json::from_value(record.payload).ok();
+    }
+
+    None
+}
+
+fn normalize_path_for_comparison(path: &str) -> String {
+    normalize_workspace_path(path)
+        .unwrap_or_else(|_| PathBuf::from(path))
+        .display()
+        .to_string()
+}
+
+fn shell_escape(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+
+    let escaped = value.replace('\'', "'\"'\"'");
+    format!("'{escaped}'")
 }
 
 impl SystemHealthSnapshot {
@@ -1585,6 +1798,150 @@ fn refresh_codex_cli_catalog(
 
     emit_snapshot(&app, &snapshot)?;
     Ok(snapshot)
+}
+
+#[tauri::command]
+fn load_workspace_codex_sessions(
+    workspace_id: String,
+    state: State<'_, AppState>,
+) -> Result<WorkspaceCodexSessionsSnapshot, String> {
+    let (workspace_path, remembered_session_id, codex_cli) = {
+        let runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+        let workspace = runtime
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == workspace_id)
+            .ok_or_else(|| "workspace not found".to_string())?;
+
+        (
+            workspace.path.clone(),
+            workspace.codex_session_id.clone(),
+            runtime.codex_cli.clone(),
+        )
+    };
+
+    Ok(load_workspace_codex_sessions_snapshot(
+        &workspace_id,
+        &workspace_path,
+        remembered_session_id.as_deref(),
+        &codex_cli,
+    ))
+}
+
+#[tauri::command]
+fn resume_workspace_codex_session(
+    workspace_id: String,
+    pane_id: String,
+    session_id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let session_id = normalize_optional_codex_session_id(Some(session_id))
+        .ok_or_else(|| "session id is required".to_string())?;
+    let (snapshot, writer, command) = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+        let workspace_index = runtime
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == workspace_id)
+            .ok_or_else(|| "workspace not found".to_string())?;
+        if !runtime.workspaces[workspace_index]
+            .panes
+            .iter()
+            .any(|pane| pane.id == pane_id)
+        {
+            return Err("pane does not belong to the workspace".to_string());
+        }
+
+        let writer = runtime
+            .sessions
+            .get(&pane_id)
+            .ok_or_else(|| "pane session not ready".to_string())
+            .and_then(|session| {
+                if session.workspace_id != workspace_id {
+                    Err("pane does not belong to the workspace".to_string())
+                } else {
+                    Ok(session.writer.clone())
+                }
+            })?;
+        let codex_binary = runtime.codex_cli.effective_path.clone().ok_or_else(|| {
+            runtime
+                .codex_cli
+                .message
+                .clone()
+                .unwrap_or_else(|| "No Codex CLI is configured.".to_string())
+        })?;
+        let workspace_path = runtime.workspaces[workspace_index].path.clone();
+        runtime.workspaces[workspace_index].codex_session_id = Some(session_id.clone());
+        runtime.persist_to_disk()?;
+        let command = format!(
+            "{} resume {} -C {}\n",
+            shell_escape(&codex_binary),
+            shell_escape(&session_id),
+            shell_escape(&workspace_path),
+        );
+        (runtime.build_snapshot(), writer, command)
+    };
+
+    write_shell_command(&writer, &command)?;
+    emit_snapshot(&app, &snapshot)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn start_workspace_codex_session(
+    workspace_id: String,
+    pane_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let (writer, command) = {
+        let runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+        let workspace = runtime
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == workspace_id)
+            .ok_or_else(|| "workspace not found".to_string())?;
+        if !workspace.panes.iter().any(|pane| pane.id == pane_id) {
+            return Err("pane does not belong to the workspace".to_string());
+        }
+
+        let writer = runtime
+            .sessions
+            .get(&pane_id)
+            .ok_or_else(|| "pane session not ready".to_string())
+            .and_then(|session| {
+                if session.workspace_id != workspace_id {
+                    Err("pane does not belong to the workspace".to_string())
+                } else {
+                    Ok(session.writer.clone())
+                }
+            })?;
+        let codex_binary = runtime.codex_cli.effective_path.clone().ok_or_else(|| {
+            runtime
+                .codex_cli
+                .message
+                .clone()
+                .unwrap_or_else(|| "No Codex CLI is configured.".to_string())
+        })?;
+        let command = format!(
+            "{} -C {}\n",
+            shell_escape(&codex_binary),
+            shell_escape(&workspace.path),
+        );
+        (writer, command)
+    };
+
+    write_shell_command(&writer, &command)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -3085,9 +3442,20 @@ fn short_git_oid(oid: &str) -> &str {
 }
 
 fn home_dir() -> Result<PathBuf, String> {
-    env::var("HOME")
+    env::var_os("HOME")
         .map(PathBuf::from)
-        .map_err(|_| "home directory is not available".to_string())
+        .or_else(|| env::var_os("USERPROFILE").map(PathBuf::from))
+        .or_else(
+            || match (env::var_os("HOMEDRIVE"), env::var_os("HOMEPATH")) {
+                (Some(drive), Some(path)) => {
+                    let mut combined = PathBuf::from(drive);
+                    combined.push(path);
+                    Some(combined)
+                }
+                _ => None,
+            },
+        )
+        .ok_or_else(|| "home directory is not available".to_string())
 }
 
 fn contains_forbidden_navigation_tokens(value: &str) -> bool {
@@ -3397,6 +3765,9 @@ pub fn run() {
             set_openai_api_key,
             set_codex_cli_path,
             refresh_codex_cli_catalog,
+            load_workspace_codex_sessions,
+            resume_workspace_codex_session,
+            start_workspace_codex_session,
             refresh_workspace_git_status,
             load_workspace_source_control,
             load_workspace_git_diff,

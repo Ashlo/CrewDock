@@ -2156,6 +2156,7 @@ mod tests {
             },
             started: true,
             git: None,
+            codex_session_id: None,
         });
         runtime.active_workspace_id = Some("workspace-1".to_string());
         runtime

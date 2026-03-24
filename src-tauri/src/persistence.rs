@@ -46,6 +46,8 @@ pub(crate) struct PersistedWorkspace {
     #[serde(default)]
     pub(crate) name: Option<String>,
     #[serde(default)]
+    pub(crate) codex_session_id: Option<String>,
+    #[serde(default)]
     pub(crate) pane_count: Option<u8>,
     #[serde(default)]
     pub(crate) layout_id: Option<String>,
@@ -110,6 +112,7 @@ pub(crate) fn build_persisted_state(runtime: &RuntimeState) -> PersistedWorkspac
             .map(|workspace| PersistedWorkspace {
                 path: workspace.path.clone(),
                 name: Some(workspace.name.clone()),
+                codex_session_id: workspace.codex_session_id.clone(),
                 pane_count: Some(workspace.layout.pane_count),
                 layout_id: None,
                 pane_layout: crate::persist_pane_layout(workspace),
@@ -276,6 +279,9 @@ pub(crate) fn load_persisted_from_disk(
                 {
                     workspace.name = name;
                 }
+                workspace.codex_session_id = crate::normalize_optional_codex_session_id(
+                    persisted_workspace.codex_session_id,
+                );
                 workspace
             }
             Err(_) => continue,
