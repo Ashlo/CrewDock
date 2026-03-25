@@ -40,37 +40,44 @@ export function formatLauncherCompletionMatches(matches) {
 export function launcherStageSignature(basePath, launcherState) {
   return JSON.stringify({
     basePath,
-    history: launcherState.launcherHistory,
-    latestCard: launcherState.launcherLatestCard,
+    mode: "static-home",
   });
 }
 
-export function renderEmptyState({ basePath, launcherCommandValue, launcherLatestCard, escapeHtml }) {
+export function renderEmptyState() {
   return `
     <div class="workspace-empty">
       <div class="workspace-empty-panel">
         <p class="workspace-empty-mark">CrewDock</p>
         <h1>Open a folder to start a workspace.</h1>
-        <p class="workspace-empty-copy">Each workspace becomes a live tab with its own terminal grid.</p>
+        <p class="workspace-empty-copy">Each workspace becomes a focused dock for your files, tools, and crew.</p>
         <button class="workspace-empty-action" data-action="open-workspace">Open workspace</button>
-        <div class="workspace-launch-shell" title="${escapeHtml(basePath)}">
-          ${renderLauncherLatestStage(launcherLatestCard, escapeHtml)}
-          <form class="workspace-launch-form" data-action="run-launcher-command" title="${escapeHtml(basePath)}">
-            <span class="workspace-launch-prefix">$</span>
-            <input
-              class="workspace-launch-input"
-              data-launcher-path-input
-              type="text"
-              value="${escapeHtml(launcherCommandValue)}"
-              placeholder="Type a command"
-              aria-label="Run launcher command"
-              autocomplete="off"
-              autocapitalize="off"
-              spellcheck="false"
-            />
-          </form>
+        <div class="workspace-launch-shell" aria-hidden="true">
+          ${renderLauncherHeroVisual()}
         </div>
       </div>
+    </div>
+  `;
+}
+
+function renderLauncherHeroVisual() {
+  return `
+    <div class="workspace-launch-visual workspace-launch-visual-static">
+      <div class="workspace-launch-hero-mark">CrewDock</div>
+      <div class="workspace-launch-hero-orbit workspace-launch-hero-orbit-primary"></div>
+      <div class="workspace-launch-hero-orbit workspace-launch-hero-orbit-secondary"></div>
+      <div class="workspace-launch-hero-core">
+        <span class="workspace-launch-hero-core-ring"></span>
+        <span class="workspace-launch-hero-core-ring is-offset"></span>
+        <span class="workspace-launch-hero-core-dot"></span>
+      </div>
+      <div class="workspace-launch-hero-grid">
+        <span></span>
+        <span></span>
+        <span></span>
+        <span></span>
+      </div>
+      <p class="workspace-launch-hero-kicker">Focused docks for code, context, and execution.</p>
     </div>
   `;
 }
@@ -157,37 +164,4 @@ function renderPreviewCells(layout) {
   }
 
   return cells.join("");
-}
-
-function renderLauncherLatestStage(launcherLatestCard, escapeHtml) {
-  const { current, previous, phase } = launcherLatestCard;
-  if (!current && !previous) {
-    return "";
-  }
-
-  return `
-    <div class="workspace-launch-history-stage ${previous ? `is-transitioning is-${phase}` : "is-settled"}">
-      ${
-        previous
-          ? `<div class="workspace-launch-latest-card is-previous is-${phase}">${renderLauncherHistoryEntry(previous, escapeHtml)}</div>`
-          : ""
-      }
-      ${
-        current
-          ? `<div class="workspace-launch-latest-card is-current is-${phase}">${renderLauncherHistoryEntry(current, escapeHtml)}</div>`
-          : ""
-      }
-    </div>
-  `;
-}
-
-function renderLauncherHistoryEntry(entry, escapeHtml) {
-  const tone = entry.tone === "error" ? "is-error" : "";
-  const output = (entry.output || []).map((line) => `<div>${escapeHtml(line)}</div>`).join("");
-  return `
-    <div class="workspace-launch-entry ${tone}">
-      ${entry.input ? `<div class="workspace-launch-command">$ ${escapeHtml(entry.input)}</div>` : ""}
-      <div class="workspace-launch-output">${output}</div>
-    </div>
-  `;
 }

@@ -2154,6 +2154,7 @@ mod tests {
             pane_layout: crate::PaneLayout::Leaf {
                 pane_id: "pane-1".to_string(),
             },
+            todos: Vec::new(),
             started: true,
             git: None,
             codex_session_id: None,

@@ -49,6 +49,16 @@ export function createBridge({
         tauriApi.core.invoke("create_workspace", { path, paneCount }),
       renameWorkspace: (workspaceId, name) =>
         tauriApi.core.invoke("rename_workspace", { workspaceId, name }),
+      addWorkspaceTodo: (workspaceId, text) =>
+        tauriApi.core.invoke("add_workspace_todo", { workspaceId, text }),
+      updateWorkspaceTodo: (workspaceId, todoId, text) =>
+        tauriApi.core.invoke("update_workspace_todo", { workspaceId, todoId, text }),
+      setWorkspaceTodoDone: (workspaceId, todoId, done) =>
+        tauriApi.core.invoke("set_workspace_todo_done", { workspaceId, todoId, done }),
+      deleteWorkspaceTodo: (workspaceId, todoId) =>
+        tauriApi.core.invoke("delete_workspace_todo", { workspaceId, todoId }),
+      reorderWorkspace: (workspaceId, targetIndex) =>
+        tauriApi.core.invoke("reorder_workspace", { workspaceId, targetIndex }),
       refreshWorkspaceGitStatus: (workspaceId) =>
         tauriApi.core.invoke("refresh_workspace_git_status", { workspaceId }),
       loadWorkspaceSourceControl: (workspaceId, graphCursor = null) =>
@@ -253,6 +263,7 @@ function createMockBridge({
             layout: activeWorkspace.layout,
             panes: activeWorkspace.panes.map((pane) => ({ ...pane })),
             paneLayout: structuredClone(activeWorkspace.paneLayout),
+            todos: activeWorkspace.todos.map((todo) => ({ ...todo })),
             gitDetail: activeWorkspace.gitDetail ? structuredClone(activeWorkspace.gitDetail) : null,
           }
         : null,
@@ -335,6 +346,29 @@ function createMockBridge({
   function workspaceName(path) {
     const parts = path.split("/").filter(Boolean);
     return parts[parts.length - 1] || path;
+  }
+
+  function normalizeMockTodoText(text) {
+    const normalized = String(text || "").trim();
+    if (!normalized) {
+      throw new Error("workspace task cannot be empty");
+    }
+
+    return normalized;
+  }
+
+  function buildMockTodoId() {
+    return `todo-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  function insertOpenMockTodo(workspace, todo) {
+    const insertionIndex = workspace.todos.findIndex((entry) => entry.done);
+    if (insertionIndex === -1) {
+      workspace.todos.push(todo);
+      return;
+    }
+
+    workspace.todos.splice(insertionIndex, 0, todo);
   }
 
   function buildMockGitDetail(path, { branch = "main", upstream } = {}) {
@@ -752,6 +786,7 @@ function createMockBridge({
         layout,
         started: false,
         codexSessionId: null,
+        todos: [],
         gitDetail: buildMockGitDetail(normalizedPath),
         panes: Array.from({ length: layout.paneCount }, (_, index) => ({
           id: `pane-${workspaceCounter}-${index + 1}`,
@@ -778,6 +813,79 @@ function createMockBridge({
       }
 
       workspace.name = nextName;
+      return emitState();
+    },
+    addWorkspaceTodo: async (workspaceId, text) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      if (!workspace) {
+        throw new Error("workspace not found");
+      }
+
+      insertOpenMockTodo(workspace, {
+        id: buildMockTodoId(),
+        text: normalizeMockTodoText(text),
+        done: false,
+      });
+      return emitState();
+    },
+    updateWorkspaceTodo: async (workspaceId, todoId, text) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      if (!workspace) {
+        throw new Error("workspace not found");
+      }
+
+      const todo = workspace.todos.find((entry) => entry.id === todoId);
+      if (!todo) {
+        throw new Error("workspace task not found");
+      }
+
+      todo.text = normalizeMockTodoText(text);
+      return emitState();
+    },
+    setWorkspaceTodoDone: async (workspaceId, todoId, done) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      if (!workspace) {
+        throw new Error("workspace not found");
+      }
+
+      const todoIndex = workspace.todos.findIndex((entry) => entry.id === todoId);
+      if (todoIndex === -1) {
+        throw new Error("workspace task not found");
+      }
+
+      const [todo] = workspace.todos.splice(todoIndex, 1);
+      todo.done = Boolean(done);
+      if (todo.done) {
+        workspace.todos.push(todo);
+      } else {
+        insertOpenMockTodo(workspace, todo);
+      }
+
+      return emitState();
+    },
+    deleteWorkspaceTodo: async (workspaceId, todoId) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      if (!workspace) {
+        throw new Error("workspace not found");
+      }
+
+      const todoIndex = workspace.todos.findIndex((entry) => entry.id === todoId);
+      if (todoIndex === -1) {
+        throw new Error("workspace task not found");
+      }
+
+      workspace.todos.splice(todoIndex, 1);
+      return emitState();
+    },
+    reorderWorkspace: async (workspaceId, targetIndex) => {
+      const sourceIndex = workspaces.findIndex((entry) => entry.id === workspaceId);
+      if (sourceIndex === -1) {
+        return emitState();
+      }
+
+      const [workspace] = workspaces.splice(sourceIndex, 1);
+      const insertionIndex = Math.max(0, Math.min(Number(targetIndex) || 0, workspaces.length));
+      workspaces.splice(insertionIndex, 0, workspace);
       return emitState();
     },
     refreshWorkspaceGitStatus: async (workspaceId) => {

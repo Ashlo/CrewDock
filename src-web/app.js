@@ -31,6 +31,10 @@ const DEFAULT_TERMINAL_FONT_SIZE = 13.5;
 const MIN_TERMINAL_FONT_SIZE = 11;
 const MAX_TERMINAL_FONT_SIZE = 18;
 const COMPACT_PANE_HEIGHT = 420;
+const WORKSPACE_TAB_DRAG_THRESHOLD_PX = 6;
+const WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX = 32;
+const WORKSPACE_TAB_EDGE_SCROLL_MAX_PX_PER_FRAME = 18;
+const WORKSPACE_TAB_CLICK_SUPPRESS_MS = 250;
 const LAUNCHER_COMMANDS = Object.freeze(["help", "pwd", "ls", "cd", "open", "clear"]);
 const PATH_AWARE_LAUNCHER_COMMANDS = new Set(["ls", "cd", "open"]);
 
@@ -643,6 +647,9 @@ async function init() {
   document.addEventListener("paste", handlePaste, true);
   document.addEventListener("focusout", handleFocusOut, true);
   document.addEventListener("pointerdown", handlePointerDown, true);
+  document.addEventListener("pointermove", handlePointerMove, true);
+  document.addEventListener("pointerup", handlePointerUp, true);
+  document.addEventListener("pointercancel", handlePointerCancel, true);
   document.addEventListener("scroll", handleScroll, true);
   document.addEventListener("wheel", handleWheel, { passive: false });
   window.addEventListener("focus", handleWindowFocus);
@@ -676,6 +683,36 @@ function supportsSystemHealth() {
 
 function getActiveWorkspace() {
   return uiState.snapshot?.activeWorkspace || null;
+}
+
+function getWorkspaceTodoState(workspace = getActiveWorkspace()) {
+  const todos = Array.isArray(workspace?.todos) ? workspace.todos : [];
+  const openTodos = todos.filter((todo) => !todo.done);
+  const completedTodos = todos.filter((todo) => todo.done);
+
+  return {
+    todos,
+    openTodos,
+    completedTodos,
+    openCount: openTodos.length,
+    completedCount: completedTodos.length,
+  };
+}
+
+function formatWorkspaceTodoSummary({ openCount, completedCount }) {
+  if (openCount > 0 && completedCount > 0) {
+    return `${openCount} open • ${completedCount} completed`;
+  }
+
+  if (openCount > 0) {
+    return `${openCount} open ${openCount === 1 ? "task" : "tasks"}`;
+  }
+
+  if (completedCount > 0) {
+    return `${completedCount} completed`;
+  }
+
+  return "No tasks yet";
 }
 
 function resolveActivePaneId(workspace = getActiveWorkspace()) {
@@ -1816,6 +1853,16 @@ async function handleClick(event) {
   }
 
   if (
+    target.dataset.action === "switch-workspace"
+    && shouldSuppressWorkspaceTabClick(target.dataset.workspaceId || "")
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    clearWorkspaceTabClickSuppression();
+    return;
+  }
+
+  if (
     target.dataset.action === "close-settings"
     && target.classList.contains("settings-sheet-backdrop")
     && clickedElement?.closest(".settings-sheet")
@@ -1827,6 +1874,14 @@ async function handleClick(event) {
     target.dataset.action === "close-git-panel"
     && target.classList.contains("workspace-git-backdrop")
     && clickedElement?.closest(".workspace-git-panel")
+  ) {
+    return;
+  }
+
+  if (
+    target.dataset.action === "close-todo-panel"
+    && target.classList.contains("workspace-todo-backdrop")
+    && clickedElement?.closest(".workspace-todo-panel")
   ) {
     return;
   }
@@ -1863,6 +1918,7 @@ async function handleClick(event) {
   if (target.dataset.action === "show-settings") {
     uiState.settingsVisible = true;
     uiState.settingsSection = "workbench";
+    closeTodoPanel();
     closeCodexModal();
     closeSystemHealthPanel();
     closeSourceControlPanel();
@@ -1891,6 +1947,7 @@ async function handleClick(event) {
   if (target.dataset.action === "show-launcher") {
     uiState.launcherVisible = true;
     hideSettingsSheet();
+    closeTodoPanel();
     closeCodexModal();
     closeSystemHealthPanel();
     closeSourceControlPanel();
@@ -1905,6 +1962,19 @@ async function handleClick(event) {
 
   if (target.dataset.action === "show-git-panel") {
     await openSourceControlPanel({ force: true });
+    return;
+  }
+
+  if (target.dataset.action === "toggle-todo-panel") {
+    toggleTodoPanel();
+    render({ refreshVisibleTerminals: false });
+    return;
+  }
+
+  if (target.dataset.action === "close-todo-panel") {
+    if (closeTodoPanel()) {
+      render({ refreshVisibleTerminals: false });
+    }
     return;
   }
 
@@ -1929,6 +1999,17 @@ async function handleClick(event) {
     const sessionId = String(target.dataset.sessionId || "");
     if (sessionId && uiState.codexSelectedSessionId !== sessionId) {
       uiState.codexSelectedSessionId = sessionId;
+      render({ refreshVisibleTerminals: false });
+    }
+    return;
+  }
+
+  if (target.dataset.action === "select-codex-target-pane") {
+    const workspace = getActiveWorkspace();
+    const paneId = String(target.dataset.paneId || "");
+    const pane = workspace?.panes?.find((entry) => entry.id === paneId) || null;
+    if (paneId && isCodexPaneReady(pane) && uiState.codexTargetPaneId !== paneId) {
+      uiState.codexTargetPaneId = paneId;
       render({ refreshVisibleTerminals: false });
     }
     return;
@@ -2022,6 +2103,38 @@ async function handleClick(event) {
     return;
   }
 
+  if (target.dataset.action === "toggle-workspace-todo-completed") {
+    uiState.workspaceTodos.completedCollapsed = !uiState.workspaceTodos.completedCollapsed;
+    render({ refreshVisibleTerminals: false });
+    return;
+  }
+
+  if (target.dataset.action === "start-workspace-todo-edit") {
+    const todoId = String(target.dataset.todoId || "");
+    startWorkspaceTodoEdit(todoId);
+    render({ refreshVisibleTerminals: false });
+    return;
+  }
+
+  if (target.dataset.action === "cancel-workspace-todo-edit") {
+    cancelWorkspaceTodoEdit();
+    render({ refreshVisibleTerminals: false });
+    return;
+  }
+
+  if (target.dataset.action === "toggle-workspace-todo-done") {
+    const todoId = String(target.dataset.todoId || "");
+    const done = String(target.dataset.done || "") === "true";
+    await setWorkspaceTodoDone(todoId, done);
+    return;
+  }
+
+  if (target.dataset.action === "delete-workspace-todo") {
+    const todoId = String(target.dataset.todoId || "");
+    await deleteWorkspaceTodo(todoId);
+    return;
+  }
+
   if (target.dataset.action === "refresh-git-status") {
     await refreshActiveWorkspaceGitStatus({ force: true });
     if (uiState.gitPanelVisible) {
@@ -2042,6 +2155,7 @@ async function handleClick(event) {
 
   if (target.dataset.action === "open-workspace") {
     hideSettingsSheet();
+    closeTodoPanel();
     closeCodexModal();
     closeSystemHealthPanel();
     closeSourceControlPanel();
@@ -2143,6 +2257,7 @@ async function handleClick(event) {
     uiState.launcherVisible = false;
     hideSettingsSheet();
     uiState.gitPanelVisible = false;
+    closeTodoPanel();
     closeQuickSwitcher();
     uiState.pendingWorkspaceDraft = null;
     clearLauncherCommandState();
@@ -2235,6 +2350,7 @@ function handleMouseDown(event) {
 
 function handlePointerDown(event) {
   const target = event.target instanceof Element ? event.target : null;
+  maybeBeginWorkspaceTabDrag(event, target);
   const paneId = target?.closest("[data-pane-id]")?.dataset?.paneId || null;
   if (paneId) {
     if (event.button === 0) {
@@ -2268,6 +2384,603 @@ function handlePointerDown(event) {
   if (shouldRender) {
     render({ refreshVisibleTerminals: false });
   }
+}
+
+function handlePointerMove(event) {
+  const drag = uiState.workspaceTabDrag;
+  if (!drag || event.pointerId !== drag.pointerId) {
+    return;
+  }
+
+  if (drag.status === "pending") {
+    maybeActivateWorkspaceTabDrag(event);
+    return;
+  }
+
+  if (drag.status !== "dragging") {
+    return;
+  }
+
+  event.preventDefault();
+  updateWorkspaceTabDrag(event.clientX, event.clientY);
+}
+
+async function handlePointerUp(event) {
+  const drag = uiState.workspaceTabDrag;
+  if (!drag || event.pointerId !== drag.pointerId) {
+    return;
+  }
+
+  if (drag.status === "dragging") {
+    event.preventDefault();
+    await completeWorkspaceTabDrag();
+    return;
+  }
+
+  clearWorkspaceTabDrag();
+}
+
+function handlePointerCancel(event) {
+  const drag = uiState.workspaceTabDrag;
+  if (!drag || event.pointerId !== drag.pointerId) {
+    return;
+  }
+
+  cancelWorkspaceTabDrag();
+}
+
+function maybeBeginWorkspaceTabDrag(event, target) {
+  if (
+    event.button !== 0
+    || event.ctrlKey
+    || event.metaKey
+    || event.altKey
+    || event.shiftKey
+    || uiState.workspaceRenameDraft
+  ) {
+    return;
+  }
+
+  const tabButton = target?.closest('.workspace-tab-main[data-action="switch-workspace"]');
+  if (!tabButton) {
+    return;
+  }
+
+  const workspaceId = tabButton.dataset.workspaceId || "";
+  const tabs = tabButton.closest("[data-workspace-tabs]");
+  const tabShell = tabButton.closest("[data-workspace-tab-shell]");
+  const sourceIndex = uiState.snapshot?.workspaces?.findIndex((workspace) => workspace.id === workspaceId) ?? -1;
+  if (!workspaceId || !tabs || !tabShell || sourceIndex < 0 || uiState.snapshot?.workspaces?.length <= 1) {
+    return;
+  }
+
+  const rect = tabShell.getBoundingClientRect();
+  clearWorkspaceTabClickSuppression();
+  rememberWorkspaceTabsScroll(tabs);
+  stopWorkspaceTabAutoScroll();
+  let captureEl = null;
+  if (typeof tabButton.setPointerCapture === "function") {
+    try {
+      tabButton.setPointerCapture(event.pointerId);
+      captureEl = tabButton;
+    } catch {
+      captureEl = null;
+    }
+  }
+  uiState.workspaceTabDrag = {
+    status: "pending",
+    workspaceId,
+    pointerId: event.pointerId,
+    sourceIndex,
+    targetIndex: sourceIndex,
+    startX: event.clientX,
+    startY: event.clientY,
+    currentX: event.clientX,
+    currentY: event.clientY,
+    pointerOffsetX: event.clientX - rect.left,
+    pointerOffsetY: event.clientY - rect.top,
+    ghostLeft: rect.left,
+    ghostTop: rect.top,
+    tabWidth: rect.width,
+    tabHeight: rect.height,
+    captureEl,
+    tabsEl: tabs,
+    tabShellEl: tabShell,
+    stripShellEl: tabs.closest("[data-workspace-tabs-shell]"),
+    indicatorEl: tabs.querySelector("[data-workspace-tab-drop-indicator]"),
+    dropSlotEl: null,
+  };
+}
+
+function maybeActivateWorkspaceTabDrag(event) {
+  const drag = uiState.workspaceTabDrag;
+  if (!drag || drag.status !== "pending") {
+    return;
+  }
+
+  const distance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
+  if (distance < WORKSPACE_TAB_DRAG_THRESHOLD_PX) {
+    return;
+  }
+
+  drag.status = "dragging";
+  if (!mountWorkspaceTabDragChrome()) {
+    clearWorkspaceTabDrag();
+    return;
+  }
+  event.preventDefault();
+  updateWorkspaceTabDrag(event.clientX, event.clientY);
+}
+
+function updateWorkspaceTabDrag(clientX, clientY) {
+  const drag = uiState.workspaceTabDrag;
+  if (!drag || drag.status !== "dragging") {
+    return;
+  }
+
+  if (
+    !(drag.tabShellEl instanceof HTMLElement)
+    || !drag.tabShellEl.isConnected
+    || !(drag.tabsEl instanceof HTMLElement)
+    || !drag.tabsEl.isConnected
+  ) {
+    clearWorkspaceTabDrag();
+    return;
+  }
+
+  drag.currentX = clientX;
+  drag.currentY = clientY;
+  drag.ghostLeft = clientX - drag.pointerOffsetX;
+  drag.ghostTop = clientY - drag.pointerOffsetY;
+
+  syncWorkspaceTabDraggedShellPosition();
+
+  const nextTargetIndex = resolveWorkspaceTabTargetIndex(drag.tabsEl, drag.workspaceId, clientX);
+  if (nextTargetIndex !== drag.targetIndex) {
+    moveWorkspaceTabDropSlot(nextTargetIndex);
+  } else {
+    syncWorkspaceTabDropIndicator();
+  }
+  rememberWorkspaceTabsScroll(drag.tabsEl);
+  syncWorkspaceTabAutoScroll();
+}
+
+async function completeWorkspaceTabDrag() {
+  const drag = uiState.workspaceTabDrag;
+  const previousSnapshot = uiState.snapshot;
+  if (!drag || drag.status !== "dragging") {
+    clearWorkspaceTabDrag();
+    return;
+  }
+
+  const workspaceId = drag.workspaceId;
+  const targetIndex = drag.targetIndex;
+  const reorderedWorkspaces = reorderWorkspaceTabs(previousSnapshot?.workspaces || [], workspaceId, targetIndex);
+  const didChange = workspaceOrderDidChange(previousSnapshot?.workspaces || [], reorderedWorkspaces);
+
+  clearWorkspaceTabDrag();
+  suppressWorkspaceTabClick(workspaceId);
+
+  if (!didChange || !previousSnapshot || typeof bridge.reorderWorkspace !== "function") {
+    return;
+  }
+
+  uiState.snapshot = {
+    ...previousSnapshot,
+    workspaces: reorderedWorkspaces,
+  };
+  render();
+
+  try {
+    uiState.snapshot = await bridge.reorderWorkspace(workspaceId, targetIndex);
+    render();
+  } catch (error) {
+    console.error(error);
+    uiState.snapshot = previousSnapshot;
+    render();
+  }
+}
+
+function cancelWorkspaceTabDrag() {
+  if (!uiState.workspaceTabDrag) {
+    return;
+  }
+
+  clearWorkspaceTabDrag();
+}
+
+function clearWorkspaceTabDrag() {
+  const drag = uiState.workspaceTabDrag;
+  if (drag) {
+    cleanupWorkspaceTabDragChrome(drag);
+    releaseWorkspaceTabPointerCapture(drag);
+  }
+  uiState.workspaceTabDrag = null;
+  stopWorkspaceTabAutoScroll();
+}
+
+function isWorkspaceTabDragActive() {
+  return uiState.workspaceTabDrag?.status === "dragging";
+}
+
+function suppressWorkspaceTabClick(workspaceId) {
+  uiState.workspaceTabSuppressClickWorkspaceId = workspaceId || "";
+  uiState.workspaceTabSuppressClickUntil = workspaceId
+    ? Date.now() + WORKSPACE_TAB_CLICK_SUPPRESS_MS
+    : 0;
+}
+
+function clearWorkspaceTabClickSuppression() {
+  uiState.workspaceTabSuppressClickWorkspaceId = "";
+  uiState.workspaceTabSuppressClickUntil = 0;
+}
+
+function shouldSuppressWorkspaceTabClick(workspaceId) {
+  if (!workspaceId) {
+    return false;
+  }
+
+  if (
+    !uiState.workspaceTabSuppressClickWorkspaceId
+    || Date.now() > uiState.workspaceTabSuppressClickUntil
+  ) {
+    clearWorkspaceTabClickSuppression();
+    return false;
+  }
+
+  return uiState.workspaceTabSuppressClickWorkspaceId === workspaceId;
+}
+
+function renderWorkspaceStripRegion(
+  stripRegion = app.querySelector('[data-region="strip"]'),
+  snapshot = uiState.snapshot,
+) {
+  if (!stripRegion || !snapshot) {
+    return;
+  }
+
+  if (uiState.workspaceTabDrag) {
+    clearWorkspaceTabDrag();
+  }
+
+  stripRegion.innerHTML = renderWorkspaceStrip({
+    windowSummary: snapshot.window,
+    workspaces: snapshot.workspaces,
+    activeWorkspaceId: snapshot.activeWorkspaceId,
+    workspaceRenameDraft: uiState.workspaceRenameDraft,
+    getWorkspaceAttention,
+    escapeHtml,
+    getGitTone,
+    formatGitBadgeTitle,
+  });
+  syncWorkspaceTabRail(snapshot.activeWorkspaceId, snapshot.workspaces.length);
+  if (
+    uiState.workspaceRenameDraft
+    && uiState.workspaceRenameShouldFocus
+    && !isWorkspaceTabDragActive()
+  ) {
+    focusWorkspaceRenameInput();
+  }
+}
+
+function mountWorkspaceTabDragChrome() {
+  const drag = uiState.workspaceTabDrag;
+  if (
+    !drag
+    || drag.status !== "dragging"
+    || !(drag.tabShellEl instanceof HTMLElement)
+    || !drag.tabShellEl.isConnected
+    || !(drag.tabsEl instanceof HTMLElement)
+    || !drag.tabsEl.isConnected
+  ) {
+    return false;
+  }
+
+  const dropSlot = document.createElement("div");
+  dropSlot.className = "workspace-tab-drop-slot";
+  dropSlot.setAttribute("aria-hidden", "true");
+  dropSlot.style.width = `${Math.round(drag.tabWidth)}px`;
+  dropSlot.style.height = `${Math.round(drag.tabHeight)}px`;
+  drag.tabsEl.insertBefore(dropSlot, drag.tabShellEl);
+
+  drag.dropSlotEl = dropSlot;
+  drag.stripShellEl?.classList?.add("is-reordering");
+  drag.tabShellEl.classList.add("is-dragging-origin");
+  drag.tabShellEl.style.width = `${Math.round(drag.tabWidth)}px`;
+  drag.tabShellEl.style.height = `${Math.round(drag.tabHeight)}px`;
+  drag.tabShellEl.style.left = "0";
+  drag.tabShellEl.style.top = "0";
+  syncWorkspaceTabDraggedShellPosition();
+  syncWorkspaceTabDropIndicator({ immediate: true });
+  syncWorkspaceTabsOverflow(drag.tabsEl, drag.stripShellEl || drag.tabsEl.closest("[data-workspace-tabs-shell]"));
+  return true;
+}
+
+function cleanupWorkspaceTabDragChrome(drag) {
+  if (!drag) {
+    return;
+  }
+
+  if (drag.dropSlotEl instanceof HTMLElement) {
+    drag.dropSlotEl.remove();
+  }
+
+  if (drag.indicatorEl instanceof HTMLElement) {
+    drag.indicatorEl.classList.remove("is-active", "is-immediate");
+    drag.indicatorEl.style.left = "";
+  }
+
+  if (drag.tabShellEl instanceof HTMLElement) {
+    drag.tabShellEl.classList.remove("is-dragging-origin");
+    drag.tabShellEl.style.width = "";
+    drag.tabShellEl.style.height = "";
+    drag.tabShellEl.style.left = "";
+    drag.tabShellEl.style.top = "";
+    drag.tabShellEl.style.transform = "";
+  }
+
+  drag.stripShellEl?.classList?.remove("is-reordering");
+  if (drag.tabsEl instanceof HTMLElement) {
+    syncWorkspaceTabsOverflow(drag.tabsEl, drag.stripShellEl || drag.tabsEl.closest("[data-workspace-tabs-shell]"));
+  }
+}
+
+function releaseWorkspaceTabPointerCapture(drag) {
+  const captureEl = drag?.captureEl;
+  if (!(captureEl instanceof Element) || typeof captureEl.releasePointerCapture !== "function") {
+    return;
+  }
+
+  try {
+    if (!captureEl.isConnected || captureEl.hasPointerCapture(drag.pointerId)) {
+      captureEl.releasePointerCapture(drag.pointerId);
+    }
+  } catch {
+    // Ignore stale pointer capture handles during strip rerenders.
+  }
+}
+
+function syncWorkspaceTabDraggedShellPosition() {
+  const drag = uiState.workspaceTabDrag;
+  if (
+    !drag
+    || drag.status !== "dragging"
+    || !(drag.tabShellEl instanceof HTMLElement)
+  ) {
+    return;
+  }
+
+  drag.tabShellEl.style.transform = `translate3d(${drag.ghostLeft.toFixed(2)}px, ${drag.ghostTop.toFixed(2)}px, 0)`;
+}
+
+function moveWorkspaceTabDropSlot(nextTargetIndex) {
+  const drag = uiState.workspaceTabDrag;
+  if (
+    !drag
+    || drag.status !== "dragging"
+    || !(drag.tabsEl instanceof HTMLElement)
+    || !(drag.dropSlotEl instanceof HTMLElement)
+  ) {
+    return;
+  }
+
+  const shells = getWorkspaceTabDragSiblingShells(drag.tabsEl, drag.workspaceId);
+  const previousRects = captureWorkspaceTabShellRects(shells);
+  const nextReferenceShell = shells[nextTargetIndex] || null;
+  const tailAnchor = drag.indicatorEl instanceof HTMLElement && drag.indicatorEl.parentElement === drag.tabsEl
+    ? drag.indicatorEl
+    : null;
+
+  if (nextReferenceShell) {
+    drag.tabsEl.insertBefore(drag.dropSlotEl, nextReferenceShell);
+  } else if (tailAnchor) {
+    drag.tabsEl.insertBefore(drag.dropSlotEl, tailAnchor);
+  } else {
+    drag.tabsEl.appendChild(drag.dropSlotEl);
+  }
+
+  drag.targetIndex = nextTargetIndex;
+  animateWorkspaceTabShellReflow(previousRects, getWorkspaceTabDragSiblingShells(drag.tabsEl, drag.workspaceId));
+  syncWorkspaceTabDropIndicator();
+}
+
+function syncWorkspaceTabDropIndicator({ immediate = false } = {}) {
+  const drag = uiState.workspaceTabDrag;
+  if (
+    !drag
+    || drag.status !== "dragging"
+    || !(drag.indicatorEl instanceof HTMLElement)
+    || !(drag.dropSlotEl instanceof HTMLElement)
+  ) {
+    return;
+  }
+
+  if (immediate) {
+    drag.indicatorEl.classList.add("is-immediate");
+  }
+
+  drag.indicatorEl.style.left = `${(drag.dropSlotEl.offsetLeft + drag.dropSlotEl.offsetWidth / 2).toFixed(2)}px`;
+  drag.indicatorEl.classList.add("is-active");
+
+  if (immediate) {
+    requestAnimationFrame(() => {
+      if (drag.indicatorEl instanceof HTMLElement) {
+        drag.indicatorEl.classList.remove("is-immediate");
+      }
+    });
+  }
+}
+
+function getWorkspaceTabDragSiblingShells(tabs, draggedWorkspaceId) {
+  return Array.from(tabs.querySelectorAll("[data-workspace-tab-shell]"))
+    .filter((element) => element instanceof HTMLElement)
+    .filter((element) => element.dataset.workspaceId !== draggedWorkspaceId);
+}
+
+function captureWorkspaceTabShellRects(shells) {
+  const rects = new Map();
+  for (const shell of shells) {
+    rects.set(shell.dataset.workspaceId || "", shell.getBoundingClientRect());
+  }
+  return rects;
+}
+
+function animateWorkspaceTabShellReflow(previousRects, shells) {
+  const animatedShells = [];
+  for (const shell of shells) {
+    const workspaceId = shell.dataset.workspaceId || "";
+    const previousRect = previousRects.get(workspaceId);
+    if (!previousRect) {
+      continue;
+    }
+
+    const nextRect = shell.getBoundingClientRect();
+    const deltaX = previousRect.left - nextRect.left;
+    if (Math.abs(deltaX) <= 0.5) {
+      continue;
+    }
+
+    shell.style.transition = "none";
+    shell.style.transform = `translate3d(${deltaX}px, 0, 0)`;
+    animatedShells.push(shell);
+  }
+
+  if (!animatedShells.length) {
+    return;
+  }
+
+  requestAnimationFrame(() => {
+    for (const shell of animatedShells) {
+      shell.style.transition = "";
+      shell.style.transform = "";
+    }
+  });
+}
+
+function resolveWorkspaceTabTargetIndex(tabs, draggedWorkspaceId, clientX) {
+  if (!tabs) {
+    return 0;
+  }
+
+  const tabShells = Array.from(tabs.querySelectorAll("[data-workspace-tab-shell]"))
+    .filter((element) => element instanceof HTMLElement)
+    .filter((element) => element.dataset.workspaceId !== draggedWorkspaceId);
+  for (let index = 0; index < tabShells.length; index += 1) {
+    const rect = tabShells[index].getBoundingClientRect();
+    if (clientX < rect.left + rect.width / 2) {
+      return index;
+    }
+  }
+
+  return tabShells.length;
+}
+
+function reorderWorkspaceTabs(workspaces, workspaceId, targetIndex) {
+  const nextWorkspaces = [...workspaces];
+  const sourceIndex = nextWorkspaces.findIndex((workspace) => workspace.id === workspaceId);
+  if (sourceIndex === -1) {
+    return nextWorkspaces;
+  }
+
+  const [workspace] = nextWorkspaces.splice(sourceIndex, 1);
+  const insertionIndex = Math.max(0, Math.min(Number(targetIndex) || 0, nextWorkspaces.length));
+  nextWorkspaces.splice(insertionIndex, 0, workspace);
+  return nextWorkspaces;
+}
+
+function workspaceOrderDidChange(previousWorkspaces, nextWorkspaces) {
+  if (previousWorkspaces.length !== nextWorkspaces.length) {
+    return true;
+  }
+
+  return previousWorkspaces.some((workspace, index) => workspace.id !== nextWorkspaces[index]?.id);
+}
+
+function syncWorkspaceTabAutoScroll() {
+  if (!isWorkspaceTabDragActive()) {
+    stopWorkspaceTabAutoScroll();
+    return;
+  }
+
+  const viewport = uiState.workspaceTabDrag?.tabsEl?.closest?.("[data-workspace-tabs-viewport]")
+    || document.querySelector("[data-workspace-tabs-viewport]");
+  const delta = getWorkspaceTabAutoScrollDelta(viewport, uiState.workspaceTabDrag?.currentX || 0);
+  if (!delta) {
+    stopWorkspaceTabAutoScroll();
+    return;
+  }
+
+  if (!runtimeStore.workspaceTabAutoScrollFrame) {
+    runtimeStore.workspaceTabAutoScrollFrame = requestAnimationFrame(stepWorkspaceTabAutoScroll);
+  }
+}
+
+function stepWorkspaceTabAutoScroll() {
+  runtimeStore.workspaceTabAutoScrollFrame = 0;
+
+  const drag = uiState.workspaceTabDrag;
+  const tabs = drag?.tabsEl || document.querySelector("[data-workspace-tabs]");
+  const viewport = tabs?.closest?.("[data-workspace-tabs-viewport]")
+    || document.querySelector("[data-workspace-tabs-viewport]");
+  if (!drag || drag.status !== "dragging" || !tabs || !viewport) {
+    return;
+  }
+
+  const delta = getWorkspaceTabAutoScrollDelta(viewport, drag.currentX);
+  if (!delta) {
+    return;
+  }
+
+  const maxScrollLeft = Math.max(0, tabs.scrollWidth - tabs.clientWidth);
+  const nextLeft = Math.max(0, Math.min(maxScrollLeft, tabs.scrollLeft + delta));
+  if (Math.abs(nextLeft - tabs.scrollLeft) <= 0.5) {
+    return;
+  }
+
+  tabs.scrollLeft = nextLeft;
+  rememberWorkspaceTabsScroll(tabs);
+  syncWorkspaceTabsOverflow(tabs, drag.stripShellEl || tabs.closest("[data-workspace-tabs-shell]"));
+  const nextTargetIndex = resolveWorkspaceTabTargetIndex(tabs, drag.workspaceId, drag.currentX);
+  if (nextTargetIndex !== drag.targetIndex) {
+    moveWorkspaceTabDropSlot(nextTargetIndex);
+  } else {
+    syncWorkspaceTabDropIndicator();
+  }
+  syncWorkspaceTabAutoScroll();
+}
+
+function stopWorkspaceTabAutoScroll() {
+  if (runtimeStore.workspaceTabAutoScrollFrame) {
+    cancelAnimationFrame(runtimeStore.workspaceTabAutoScrollFrame);
+    runtimeStore.workspaceTabAutoScrollFrame = 0;
+  }
+}
+
+function getWorkspaceTabAutoScrollDelta(viewport, clientX) {
+  if (!(viewport instanceof HTMLElement)) {
+    return 0;
+  }
+
+  const rect = viewport.getBoundingClientRect();
+  if (rect.width <= 0) {
+    return 0;
+  }
+
+  if (clientX < rect.left + WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX) {
+    const strength = (rect.left + WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX - clientX)
+      / WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX;
+    const easedStrength = Math.min(1, strength) ** 1.35;
+    return -(1.5 + WORKSPACE_TAB_EDGE_SCROLL_MAX_PX_PER_FRAME * easedStrength);
+  }
+
+  if (clientX > rect.right - WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX) {
+    const strength = (clientX - (rect.right - WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX))
+      / WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX;
+    const easedStrength = Math.min(1, strength) ** 1.35;
+    return 1.5 + WORKSPACE_TAB_EDGE_SCROLL_MAX_PX_PER_FRAME * easedStrength;
+  }
+
+  return 0;
 }
 
 function handlePaste(event) {
@@ -2412,6 +3125,7 @@ function handleWindowResize() {
     uiState.snapshot?.activeWorkspaceId || null,
     uiState.snapshot?.workspaces?.length || 0,
   );
+  syncContextMenuPosition();
 }
 
 function handleWindowFocus() {
@@ -2427,6 +3141,9 @@ function handleWindowFocus() {
 }
 
 function handleWindowBlur() {
+  if (isWorkspaceTabDragActive()) {
+    cancelWorkspaceTabDrag();
+  }
   syncGitRefreshLoop();
   syncSystemHealthLoop();
 }
@@ -2450,6 +3167,19 @@ async function handleSubmit(event) {
   if (renameForm) {
     event.preventDefault();
     await commitWorkspaceRename();
+    return;
+  }
+
+  const todoForm = event.target.closest("[data-action]");
+  if (todoForm?.dataset.action === "workspace-todo-create") {
+    event.preventDefault();
+    await submitWorkspaceTodoCreate();
+    return;
+  }
+
+  if (todoForm?.dataset.action === "workspace-todo-edit") {
+    event.preventDefault();
+    await submitWorkspaceTodoEdit(todoForm.dataset.todoId || "");
     return;
   }
 
@@ -2479,6 +3209,18 @@ async function handleSubmit(event) {
 }
 
 function handleInput(event) {
+  const workspaceTodoInput = event.target.closest("[data-workspace-todo-input]");
+  if (workspaceTodoInput) {
+    uiState.workspaceTodos.draft = workspaceTodoInput.value;
+    return;
+  }
+
+  const workspaceTodoEditInput = event.target.closest("[data-workspace-todo-edit-input]");
+  if (workspaceTodoEditInput) {
+    uiState.workspaceTodos.editDraft = workspaceTodoEditInput.value;
+    return;
+  }
+
   const commitInput = event.target.closest("[data-scm-commit-input]");
   if (commitInput) {
     uiState.sourceControl.commitMessage = commitInput.value;
@@ -2562,6 +3304,28 @@ async function handleChange(event) {
 }
 
 async function handleKeyDown(event) {
+  if (isWorkspaceTabDragActive() && event.key === "Escape") {
+    event.preventDefault();
+    cancelWorkspaceTabDrag();
+    return;
+  }
+
+  const workspaceTodoEditInput = event.target.closest("[data-workspace-todo-edit-input]");
+  if (workspaceTodoEditInput && event.key === "Escape") {
+    event.preventDefault();
+    cancelWorkspaceTodoEdit();
+    render({ refreshVisibleTerminals: false });
+    return;
+  }
+
+  const workspaceTodoInput = event.target.closest("[data-workspace-todo-input]");
+  if (workspaceTodoInput && event.key === "Escape") {
+    event.preventDefault();
+    closeTodoPanel();
+    render({ refreshVisibleTerminals: false });
+    return;
+  }
+
   const quickSwitcherInput = event.target.closest("[data-quick-switcher-input]");
   if (quickSwitcherInput) {
     const items = getQuickSwitcherItems();
@@ -2614,6 +3378,7 @@ async function handleKeyDown(event) {
     event.preventDefault();
     uiState.settingsVisible = true;
     uiState.settingsSection = "workbench";
+    closeTodoPanel();
     closeSystemHealthPanel();
     closeSourceControlPanel();
     uiState.activityRailVisible = false;
@@ -2652,6 +3417,13 @@ async function handleKeyDown(event) {
   if (uiState.codexModalVisible && event.key === "Escape") {
     event.preventDefault();
     closeCodexModal();
+    render({ refreshVisibleTerminals: false });
+    return;
+  }
+
+  if (uiState.todoPanelVisible && event.key === "Escape") {
+    event.preventDefault();
+    closeTodoPanel();
     render({ refreshVisibleTerminals: false });
     return;
   }
@@ -2750,6 +3522,7 @@ async function handleKeyDown(event) {
   if (
     uiState.quickSwitcherVisible
     || uiState.settingsVisible
+    || uiState.todoPanelVisible
     || uiState.gitPanelVisible
     || uiState.systemHealthPanelVisible
     || uiState.pendingWorkspaceDraft
@@ -2807,6 +3580,7 @@ async function beginWorkspaceCreation() {
     snapshot?.launcher?.presets,
   );
   uiState.launcherVisible = true;
+  closeTodoPanel();
   closeQuickSwitcher();
   closeCodexModal();
   render();
@@ -2818,6 +3592,7 @@ async function activateWorkspace(workspaceId) {
   }
 
   const keepSourceControlOpen = uiState.gitPanelVisible;
+  const keepTodoPanelOpen = uiState.todoPanelVisible;
 
   if (workspaceId !== uiState.snapshot?.activeWorkspaceId) {
     uiState.snapshot = await bridge.switchWorkspace(workspaceId);
@@ -2826,6 +3601,8 @@ async function activateWorkspace(workspaceId) {
   uiState.launcherVisible = false;
   hideSettingsSheet();
   closeCodexModal();
+  uiState.todoPanelVisible = keepTodoPanelOpen;
+  resetWorkspaceTodoState({ keepCollapsed: true });
   uiState.gitPanelVisible = keepSourceControlOpen;
   uiState.pendingWorkspaceDraft = null;
   uiState.contextMenu = null;
@@ -2845,6 +3622,7 @@ function openQuickSwitcher() {
   uiState.quickSwitcherVisible = true;
   uiState.launcherVisible = false;
   uiState.activityRailVisible = false;
+  closeTodoPanel();
   closeCodexModal();
   closeSystemHealthPanel();
   uiState.quickSwitcherQuery = "";
@@ -2866,6 +3644,163 @@ function closeQuickSwitcher() {
   uiState.quickSwitcherShouldFocus = false;
 }
 
+function resetWorkspaceTodoState({ keepCollapsed = true } = {}) {
+  uiState.workspaceTodos.draft = "";
+  uiState.workspaceTodos.editTodoId = "";
+  uiState.workspaceTodos.editDraft = "";
+  uiState.workspaceTodos.shouldFocusCreate = false;
+  uiState.workspaceTodos.shouldFocusEditTodoId = "";
+  uiState.workspaceTodos.submitting = false;
+  if (!keepCollapsed) {
+    uiState.workspaceTodos.completedCollapsed = true;
+  }
+}
+
+function closeTodoPanel() {
+  if (!uiState.todoPanelVisible) {
+    return false;
+  }
+
+  uiState.todoPanelVisible = false;
+  resetWorkspaceTodoState({ keepCollapsed: false });
+  return true;
+}
+
+function openTodoPanel() {
+  if (!getActiveWorkspace()) {
+    return false;
+  }
+
+  uiState.todoPanelVisible = true;
+  resetWorkspaceTodoState({ keepCollapsed: false });
+  uiState.workspaceTodos.shouldFocusCreate = true;
+  hideSettingsSheet();
+  closeCodexModal();
+  closeSystemHealthPanel();
+  closeSourceControlPanel();
+  uiState.activityRailVisible = false;
+  closeQuickSwitcher();
+  uiState.pendingWorkspaceDraft = null;
+  uiState.contextMenu = null;
+  cancelWorkspaceRename();
+  return true;
+}
+
+function toggleTodoPanel(forceVisible = !uiState.todoPanelVisible) {
+  if (!forceVisible) {
+    closeTodoPanel();
+    return;
+  }
+
+  openTodoPanel();
+}
+
+function startWorkspaceTodoEdit(todoId) {
+  const todo = getActiveWorkspace()?.todos?.find((entry) => entry.id === todoId);
+  if (!todo) {
+    return;
+  }
+
+  uiState.workspaceTodos.editTodoId = todo.id;
+  uiState.workspaceTodos.editDraft = todo.text;
+  uiState.workspaceTodos.shouldFocusEditTodoId = todo.id;
+  uiState.workspaceTodos.shouldFocusCreate = false;
+}
+
+function cancelWorkspaceTodoEdit() {
+  uiState.workspaceTodos.editTodoId = "";
+  uiState.workspaceTodos.editDraft = "";
+  uiState.workspaceTodos.shouldFocusEditTodoId = "";
+}
+
+async function submitWorkspaceTodoCreate() {
+  const workspace = getActiveWorkspace();
+  if (!workspace || !bridge.addWorkspaceTodo) {
+    return;
+  }
+
+  uiState.workspaceTodos.submitting = true;
+  render({ refreshVisibleTerminals: false });
+
+  try {
+    uiState.snapshot = await bridge.addWorkspaceTodo(workspace.id, uiState.workspaceTodos.draft);
+    uiState.workspaceTodos.draft = "";
+    uiState.workspaceTodos.shouldFocusCreate = true;
+  } catch (error) {
+    uiState.workspaceTodos.shouldFocusCreate = true;
+    reportSourceControlError(error);
+  } finally {
+    uiState.workspaceTodos.submitting = false;
+    render({ refreshVisibleTerminals: false });
+  }
+}
+
+async function submitWorkspaceTodoEdit(todoId) {
+  const workspace = getActiveWorkspace();
+  if (!workspace || !todoId || !bridge.updateWorkspaceTodo) {
+    return;
+  }
+
+  uiState.workspaceTodos.submitting = true;
+  render({ refreshVisibleTerminals: false });
+
+  try {
+    uiState.snapshot = await bridge.updateWorkspaceTodo(
+      workspace.id,
+      todoId,
+      uiState.workspaceTodos.editDraft,
+    );
+    cancelWorkspaceTodoEdit();
+  } catch (error) {
+    uiState.workspaceTodos.shouldFocusEditTodoId = todoId;
+    reportSourceControlError(error);
+  } finally {
+    uiState.workspaceTodos.submitting = false;
+    render({ refreshVisibleTerminals: false });
+  }
+}
+
+async function setWorkspaceTodoDone(todoId, done) {
+  const workspace = getActiveWorkspace();
+  if (!workspace || !todoId || !bridge.setWorkspaceTodoDone) {
+    return;
+  }
+
+  uiState.workspaceTodos.submitting = true;
+  render({ refreshVisibleTerminals: false });
+
+  try {
+    uiState.snapshot = await bridge.setWorkspaceTodoDone(workspace.id, todoId, done);
+  } catch (error) {
+    reportSourceControlError(error);
+  } finally {
+    uiState.workspaceTodos.submitting = false;
+    render({ refreshVisibleTerminals: false });
+  }
+}
+
+async function deleteWorkspaceTodo(todoId) {
+  const workspace = getActiveWorkspace();
+  if (!workspace || !todoId || !bridge.deleteWorkspaceTodo) {
+    return;
+  }
+
+  uiState.workspaceTodos.submitting = true;
+  render({ refreshVisibleTerminals: false });
+
+  try {
+    uiState.snapshot = await bridge.deleteWorkspaceTodo(workspace.id, todoId);
+    if (uiState.workspaceTodos.editTodoId === todoId) {
+      cancelWorkspaceTodoEdit();
+    }
+  } catch (error) {
+    reportSourceControlError(error);
+  } finally {
+    uiState.workspaceTodos.submitting = false;
+    render({ refreshVisibleTerminals: false });
+  }
+}
+
 function closeCodexModal() {
   if (!uiState.codexModalVisible) {
     return false;
@@ -2875,6 +3810,7 @@ function closeCodexModal() {
   uiState.codexSessionsLoading = false;
   uiState.codexSessionsError = "";
   uiState.codexSubmitting = false;
+  uiState.codexTargetPaneId = null;
   uiState.codexShouldFocus = false;
   return true;
 }
@@ -2888,8 +3824,10 @@ async function openCodexModal() {
   uiState.codexModalVisible = true;
   uiState.codexSessionsError = "";
   uiState.codexSubmitting = false;
+  uiState.codexTargetPaneId = resolveActivePaneId(workspace);
   uiState.codexShouldFocus = false;
   hideSettingsSheet();
+  closeTodoPanel();
   closeSystemHealthPanel();
   closeSourceControlPanel();
   uiState.activityRailVisible = false;
@@ -2943,7 +3881,7 @@ async function loadActiveWorkspaceCodexSessions({ force = false } = {}) {
 
 async function resumeSelectedCodexSession() {
   const workspace = getActiveWorkspace();
-  const paneId = resolveActivePaneId(workspace);
+  const paneId = resolveCodexTargetPaneId(workspace);
   const sessionId = String(uiState.codexSelectedSessionId || "");
   if (!workspace || !paneId || !bridge.resumeWorkspaceCodexSession) {
     return;
@@ -2958,6 +3896,7 @@ async function resumeSelectedCodexSession() {
 
   try {
     uiState.snapshot = await bridge.resumeWorkspaceCodexSession(workspace.id, paneId, sessionId);
+    setActivePaneId(paneId, workspace);
     closeCodexModal();
     render({ refreshVisibleTerminals: false });
     focusPaneTerminal(paneId);
@@ -2970,7 +3909,7 @@ async function resumeSelectedCodexSession() {
 
 async function startNewCodexSession() {
   const workspace = getActiveWorkspace();
-  const paneId = resolveActivePaneId(workspace);
+  const paneId = resolveCodexTargetPaneId(workspace);
   if (!workspace || !paneId || !bridge.startWorkspaceCodexSession) {
     return;
   }
@@ -2980,6 +3919,7 @@ async function startNewCodexSession() {
 
   try {
     await bridge.startWorkspaceCodexSession(workspace.id, paneId);
+    setActivePaneId(paneId, workspace);
     closeCodexModal();
     render({ refreshVisibleTerminals: false });
     focusPaneTerminal(paneId);
@@ -3012,6 +3952,7 @@ function toggleSystemHealthPanel(forceVisible = !uiState.systemHealthPanelVisibl
 
   uiState.systemHealthPanelVisible = true;
   hideSettingsSheet();
+  closeTodoPanel();
   closeSourceControlPanel();
   uiState.activityRailVisible = false;
   closeQuickSwitcher();
@@ -3223,6 +4164,33 @@ function captureSourceControlFocusState(root = document) {
   };
 }
 
+function captureTodoFocusState(root = document) {
+  const activeElement = document.activeElement;
+  if (!(activeElement instanceof HTMLInputElement || activeElement instanceof HTMLTextAreaElement)) {
+    return null;
+  }
+
+  if (!root.contains(activeElement) || !activeElement.closest(".workspace-todo-panel")) {
+    return null;
+  }
+
+  const selector = [
+    "[data-workspace-todo-input]",
+    "[data-workspace-todo-edit-input]",
+  ].find((candidate) => activeElement.matches(candidate));
+
+  if (!selector) {
+    return null;
+  }
+
+  return {
+    selector,
+    selectionStart: typeof activeElement.selectionStart === "number" ? activeElement.selectionStart : null,
+    selectionEnd: typeof activeElement.selectionEnd === "number" ? activeElement.selectionEnd : null,
+    scrollTop: "scrollTop" in activeElement ? activeElement.scrollTop : null,
+  };
+}
+
 function captureSourceControlScrollState(root = document) {
   const panel = root.querySelector(".workspace-git-panel");
   if (!(panel instanceof HTMLElement)) {
@@ -3260,7 +4228,63 @@ function captureSourceControlScrollState(root = document) {
     .filter(Boolean));
 }
 
+function captureTodoScrollState(root = document) {
+  const panel = root.querySelector(".workspace-todo-panel");
+  if (!(panel instanceof HTMLElement)) {
+    return [];
+  }
+
+  const selectors = [
+    ".workspace-todo-panel-body",
+  ];
+
+  return selectors.flatMap((selector) => Array
+    .from(panel.querySelectorAll(selector))
+    .map((element, index) => {
+      if (!(element instanceof HTMLElement)) {
+        return null;
+      }
+
+      return {
+        selector,
+        index,
+        scrollTop: element.scrollTop,
+        scrollLeft: element.scrollLeft,
+      };
+    })
+    .filter(Boolean));
+}
+
 function restoreSourceControlFocusState(state, root = document) {
+  if (!state?.selector) {
+    return;
+  }
+
+  const input = root.querySelector(state.selector);
+  if (!(input instanceof HTMLInputElement || input instanceof HTMLTextAreaElement)) {
+    return;
+  }
+
+  input.focus({ preventScroll: true });
+
+  if (
+    typeof state.selectionStart === "number"
+    && typeof state.selectionEnd === "number"
+    && typeof input.setSelectionRange === "function"
+  ) {
+    try {
+      input.setSelectionRange(state.selectionStart, state.selectionEnd);
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
+  if (typeof state.scrollTop === "number" && "scrollTop" in input) {
+    input.scrollTop = state.scrollTop;
+  }
+}
+
+function restoreTodoFocusState(state, root = document) {
   if (!state?.selector) {
     return;
   }
@@ -3371,6 +4395,35 @@ function restoreSettingsScrollState(states, root = document) {
   }
 }
 
+function restoreTodoScrollState(states, root = document) {
+  if (!Array.isArray(states) || states.length === 0) {
+    return;
+  }
+
+  const panel = root.querySelector(".workspace-todo-panel");
+  if (!(panel instanceof HTMLElement)) {
+    return;
+  }
+
+  for (const state of states) {
+    if (!state?.selector) {
+      continue;
+    }
+
+    const element = panel.querySelectorAll(state.selector)[state.index];
+    if (!(element instanceof HTMLElement)) {
+      continue;
+    }
+
+    if (typeof state.scrollTop === "number") {
+      element.scrollTop = state.scrollTop;
+    }
+    if (typeof state.scrollLeft === "number") {
+      element.scrollLeft = state.scrollLeft;
+    }
+  }
+}
+
 async function openSourceControlPanel({ force = false } = {}) {
   if (!uiState.snapshot?.activeWorkspaceId) {
     return;
@@ -3383,6 +4436,7 @@ async function openSourceControlPanel({ force = false } = {}) {
   uiState.gitPanelVisible = true;
   closeSourceControlRowMenu();
   hideSettingsSheet();
+  closeTodoPanel();
   closeCodexModal();
   closeSystemHealthPanel();
   uiState.activityRailVisible = false;
@@ -4238,6 +5292,7 @@ function toggleActivityRail(forceVisible = !uiState.activityRailVisible) {
   uiState.activityRailVisible = true;
   uiState.activityRailScope = normalizeActivityScope(uiState.activityRailScope);
   hideSettingsSheet();
+  closeTodoPanel();
   closeCodexModal();
   closeSystemHealthPanel();
   uiState.gitPanelVisible = false;
@@ -4611,6 +5666,13 @@ function render({ refreshVisibleTerminals = true } = {}) {
   }
 
   if (
+    uiState.workspaceTabDrag &&
+    !snapshot.workspaces.some((workspace) => workspace.id === uiState.workspaceTabDrag.workspaceId)
+  ) {
+    clearWorkspaceTabDrag();
+  }
+
+  if (
     uiState.maximizedPaneId &&
     (!activeWorkspace || !activeWorkspace.panes.some((pane) => pane.id === uiState.maximizedPaneId))
   ) {
@@ -4632,6 +5694,10 @@ function render({ refreshVisibleTerminals = true } = {}) {
     closeCodexModal();
   }
 
+  if (uiState.todoPanelVisible && !activeWorkspace) {
+    closeTodoPanel();
+  }
+
   if (uiState.quickSwitcherVisible && snapshot.workspaces.length === 0) {
     closeQuickSwitcher();
   }
@@ -4649,6 +5715,12 @@ function render({ refreshVisibleTerminals = true } = {}) {
   const settingsScrollState = uiState.settingsVisible
     ? captureSettingsScrollState(modalRegion)
     : null;
+  const todoFocusState = uiState.todoPanelVisible
+    ? captureTodoFocusState(modalRegion)
+    : null;
+  const todoScrollState = uiState.todoPanelVisible
+    ? captureTodoScrollState(modalRegion)
+    : null;
   const sourceControlFocusState = uiState.gitPanelVisible
     ? captureSourceControlFocusState(modalRegion)
     : null;
@@ -4656,16 +5728,7 @@ function render({ refreshVisibleTerminals = true } = {}) {
     ? captureSourceControlScrollState(modalRegion)
     : null;
 
-  stripRegion.innerHTML = renderWorkspaceStrip({
-    windowSummary: snapshot.window,
-    workspaces: snapshot.workspaces,
-    activeWorkspaceId: snapshot.activeWorkspaceId,
-    workspaceRenameDraft: uiState.workspaceRenameDraft,
-    getWorkspaceAttention,
-    escapeHtml,
-    getGitTone,
-    formatGitBadgeTitle,
-  });
+  renderWorkspaceStripRegion(stripRegion, snapshot);
   statusRegion.innerHTML = renderWorkspaceStatusBar(snapshot, activeWorkspace);
   activityRegion.innerHTML = renderActivityRail({
     visible: uiState.activityRailVisible,
@@ -4676,10 +5739,6 @@ function render({ refreshVisibleTerminals = true } = {}) {
     items: buildActivityFeedItems(snapshot),
     escapeHtml,
   });
-  syncWorkspaceTabRail(snapshot.activeWorkspaceId, snapshot.workspaces.length);
-  if (uiState.workspaceRenameDraft && uiState.workspaceRenameShouldFocus) {
-    focusWorkspaceRenameInput();
-  }
   modalRegion.innerHTML = uiState.quickSwitcherVisible
     ? renderQuickSwitcher(snapshot)
     : uiState.settingsVisible
@@ -4693,6 +5752,8 @@ function render({ refreshVisibleTerminals = true } = {}) {
           })
         : uiState.codexModalVisible && activeWorkspace
           ? renderCodexModal(activeWorkspace)
+        : uiState.todoPanelVisible && activeWorkspace
+          ? renderTodoPanel(activeWorkspace)
         : uiState.gitPanelVisible && activeWorkspace
           ? renderGitPanel(activeWorkspace)
           : "";
@@ -4703,6 +5764,7 @@ function render({ refreshVisibleTerminals = true } = {}) {
       || uiState.settingsVisible
       || uiState.pendingWorkspaceDraft
       || (uiState.codexModalVisible && activeWorkspace)
+      || (uiState.todoPanelVisible && activeWorkspace)
       || (uiState.gitPanelVisible && activeWorkspace),
     ),
   );
@@ -4717,6 +5779,12 @@ function render({ refreshVisibleTerminals = true } = {}) {
   if (settingsFocusState && uiState.settingsVisible) {
     restoreSettingsFocusState(settingsFocusState, modalRegion);
   }
+  if (todoScrollState && uiState.todoPanelVisible) {
+    restoreTodoScrollState(todoScrollState, modalRegion);
+  }
+  if (todoFocusState && uiState.todoPanelVisible) {
+    restoreTodoFocusState(todoFocusState, modalRegion);
+  }
   if (sourceControlScrollState && uiState.gitPanelVisible) {
     restoreSourceControlScrollState(sourceControlScrollState, modalRegion);
   }
@@ -4726,6 +5794,9 @@ function render({ refreshVisibleTerminals = true } = {}) {
   if (uiState.codexModalVisible) {
     focusCodexModal(modalRegion);
   }
+  if (uiState.todoPanelVisible) {
+    focusTodoPanel(modalRegion);
+  }
   if (uiState.gitPanelVisible && uiState.sourceControl.publishModalVisible) {
     focusSourceControlPublishModal(modalRegion);
   }
@@ -4733,6 +5804,7 @@ function render({ refreshVisibleTerminals = true } = {}) {
     uiState.contextMenu && activeWorkspace
       ? renderContextMenu(uiState.contextMenu, activeWorkspace, snapshot)
       : "";
+  syncContextMenuPosition(contextRegion);
   if (uiState.quickSwitcherVisible && uiState.quickSwitcherShouldFocus) {
     focusQuickSwitcherInput();
   }
@@ -4744,30 +5816,17 @@ function render({ refreshVisibleTerminals = true } = {}) {
       stashMountedWorkspaceScreen(stageRegion);
     }
 
-    const preservedLauncherInputState = captureLauncherInputState(stageRegion);
     const nextLauncherSignature = launcherStageSignature(snapshot.launcher.basePath, uiState);
     const shouldRemountLauncher =
       stageRegion.dataset.stageMode !== "launcher"
       || stageRegion.dataset.stageSignature !== nextLauncherSignature;
 
     if (shouldRemountLauncher) {
-      stageRegion.innerHTML = renderEmptyState({
-        basePath: snapshot.launcher.basePath,
-        launcherCommandValue: uiState.launcherCommandValue,
-        launcherLatestCard: uiState.launcherLatestCard,
-        escapeHtml,
-      });
+      stageRegion.innerHTML = renderEmptyState();
       stageRegion.dataset.stageMode = "launcher";
       stageRegion.dataset.stageSignature = nextLauncherSignature;
     }
 
-    if (!uiState.settingsVisible) {
-      if (shouldRemountLauncher && preservedLauncherInputState?.wasFocused) {
-        restoreLauncherInputState(preservedLauncherInputState);
-      } else {
-        focusLauncherInput();
-      }
-    }
     return;
   }
 
@@ -4856,6 +5915,14 @@ function renderCodexIcon() {
   `;
 }
 
+function renderTasksIcon() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M8 6h11v2H8V6Zm0 5h11v2H8v-2Zm0 5h11v2H8v-2ZM5.1 7.7 3.7 6.3l1.4-1.4 1 1 2-2 1.4 1.4L5.1 9.7Zm0 5-1.4-1.4 1.4-1.4 1 1 2-2 1.4 1.4-3.4 3.4Zm0 5-1.4-1.4 1.4-1.4 1 1 2-2 1.4 1.4-3.4 3.4Z" fill="currentColor"></path>
+    </svg>
+  `;
+}
+
 function renderSystemIcon() {
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -4921,6 +5988,7 @@ function renderWorkspaceStatusBar(snapshot, activeWorkspace) {
     leftItems.push(renderStatusBarItem(pathLabel, activeWorkspace.path, "is-path is-primary"));
     leftItems.push(renderStatusBarCodexButton(activeWorkspace));
     leftItems.push(renderStatusBarGitButton(summary));
+    leftItems.push(renderStatusBarTodoButton(activeWorkspace));
     if (shouldShowSystemHealth) {
       leftItems.push(renderStatusBarSystemHealthButton());
     }
@@ -5001,6 +6069,31 @@ function renderStatusBarCodexButton(activeWorkspace) {
       aria-pressed="${uiState.codexModalVisible ? "true" : "false"}"
     >
       <span class="workspace-statusbar-icon" aria-hidden="true">${renderCodexIcon()}</span>
+      <span>${escapeHtml(label)}</span>
+    </button>
+  `;
+}
+
+function renderStatusBarTodoButton(activeWorkspace) {
+  const summary = getWorkspaceTodoState(activeWorkspace);
+  const tone = summary.openCount > 0 ? "dirty" : "clean";
+  const label = summary.openCount > 0 ? `Tasks ${summary.openCount}` : "Tasks";
+  const title = summary.openCount > 0
+    ? `${summary.openCount} open ${summary.openCount === 1 ? "task" : "tasks"} in ${activeWorkspace.name}`
+    : summary.completedCount > 0
+      ? `All open tasks complete in ${activeWorkspace.name}`
+      : `No tasks yet in ${activeWorkspace.name}`;
+
+  return `
+    <button
+      class="workspace-statusbar-item workspace-statusbar-button is-${tone} ${uiState.todoPanelVisible ? "is-panel-open" : ""}"
+      type="button"
+      data-action="toggle-todo-panel"
+      title="${escapeHtml(title)}"
+      aria-label="${escapeHtml(title)}"
+      aria-pressed="${uiState.todoPanelVisible ? "true" : "false"}"
+    >
+      <span class="workspace-statusbar-icon" aria-hidden="true">${renderTasksIcon()}</span>
       <span>${escapeHtml(label)}</span>
     </button>
   `;
@@ -5268,6 +6361,50 @@ function formatRelativeTime(timestampMs) {
   return `${deltaDays}d ago`;
 }
 
+function isCodexPaneReady(pane) {
+  return pane?.status === "ready";
+}
+
+function resolveCodexTargetPaneId(workspace = getActiveWorkspace()) {
+  if (!workspace?.panes?.length) {
+    return null;
+  }
+
+  const preferredIds = [
+    uiState.codexTargetPaneId,
+    uiState.activePaneId,
+  ].filter(Boolean);
+
+  for (const paneId of preferredIds) {
+    const pane = workspace.panes.find((entry) => entry.id === paneId);
+    if (isCodexPaneReady(pane)) {
+      return paneId;
+    }
+  }
+
+  return workspace.panes.find(isCodexPaneReady)?.id || null;
+}
+
+function getCodexTargetPane(workspace = getActiveWorkspace()) {
+  const targetPaneId = resolveCodexTargetPaneId(workspace);
+  return workspace?.panes?.find((pane) => pane.id === targetPaneId) || null;
+}
+
+function formatPaneStatusLabel(status) {
+  switch (status) {
+    case "ready":
+      return "Ready";
+    case "booting":
+      return "Booting";
+    case "failed":
+      return "Failed";
+    case "closed":
+      return "Closed";
+    default:
+      return "Unavailable";
+  }
+}
+
 function renderCodexModal(workspace) {
   const snapshot = uiState.codexSessionsSnapshot?.workspaceId === workspace.id
     ? uiState.codexSessionsSnapshot
@@ -5280,8 +6417,16 @@ function renderCodexModal(workspace) {
   const selectedSessionId = hasSelection ? uiState.codexSelectedSessionId : sessions[0]?.id || "";
   const rememberedSessionId = snapshot?.rememberedSessionId || null;
   const selectedSession = sessions.find((session) => session.id === selectedSessionId) || null;
-  const canResume = Boolean(selectedSessionId) && !uiState.codexSubmitting && !uiState.codexSessionsLoading && !isUnavailable;
-  const canStart = !uiState.codexSubmitting && !isUnavailable;
+  const activePaneId = resolveActivePaneId(workspace);
+  const targetPane = getCodexTargetPane(workspace);
+  const targetPaneId = targetPane?.id || null;
+  const canTargetPane = Boolean(targetPaneId);
+  const canResume = Boolean(selectedSessionId)
+    && canTargetPane
+    && !uiState.codexSubmitting
+    && !uiState.codexSessionsLoading
+    && !isUnavailable;
+  const canStart = canTargetPane && !uiState.codexSubmitting && !isUnavailable;
   const refreshedLabel = snapshot
     ? `${sessions.length} ${sessions.length === 1 ? "matching session" : "matching sessions"} found`
     : uiState.codexSessionsLoading
@@ -5358,7 +6503,7 @@ function renderCodexModal(workspace) {
                           : `
                             <div class="workspace-codex-modal-empty">
                               <strong>No saved Codex session matches this workspace yet.</strong>
-                              <span>Start a fresh Codex session in the active pane, then come back here to resume it later.</span>
+                              <span>Start a fresh Codex session in a ready pane, then come back here to resume it later.</span>
                             </div>
                           `
                       }
@@ -5382,6 +6527,20 @@ function renderCodexModal(workspace) {
                             </div>
                           `
                       }
+                      <div class="workspace-codex-modal-detail-card">
+                        <span class="workspace-codex-meta-label">Command target</span>
+                        <div class="workspace-codex-pane-picker" role="list" aria-label="Choose target terminal pane">
+                          ${workspace.panes.map((pane) => renderCodexTargetPaneButton(pane, {
+                              isSelected: pane.id === targetPaneId,
+                              isActive: pane.id === activePaneId,
+                            })).join("")}
+                        </div>
+                        <span>
+                          ${targetPane
+                            ? escapeHtml(`CrewDock will send the Codex command to ${targetPane.label}.`)
+                            : "No ready pane is available yet. Wait for a shell to finish booting before starting or resuming Codex."}
+                        </span>
+                      </div>
                       ${snapshot?.rememberedSessionMissing
                         ? `
                           <div class="workspace-codex-modal-inline-note">
@@ -5408,7 +6567,7 @@ function renderCodexModal(workspace) {
                         </button>
                       </div>
                       <p class="workspace-codex-modal-note">
-                        CrewDock sends the command into the active pane. Use an idle shell if you do not want to interrupt current terminal work.
+                        The command goes to the selected pane, not whichever terminal happened to keep focus behind the modal.
                       </p>
                     </div>
                   </div>
@@ -5416,6 +6575,30 @@ function renderCodexModal(workspace) {
         }
       </section>
     </div>
+  `;
+}
+
+function renderCodexTargetPaneButton(pane, { isSelected = false, isActive = false } = {}) {
+  const isReady = isCodexPaneReady(pane);
+  const statusParts = [formatPaneStatusLabel(pane.status)];
+  if (isActive) {
+    statusParts.unshift("Active");
+  }
+
+  return `
+    <button
+      class="workspace-codex-pane-button ${isSelected ? "is-selected" : ""}"
+      type="button"
+      role="listitem"
+      data-action="select-codex-target-pane"
+      data-pane-id="${escapeHtml(pane.id)}"
+      ${isReady ? "" : "disabled"}
+      aria-pressed="${isSelected ? "true" : "false"}"
+      title="${escapeHtml(isReady ? `Send Codex commands to ${pane.label}` : `${pane.label} is ${formatPaneStatusLabel(pane.status).toLowerCase()}`)}"
+    >
+      <strong>${escapeHtml(pane.label)}</strong>
+      <span>${escapeHtml(statusParts.join(" · "))}</span>
+    </button>
   `;
 }
 
@@ -5459,6 +6642,249 @@ function focusCodexModal(root = document) {
     target.focus({ preventScroll: true });
   }
   uiState.codexShouldFocus = false;
+}
+
+function focusTodoPanel(root = document) {
+  if (!uiState.todoPanelVisible) {
+    return;
+  }
+
+  const shouldFocusEdit = Boolean(uiState.workspaceTodos.shouldFocusEditTodoId);
+  const target = shouldFocusEdit
+    ? root.querySelector("[data-workspace-todo-edit-input]")
+    : uiState.workspaceTodos.shouldFocusCreate
+      ? root.querySelector("[data-workspace-todo-input]")
+      : null;
+
+  if (target instanceof HTMLElement) {
+    target.focus({ preventScroll: true });
+    if ("select" in target && typeof target.select === "function") {
+      target.select();
+    }
+  }
+
+  uiState.workspaceTodos.shouldFocusEditTodoId = "";
+  uiState.workspaceTodos.shouldFocusCreate = false;
+}
+
+function renderTodoStatusIcon(done) {
+  if (done) {
+    return `
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M12 3.5a8.5 8.5 0 1 1-8.5 8.5A8.5 8.5 0 0 1 12 3.5Zm3.9 5.8-4.8 5.4-2.9-2.8-1.4 1.4 4.4 4.3 6.2-7-1.5-1.3Z" fill="currentColor"></path>
+      </svg>
+    `;
+  }
+
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M12 4a8 8 0 1 1-8 8 8 8 0 0 1 8-8Zm0 2a6 6 0 1 0 6 6 6 6 0 0 0-6-6Z" fill="currentColor"></path>
+    </svg>
+  `;
+}
+
+function renderTodoEmpty(title, copy) {
+  return `
+    <div class="workspace-todo-empty">
+      <strong>${escapeHtml(title)}</strong>
+      <span>${escapeHtml(copy)}</span>
+    </div>
+  `;
+}
+
+function renderTodoItem(todo) {
+  const isEditing = uiState.workspaceTodos.editTodoId === todo.id;
+  const isBusy = uiState.workspaceTodos.submitting;
+
+  if (isEditing) {
+    return `
+      <article class="workspace-todo-item is-editing ${todo.done ? "is-done" : ""}">
+        <div class="workspace-todo-item-main">
+          <button
+            type="button"
+            class="workspace-todo-toggle ${todo.done ? "is-done" : ""}"
+            data-action="toggle-workspace-todo-done"
+            data-todo-id="${escapeHtml(todo.id)}"
+            data-done="${todo.done ? "false" : "true"}"
+            aria-label="${todo.done ? "Mark task as open" : "Mark task as done"}"
+            ${isBusy ? "disabled" : ""}
+          >
+            ${renderTodoStatusIcon(todo.done)}
+          </button>
+          <form class="workspace-todo-edit-form" data-action="workspace-todo-edit" data-todo-id="${escapeHtml(todo.id)}">
+            <input
+              class="workspace-scm-input"
+              type="text"
+              value="${escapeHtml(uiState.workspaceTodos.editDraft)}"
+              data-workspace-todo-edit-input
+              spellcheck="false"
+              autocomplete="off"
+              placeholder="Update task"
+              ${isBusy ? "disabled" : ""}
+            />
+            <button type="submit" class="workspace-scm-primary-button" ${isBusy ? "disabled" : ""}>
+              Save
+            </button>
+            <button
+              type="button"
+              class="workspace-scm-ghost-button"
+              data-action="cancel-workspace-todo-edit"
+              ${isBusy ? "disabled" : ""}
+            >
+              Cancel
+            </button>
+          </form>
+        </div>
+      </article>
+    `;
+  }
+
+  return `
+    <article class="workspace-todo-item ${todo.done ? "is-done" : ""}">
+      <div class="workspace-todo-item-main">
+        <button
+          type="button"
+          class="workspace-todo-toggle ${todo.done ? "is-done" : ""}"
+          data-action="toggle-workspace-todo-done"
+          data-todo-id="${escapeHtml(todo.id)}"
+          data-done="${todo.done ? "false" : "true"}"
+          aria-label="${todo.done ? "Mark task as open" : "Mark task as done"}"
+          ${uiState.workspaceTodos.submitting ? "disabled" : ""}
+        >
+          ${renderTodoStatusIcon(todo.done)}
+        </button>
+        <div class="workspace-todo-copy">
+          <strong>${escapeHtml(todo.text)}</strong>
+          <span>${todo.done ? "Completed" : "Next up"}</span>
+        </div>
+        <div class="workspace-todo-actions">
+          <button
+            type="button"
+            class="workspace-scm-inline-action"
+            data-action="start-workspace-todo-edit"
+            data-todo-id="${escapeHtml(todo.id)}"
+            ${uiState.workspaceTodos.submitting ? "disabled" : ""}
+          >
+            Edit
+          </button>
+          <button
+            type="button"
+            class="workspace-scm-inline-action is-danger"
+            data-action="delete-workspace-todo"
+            data-todo-id="${escapeHtml(todo.id)}"
+            ${uiState.workspaceTodos.submitting ? "disabled" : ""}
+          >
+            Delete
+          </button>
+        </div>
+      </div>
+    </article>
+  `;
+}
+
+function renderTodoPanel(workspace) {
+  const summary = getWorkspaceTodoState(workspace);
+  const createDisabled = uiState.workspaceTodos.submitting;
+  const completedExpanded = !uiState.workspaceTodos.completedCollapsed;
+
+  return `
+    <div class="workspace-todo-backdrop" data-action="close-todo-panel">
+      <section class="workspace-todo-panel" role="dialog" aria-modal="true" aria-labelledby="todo-panel-title">
+        <header class="workspace-todo-panel-header">
+          <div class="workspace-todo-panel-heading">
+            <p class="workspace-todo-panel-mark">Tasks</p>
+            <div class="workspace-todo-panel-title-row">
+              <h2 id="todo-panel-title">${escapeHtml(workspace.name)}</h2>
+              <span class="workspace-todo-panel-state ${summary.openCount > 0 ? "is-dirty" : "is-clean"}">
+                ${escapeHtml(summary.openCount > 0 ? `${summary.openCount} open` : "All clear")}
+              </span>
+            </div>
+            <p class="workspace-todo-panel-copy">${escapeHtml(formatWorkspaceTodoSummary(summary))}</p>
+          </div>
+          <div class="workspace-todo-panel-actions">
+            <button
+              class="workspace-git-panel-button"
+              type="button"
+              data-action="close-todo-panel"
+              aria-label="Close tasks panel"
+              title="Close tasks panel"
+            >
+              ${renderCloseIcon()}
+            </button>
+          </div>
+        </header>
+        <div class="workspace-todo-panel-body">
+          <form class="workspace-todo-form" data-action="workspace-todo-create">
+            <input
+              class="workspace-scm-input"
+              type="text"
+              value="${escapeHtml(uiState.workspaceTodos.draft)}"
+              data-workspace-todo-input
+              spellcheck="false"
+              autocomplete="off"
+              placeholder="Add a task for this workspace"
+              ${createDisabled ? "disabled" : ""}
+            />
+            <button type="submit" class="workspace-scm-primary-button" ${createDisabled ? "disabled" : ""}>
+              ${createDisabled ? "Saving..." : "Add task"}
+            </button>
+          </form>
+
+          <section class="workspace-todo-section">
+            <header class="workspace-todo-section-header">
+              <div class="workspace-todo-section-title">
+                <strong>Open</strong>
+                <span>${summary.openCount}</span>
+              </div>
+            </header>
+            <div class="workspace-todo-list">
+              ${
+                summary.openTodos.length
+                  ? summary.openTodos.map((todo) => renderTodoItem(todo)).join("")
+                  : renderTodoEmpty(
+                      "Nothing queued",
+                      "Add a few next steps here so each workspace carries its own working context.",
+                    )
+              }
+            </div>
+          </section>
+
+          <section class="workspace-todo-section">
+            <button
+              type="button"
+              class="workspace-todo-section-toggle"
+              data-action="toggle-workspace-todo-completed"
+              aria-expanded="${completedExpanded ? "true" : "false"}"
+            >
+              <span class="workspace-todo-section-toggle-copy">
+                <strong>Completed</strong>
+                <span>${summary.completedCount} ${summary.completedCount === 1 ? "task" : "tasks"}</span>
+              </span>
+              <span class="workspace-todo-section-toggle-icon" aria-hidden="true">
+                ${renderChevronIcon(completedExpanded ? "up" : "down")}
+              </span>
+            </button>
+            ${
+              completedExpanded
+                ? `
+                  <div class="workspace-todo-list">
+                    ${
+                      summary.completedTodos.length
+                        ? summary.completedTodos.map((todo) => renderTodoItem(todo)).join("")
+                        : renderTodoEmpty(
+                            "No completed tasks yet",
+                            "Finished tasks stay here once you start checking things off.",
+                          )
+                    }
+                  </div>
+                `
+                : ""
+            }
+          </section>
+        </div>
+      </section>
+    </div>
+  `;
 }
 
 function renderQuickSwitcher(snapshot) {
@@ -5602,6 +7028,17 @@ function syncWorkspaceTabRail(activeWorkspaceId, workspaceCount) {
   const shell = document.querySelector("[data-workspace-tabs-shell]");
   const tabs = shell?.querySelector("[data-workspace-tabs]");
   if (!shell || !tabs) {
+    uiState.workspaceTabsLastActiveWorkspaceId = activeWorkspaceId;
+    uiState.workspaceTabsLastCount = workspaceCount;
+    return;
+  }
+
+  if (isWorkspaceTabDragActive()) {
+    if (Math.abs(tabs.scrollLeft - uiState.workspaceTabsScrollLeft) > 1) {
+      tabs.scrollLeft = uiState.workspaceTabsScrollLeft;
+    }
+    rememberWorkspaceTabsScroll(tabs);
+    syncWorkspaceTabsOverflow(tabs, shell);
     uiState.workspaceTabsLastActiveWorkspaceId = activeWorkspaceId;
     uiState.workspaceTabsLastCount = workspaceCount;
     return;
@@ -7930,15 +9367,16 @@ function renderPaneShell(pane, paneIndex) {
 }
 
 function renderContextMenu(contextMenu, workspace) {
-  const maxX = Math.max(20, window.innerWidth - 320);
-  const maxY = Math.max(20, window.innerHeight - 360);
-  const left = Math.min(contextMenu.x, maxX);
-  const top = Math.min(contextMenu.y, maxY);
   const canSplit = workspace.panes.length < 16;
   const canClose = workspace.panes.length > 1;
 
   return `
-    <div class="terminal-context-menu" style="left:${left}px; top:${top}px;">
+    <div
+      class="terminal-context-menu"
+      data-context-x="${contextMenu.x}"
+      data-context-y="${contextMenu.y}"
+      style="left:0; top:0; visibility:hidden;"
+    >
       <button class="terminal-context-item" data-action="context-copy-path">
         <span>Copy Path</span>
       </button>
@@ -7968,6 +9406,26 @@ function renderContextSplitAction(label, action, direction, shortcut, enabled) {
       <span class="terminal-context-shortcut">${shortcut}</span>
     </button>
   `;
+}
+
+function syncContextMenuPosition(root = app) {
+  const menu = root?.querySelector(".terminal-context-menu");
+  if (!(menu instanceof HTMLElement)) {
+    return;
+  }
+
+  const viewportMargin = 12;
+  const requestedX = Number(menu.dataset.contextX || 0);
+  const requestedY = Number(menu.dataset.contextY || 0);
+  const { width, height } = menu.getBoundingClientRect();
+  const maxLeft = Math.max(viewportMargin, window.innerWidth - width - viewportMargin);
+  const maxTop = Math.max(viewportMargin, window.innerHeight - height - viewportMargin);
+  const left = Math.min(Math.max(requestedX, viewportMargin), maxLeft);
+  const top = Math.min(Math.max(requestedY, viewportMargin), maxTop);
+
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+  menu.style.visibility = "visible";
 }
 
 function resolveFallbackPaneIdAfterClose(workspace, paneId) {
@@ -8480,42 +9938,6 @@ function focusLauncherInput({ select = false } = {}) {
     if (select) {
       input.select();
     }
-  });
-}
-
-function captureLauncherInputState(root = app) {
-  const input = root.querySelector("[data-launcher-path-input]");
-  if (!(input instanceof HTMLInputElement)) {
-    return null;
-  }
-
-  return {
-    wasFocused: document.activeElement === input,
-    selectionStart: input.selectionStart,
-    selectionEnd: input.selectionEnd,
-  };
-}
-
-function restoreLauncherInputState(state) {
-  if (!state?.wasFocused) {
-    return;
-  }
-
-  const input = app.querySelector("[data-launcher-path-input]");
-  if (!(input instanceof HTMLInputElement)) {
-    return;
-  }
-
-  requestAnimationFrame(() => {
-    input.focus();
-    const maxIndex = input.value.length;
-    const selectionStart = Number.isFinite(state.selectionStart)
-      ? Math.max(0, Math.min(maxIndex, state.selectionStart))
-      : maxIndex;
-    const selectionEnd = Number.isFinite(state.selectionEnd)
-      ? Math.max(selectionStart, Math.min(maxIndex, state.selectionEnd))
-      : selectionStart;
-    input.setSelectionRange(selectionStart, selectionEnd);
   });
 }
 

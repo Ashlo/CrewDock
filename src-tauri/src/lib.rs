@@ -4,10 +4,14 @@ mod session_manager;
 mod source_control;
 mod workspace_manager;
 
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
-    env, fs,
+    env,
+    ffi::{OsStr, OsString},
+    fs,
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
@@ -29,6 +33,8 @@ const MAX_INTERFACE_TEXT_SCALE: f64 = 1.2;
 const DEFAULT_TERMINAL_FONT_SIZE: f64 = 13.5;
 const MIN_TERMINAL_FONT_SIZE: f64 = 11.0;
 const MAX_TERMINAL_FONT_SIZE: f64 = 18.0;
+const LOGIN_SHELL_PATH_START_MARKER: &[u8] = b"__CREWDOCK_PATH_START__";
+const LOGIN_SHELL_PATH_END_MARKER: &[u8] = b"__CREWDOCK_PATH_END__";
 
 use events::emit_snapshot;
 use persistence::resolve_persistence_path;
@@ -96,9 +102,18 @@ struct WorkspaceRecord {
     layout: LayoutPreset,
     panes: Vec<PaneRecord>,
     pane_layout: PaneLayout,
+    todos: Vec<WorkspaceTodoRecord>,
     started: bool,
     git: Option<GitDetailSnapshot>,
     codex_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceTodoRecord {
+    id: String,
+    text: String,
+    done: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -160,6 +175,7 @@ impl RuntimeState {
             layout: workspace.layout.clone(),
             panes: workspace.panes.clone(),
             pane_layout: workspace.pane_layout.clone(),
+            todos: workspace.todos.clone(),
             git_detail: workspace.git.clone(),
         });
         let active_workspace_name = active_workspace_record.map(|workspace| workspace.name.clone());
@@ -226,6 +242,7 @@ impl RuntimeState {
     }
 
     fn refresh_codex_cli(&mut self) {
+        sync_process_path_with_login_shell(&self.shell);
         self.codex_cli = detect_codex_cli_snapshot(self.settings.codex_cli_path.as_deref());
     }
 
@@ -490,6 +507,7 @@ struct WorkspaceSnapshot {
     layout: LayoutPreset,
     panes: Vec<PaneRecord>,
     pane_layout: PaneLayout,
+    todos: Vec<WorkspaceTodoRecord>,
     git_detail: Option<GitDetailSnapshot>,
 }
 
@@ -750,6 +768,100 @@ fn detect_codex_cli_snapshot(configured_path: Option<&str>) -> CodexCliSnapshot 
         configured_candidate,
         configured_error,
     )
+}
+
+fn sync_process_path_with_login_shell(shell: &str) {
+    let current_path = env::var_os("PATH");
+    let Some(login_shell_path) = read_login_shell_path(shell) else {
+        return;
+    };
+    let Some(merged_path) =
+        merge_path_values(Some(login_shell_path.as_os_str()), current_path.as_deref())
+    else {
+        return;
+    };
+
+    if current_path.as_deref() == Some(merged_path.as_os_str()) {
+        return;
+    }
+
+    env::set_var("PATH", merged_path);
+}
+
+fn read_login_shell_path(shell: &str) -> Option<OsString> {
+    let shell = shell.trim();
+    if shell.is_empty() {
+        return None;
+    }
+
+    let output = ProcessCommand::new(shell)
+        .arg("-l")
+        .arg("-c")
+        .arg("printf '__CREWDOCK_PATH_START__%s__CREWDOCK_PATH_END__' \"$PATH\"")
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    extract_login_shell_path(&output.stdout)
+}
+
+fn extract_login_shell_path(output: &[u8]) -> Option<OsString> {
+    let start = find_subslice(output, LOGIN_SHELL_PATH_START_MARKER)?;
+    let start = start + LOGIN_SHELL_PATH_START_MARKER.len();
+    let end = find_subslice(&output[start..], LOGIN_SHELL_PATH_END_MARKER)?;
+    let path_bytes = &output[start..start + end];
+    if path_bytes.is_empty() {
+        return None;
+    }
+
+    #[cfg(unix)]
+    {
+        Some(OsString::from_vec(path_bytes.to_vec()))
+    }
+
+    #[cfg(not(unix))]
+    {
+        Some(OsString::from(
+            String::from_utf8_lossy(path_bytes).into_owned(),
+        ))
+    }
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn merge_path_values(preferred: Option<&OsStr>, fallback: Option<&OsStr>) -> Option<OsString> {
+    let mut merged = Vec::new();
+    let mut seen = HashSet::new();
+
+    for raw_path in [preferred, fallback].into_iter().flatten() {
+        for path in env::split_paths(raw_path) {
+            if path.as_os_str().is_empty() {
+                continue;
+            }
+
+            let key = path.as_os_str().to_os_string();
+            if seen.insert(key) {
+                merged.push(path);
+            }
+        }
+    }
+
+    if merged.is_empty() {
+        return None;
+    }
+
+    env::join_paths(merged).ok()
 }
 
 fn build_codex_cli_snapshot(
@@ -1492,6 +1604,123 @@ fn rename_workspace(
             .map_err(|_| "failed to acquire application state".to_string())?;
 
         workspace_manager::rename_workspace_in_runtime(&mut runtime, &workspace_id, &name)?;
+        runtime.build_snapshot()
+    };
+
+    emit_snapshot(&app, &snapshot)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn add_workspace_todo(
+    workspace_id: String,
+    text: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let snapshot = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        workspace_manager::add_workspace_todo_in_runtime(&mut runtime, &workspace_id, &text)?;
+        runtime.build_snapshot()
+    };
+
+    emit_snapshot(&app, &snapshot)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn update_workspace_todo(
+    workspace_id: String,
+    todo_id: String,
+    text: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let snapshot = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        workspace_manager::update_workspace_todo_in_runtime(
+            &mut runtime,
+            &workspace_id,
+            &todo_id,
+            &text,
+        )?;
+        runtime.build_snapshot()
+    };
+
+    emit_snapshot(&app, &snapshot)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn set_workspace_todo_done(
+    workspace_id: String,
+    todo_id: String,
+    done: bool,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let snapshot = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        workspace_manager::set_workspace_todo_done_in_runtime(
+            &mut runtime,
+            &workspace_id,
+            &todo_id,
+            done,
+        )?;
+        runtime.build_snapshot()
+    };
+
+    emit_snapshot(&app, &snapshot)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn delete_workspace_todo(
+    workspace_id: String,
+    todo_id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let snapshot = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        workspace_manager::delete_workspace_todo_in_runtime(&mut runtime, &workspace_id, &todo_id)?;
+        runtime.build_snapshot()
+    };
+
+    emit_snapshot(&app, &snapshot)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn reorder_workspace(
+    workspace_id: String,
+    target_index: usize,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let snapshot = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        workspace_manager::reorder_workspace_in_runtime(&mut runtime, &workspace_id, target_index)?;
         runtime.build_snapshot()
     };
 
@@ -3481,6 +3710,15 @@ fn normalize_workspace_name(raw: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
+fn normalize_workspace_todo_text(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("workspace task cannot be empty".to_string());
+    }
+
+    Ok(trimmed.to_string())
+}
+
 fn relabel_panes(panes: &mut [PaneRecord]) {
     for (index, pane) in panes.iter_mut().enumerate() {
         pane.label = format!("Shell {:02}", index + 1);
@@ -3757,6 +3995,11 @@ pub fn run() {
             reset_to_launcher,
             create_workspace,
             rename_workspace,
+            add_workspace_todo,
+            update_workspace_todo,
+            set_workspace_todo_done,
+            delete_workspace_todo,
+            reorder_workspace,
             complete_launcher_input,
             set_settings,
             set_theme,
@@ -3803,7 +4046,9 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use std::{
-        env, fs,
+        env,
+        ffi::{OsStr, OsString},
+        fs,
         path::{Path, PathBuf},
         process::Command,
         time::{SystemTime, UNIX_EPOCH},
@@ -3812,12 +4057,14 @@ mod tests {
     use super::{
         build_codex_cli_snapshot, collect_git_detail, collect_git_detail_with_binary,
         compare_codex_cli_versions, complete_launcher_input_for_base, default_launcher_path,
-        execute_launcher_command, extract_navigation_target, layout_for_pane_count, layout_presets,
-        normalize_workspace_path, parse_battery_snapshot, parse_codex_cli_version,
-        parse_git_status_porcelain, persistence::ActivityEventKind, prepare_workspace_launch,
-        resolve_navigation_path, validate_git_cli_arg, BatteryState, CodexCliCandidateSnapshot,
-        CodexCliSelectionMode, CodexCliSource, CodexCliStatus, GitFileKind, GitState, RuntimeState,
-        ThemeId, DEFAULT_INTERFACE_TEXT_SCALE, DEFAULT_TERMINAL_FONT_SIZE,
+        execute_launcher_command, extract_login_shell_path, extract_navigation_target,
+        layout_for_pane_count, layout_presets, merge_path_values, normalize_workspace_path,
+        parse_battery_snapshot, parse_codex_cli_version, parse_git_status_porcelain,
+        persistence::ActivityEventKind, prepare_workspace_launch, resolve_navigation_path,
+        validate_git_cli_arg, BatteryState, CodexCliCandidateSnapshot, CodexCliSelectionMode,
+        CodexCliSource, CodexCliStatus, GitFileKind, GitState, RuntimeState, ThemeId,
+        WorkspaceTodoRecord,
+        DEFAULT_INTERFACE_TEXT_SCALE, DEFAULT_TERMINAL_FONT_SIZE,
     };
 
     #[test]
@@ -3923,6 +4170,183 @@ mod tests {
         assert_eq!(persisted.settings.interface_text_scale, Some(1.0));
         assert_eq!(persisted.settings.terminal_font_size, Some(13.5));
         assert_eq!(persisted.settings.openai_api_key, None);
+    }
+
+    #[test]
+    fn reordering_workspaces_updates_persisted_order_and_active_index() {
+        let mut runtime = RuntimeState::seeded();
+        let cwd = normalize_workspace_path(".").expect("cwd should resolve");
+
+        let mut first = runtime.build_workspace_record(&cwd, 1, None).unwrap();
+        first.name = "Alpha".to_string();
+        let mut second = runtime.build_workspace_record(&cwd, 2, None).unwrap();
+        second.name = "Beta".to_string();
+        let mut third = runtime.build_workspace_record(&cwd, 4, None).unwrap();
+        third.name = "Gamma".to_string();
+
+        runtime.active_workspace_id = Some(second.id.clone());
+        runtime.workspaces.push(first.clone());
+        runtime.workspaces.push(second.clone());
+        runtime.workspaces.push(third.clone());
+
+        super::workspace_manager::reorder_workspace_in_runtime(&mut runtime, &first.id, 2)
+            .expect("workspace reorder should succeed");
+
+        assert_eq!(
+            runtime
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Beta", "Gamma", "Alpha"]
+        );
+        assert_eq!(
+            runtime.active_workspace_id.as_deref(),
+            Some(second.id.as_str())
+        );
+
+        let persisted = runtime.persisted_state();
+        assert_eq!(persisted.active_workspace_index, Some(0));
+        assert_eq!(
+            persisted
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.name.as_deref().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            vec!["Beta", "Gamma", "Alpha"]
+        );
+    }
+
+    #[test]
+    fn reordering_workspace_to_end_uses_post_removal_insertion_index() {
+        let mut runtime = RuntimeState::seeded();
+        let cwd = normalize_workspace_path(".").expect("cwd should resolve");
+
+        let mut first = runtime.build_workspace_record(&cwd, 1, None).unwrap();
+        first.name = "Alpha".to_string();
+        let mut second = runtime.build_workspace_record(&cwd, 2, None).unwrap();
+        second.name = "Beta".to_string();
+        let mut third = runtime.build_workspace_record(&cwd, 4, None).unwrap();
+        third.name = "Gamma".to_string();
+
+        runtime.workspaces.push(first.clone());
+        runtime.workspaces.push(second.clone());
+        runtime.workspaces.push(third.clone());
+
+        super::workspace_manager::reorder_workspace_in_runtime(&mut runtime, &first.id, 2)
+            .expect("workspace reorder should allow end insertion");
+
+        assert_eq!(
+            runtime
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Beta", "Gamma", "Alpha"]
+        );
+    }
+
+    #[test]
+    fn closing_active_workspace_after_reorder_uses_new_neighbor_order() {
+        let mut runtime = RuntimeState::seeded();
+        let cwd = normalize_workspace_path(".").expect("cwd should resolve");
+
+        let mut first = runtime.build_workspace_record(&cwd, 1, None).unwrap();
+        first.name = "Alpha".to_string();
+        let mut second = runtime.build_workspace_record(&cwd, 2, None).unwrap();
+        second.name = "Beta".to_string();
+        let mut third = runtime.build_workspace_record(&cwd, 4, None).unwrap();
+        third.name = "Gamma".to_string();
+
+        runtime.active_workspace_id = Some(second.id.clone());
+        runtime.workspaces.push(first.clone());
+        runtime.workspaces.push(second.clone());
+        runtime.workspaces.push(third.clone());
+
+        super::workspace_manager::reorder_workspace_in_runtime(&mut runtime, &first.id, 2)
+            .expect("workspace reorder should succeed");
+
+        let _ = super::workspace_manager::close_workspace_in_runtime(&mut runtime, &second.id)
+            .expect("closing the reordered active workspace should succeed");
+
+        assert_eq!(
+            runtime.active_workspace_id.as_deref(),
+            Some(third.id.as_str())
+        );
+        assert_eq!(
+            runtime
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Gamma", "Alpha"]
+        );
+    }
+
+    #[test]
+    fn workspace_todos_preserve_open_and_completed_ordering() {
+        let mut runtime = RuntimeState::seeded();
+        let cwd = normalize_workspace_path(".").expect("cwd should resolve");
+        let workspace = runtime.build_workspace_record(&cwd, 1, None).unwrap();
+        let workspace_id = workspace.id.clone();
+        runtime.workspaces.push(workspace);
+
+        super::workspace_manager::add_workspace_todo_in_runtime(
+            &mut runtime,
+            &workspace_id,
+            "Draft changelog",
+        )
+        .expect("should add first todo");
+        super::workspace_manager::add_workspace_todo_in_runtime(
+            &mut runtime,
+            &workspace_id,
+            "Review PR",
+        )
+        .expect("should add second todo");
+
+        let first_todo_id = runtime.workspaces[0].todos[0].id.clone();
+        let second_todo_id = runtime.workspaces[0].todos[1].id.clone();
+
+        super::workspace_manager::set_workspace_todo_done_in_runtime(
+            &mut runtime,
+            &workspace_id,
+            &first_todo_id,
+            true,
+        )
+        .expect("should complete first todo");
+        super::workspace_manager::update_workspace_todo_in_runtime(
+            &mut runtime,
+            &workspace_id,
+            &second_todo_id,
+            "Review PR thoroughly",
+        )
+        .expect("should rename second todo");
+        super::workspace_manager::set_workspace_todo_done_in_runtime(
+            &mut runtime,
+            &workspace_id,
+            &first_todo_id,
+            false,
+        )
+        .expect("should reopen first todo");
+        super::workspace_manager::delete_workspace_todo_in_runtime(
+            &mut runtime,
+            &workspace_id,
+            &second_todo_id,
+        )
+        .expect("should delete second todo");
+
+        assert_eq!(
+            runtime.workspaces[0]
+                .todos
+                .iter()
+                .map(|todo| (todo.text.as_str(), todo.done))
+                .collect::<Vec<_>>(),
+            vec![("Draft changelog", false)]
+        );
+        assert!(
+            super::workspace_manager::add_workspace_todo_in_runtime(&mut runtime, &workspace_id, "   ")
+                .is_err()
+        );
     }
 
     #[test]
@@ -4045,6 +4469,85 @@ mod tests {
 
         assert_eq!(runtime.workspaces.len(), 1);
         assert_eq!(runtime.workspaces[0].name, "Sprint Board");
+    }
+
+    #[test]
+    fn persisted_state_keeps_workspace_todos_scoped_per_workspace() {
+        let mut runtime = RuntimeState::seeded();
+        let cwd = normalize_workspace_path(".").expect("cwd should resolve");
+
+        let first = runtime.build_workspace_record(&cwd, 1, None).unwrap();
+        let second = runtime.build_workspace_record(&cwd, 2, None).unwrap();
+
+        runtime.active_workspace_id = Some(first.id.clone());
+        runtime.workspaces.push(first.clone());
+        runtime.workspaces.push(second.clone());
+
+        runtime.workspaces[0].todos = vec![
+            WorkspaceTodoRecord {
+                id: "todo-1".to_string(),
+                text: "Check logs".to_string(),
+                done: false,
+            },
+            WorkspaceTodoRecord {
+                id: "todo-2".to_string(),
+                text: "Archive notes".to_string(),
+                done: true,
+            },
+        ];
+
+        let persisted = runtime.persisted_state();
+        assert_eq!(persisted.workspaces[0].todos.len(), 2);
+        assert!(persisted.workspaces[1].todos.is_empty());
+
+        let snapshot = runtime.build_snapshot();
+        assert_eq!(
+            snapshot
+                .active_workspace
+                .expect("active workspace should exist")
+                .todos
+                .iter()
+                .map(|todo| todo.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Check logs", "Archive notes"]
+        );
+    }
+
+    #[test]
+    fn persisted_workspace_todos_are_restored_from_disk() {
+        let fixture = TestWorkspace::new();
+        let persistence_path = fixture.root_dir().join("workspaces.json");
+        let workspace_path = fixture.project_dir().display().to_string();
+        fs::write(
+            &persistence_path,
+            format!(
+                r#"{{"workspaces":[{{"path":"{workspace_path}","paneCount":1,"todos":[{{"id":"todo-1","text":"Ship release","done":true}},{{"id":"todo-1","text":"Review launch notes","done":false}},{{"text":"  "}},{{"text":"Prep demo","done":false}}]}}]}}"#
+            ),
+        )
+        .expect("should write persisted state");
+
+        let mut runtime = RuntimeState::seeded();
+        runtime
+            .load_persisted_from_disk(persistence_path)
+            .expect("should load persisted state");
+
+        assert_eq!(runtime.workspaces.len(), 1);
+        assert_eq!(
+            runtime.workspaces[0]
+                .todos
+                .iter()
+                .map(|todo| (todo.text.as_str(), todo.done))
+                .collect::<Vec<_>>(),
+            vec![
+                ("Review launch notes", false),
+                ("Prep demo", false),
+                ("Ship release", true),
+            ]
+        );
+        assert_ne!(
+            runtime.workspaces[0].todos[1].id,
+            runtime.workspaces[0].todos[2].id
+        );
     }
 
     #[test]
@@ -4210,6 +4713,33 @@ mod tests {
         assert!(compare_codex_cli_versions("0.116.0", "0.42.0").is_gt());
         assert!(compare_codex_cli_versions("0.116.0", "0.116.0").is_eq());
         assert!(compare_codex_cli_versions("0.98.0", "0.116.0").is_lt());
+    }
+
+    #[test]
+    fn login_shell_path_extraction_ignores_shell_noise() {
+        let output = b"shell startup noise\n__CREWDOCK_PATH_START__/usr/local/bin:/opt/homebrew/bin__CREWDOCK_PATH_END__";
+
+        assert_eq!(
+            extract_login_shell_path(output),
+            Some(OsString::from("/usr/local/bin:/opt/homebrew/bin"))
+        );
+    }
+
+    #[test]
+    fn merge_path_values_prefers_login_shell_entries_without_duplicates() {
+        let merged = merge_path_values(
+            Some(OsStr::new("/usr/local/bin:/opt/homebrew/bin")),
+            Some(OsStr::new("/usr/bin:/usr/local/bin")),
+        )
+        .expect("merged PATH should be available");
+
+        let merged_entries = env::split_paths(&merged)
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            merged_entries,
+            vec!["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin"]
+        );
     }
 
     #[test]
