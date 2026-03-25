@@ -37,6 +37,25 @@ const WORKSPACE_TAB_EDGE_SCROLL_MAX_PX_PER_FRAME = 18;
 const WORKSPACE_TAB_CLICK_SUPPRESS_MS = 250;
 const LAUNCHER_COMMANDS = Object.freeze(["help", "pwd", "ls", "cd", "open", "clear"]);
 const PATH_AWARE_LAUNCHER_COMMANDS = new Set(["ls", "cd", "open"]);
+const RENDER_STRIP = 1 << 0;
+const RENDER_STAGE = 1 << 1;
+const RENDER_STATUS = 1 << 2;
+const RENDER_ACTIVITY = 1 << 3;
+const RENDER_MODAL = 1 << 4;
+const RENDER_CONTEXT = 1 << 5;
+const RENDER_TERMINALS = 1 << 6;
+const RENDER_ALL = RENDER_STRIP
+  | RENDER_STAGE
+  | RENDER_STATUS
+  | RENDER_ACTIVITY
+  | RENDER_MODAL
+  | RENDER_CONTEXT
+  | RENDER_TERMINALS;
+const RENDER_PANEL_SURFACES = RENDER_STATUS | RENDER_ACTIVITY | RENDER_MODAL | RENDER_CONTEXT;
+const RENDER_ACTIVITY_SURFACES = RENDER_STRIP | RENDER_STATUS | RENDER_ACTIVITY;
+const RENDER_TODO_SURFACES = RENDER_STATUS | RENDER_MODAL;
+const RENDER_SOURCE_CONTROL_SURFACES = RENDER_STRIP | RENDER_STATUS | RENDER_MODAL;
+const RENDER_CODEX_SURFACES = RENDER_STATUS | RENDER_MODAL;
 
 const THEME_REGISTRY = Object.freeze({
   "one-dark": {
@@ -589,6 +608,7 @@ const {
   workspaceScreens,
   terminalViewportLines,
 } = runtimeStore;
+window.__crewdockRenderDebug = runtimeStore.renderMetrics;
 
 void init();
 
@@ -602,7 +622,7 @@ async function init() {
     await bridge.listenState((snapshot) => {
       uiState.snapshot = snapshot;
       applySnapshotSettings(snapshot);
-      render();
+      requestRender(RENDER_ALL);
     });
   }
 
@@ -615,8 +635,13 @@ async function init() {
   if (bridge.listenRuntimeEvents) {
     await bridge.listenRuntimeEvents((event) => {
       const handledSourceControl = handleSourceControlRuntimeEvent(event);
-      recordRuntimeEvent(event);
-      render();
+      const handledActivity = recordRuntimeEvent(event);
+      if (handledSourceControl) {
+        requestSourceControlRender();
+      }
+      if (handledActivity) {
+        requestActivityRender();
+      }
       if (
         handledSourceControl
         && event?.kind === "gitTaskSnapshot"
@@ -1254,7 +1279,7 @@ function closeSettingsSheet({ restoreSnapshot = true } = {}) {
   }
 
   hideSettingsSheet({ restoreSnapshot });
-  render();
+  requestPanelSurfacesRender();
 }
 
 function hasSettingsAppearanceChanges(snapshot = uiState.snapshot) {
@@ -1781,7 +1806,7 @@ function bindModalLayerControls(root = document) {
       event.preventDefault();
       event.stopPropagation();
       closeSourceControlPanel();
-      render();
+      requestSourceControlRender();
       return;
     }
 
@@ -1789,7 +1814,7 @@ function bindModalLayerControls(root = document) {
       event.preventDefault();
       event.stopPropagation();
       closeSourceControlPanel();
-      render();
+      requestSourceControlRender();
       return;
     }
 
@@ -1798,7 +1823,7 @@ function bindModalLayerControls(root = document) {
       event.preventDefault();
       event.stopPropagation();
       closeQuickSwitcher();
-      render();
+      requestRender(RENDER_MODAL);
       return;
     }
 
@@ -1806,7 +1831,7 @@ function bindModalLayerControls(root = document) {
       event.preventDefault();
       event.stopPropagation();
       closeQuickSwitcher();
-      render();
+      requestRender(RENDER_MODAL);
     }
   });
 }
@@ -1926,7 +1951,7 @@ async function handleClick(event) {
     closeQuickSwitcher();
     uiState.pendingWorkspaceDraft = null;
     uiState.contextMenu = null;
-    render();
+    requestPanelSurfacesRender();
     return;
   }
 
@@ -1939,7 +1964,7 @@ async function handleClick(event) {
     const nextSection = normalizeSettingsSection(target.dataset.settingsSection);
     if (uiState.settingsSection !== nextSection) {
       uiState.settingsSection = nextSection;
-      render();
+      requestRender(RENDER_MODAL);
     }
     return;
   }
@@ -1967,13 +1992,13 @@ async function handleClick(event) {
 
   if (target.dataset.action === "toggle-todo-panel") {
     toggleTodoPanel();
-    render({ refreshVisibleTerminals: false });
+    requestPanelSurfacesRender();
     return;
   }
 
   if (target.dataset.action === "close-todo-panel") {
     if (closeTodoPanel()) {
-      render({ refreshVisibleTerminals: false });
+      requestTodoRender();
     }
     return;
   }
@@ -1985,7 +2010,7 @@ async function handleClick(event) {
 
   if (target.dataset.action === "close-codex-modal") {
     if (closeCodexModal()) {
-      render({ refreshVisibleTerminals: false });
+      requestCodexRender();
     }
     return;
   }
@@ -1999,7 +2024,7 @@ async function handleClick(event) {
     const sessionId = String(target.dataset.sessionId || "");
     if (sessionId && uiState.codexSelectedSessionId !== sessionId) {
       uiState.codexSelectedSessionId = sessionId;
-      render({ refreshVisibleTerminals: false });
+      requestRender(RENDER_MODAL);
     }
     return;
   }
@@ -2010,7 +2035,7 @@ async function handleClick(event) {
     const pane = workspace?.panes?.find((entry) => entry.id === paneId) || null;
     if (paneId && isCodexPaneReady(pane) && uiState.codexTargetPaneId !== paneId) {
       uiState.codexTargetPaneId = paneId;
-      render({ refreshVisibleTerminals: false });
+      requestRender(RENDER_MODAL);
     }
     return;
   }
@@ -2027,7 +2052,7 @@ async function handleClick(event) {
 
   if (target.dataset.action === "toggle-system-health-panel") {
     toggleSystemHealthPanel();
-    render({ refreshVisibleTerminals: false });
+    requestPanelSurfacesRender();
     if (uiState.systemHealthPanelVisible) {
       void loadSystemHealthSnapshot({ force: true });
     }
@@ -2036,7 +2061,7 @@ async function handleClick(event) {
 
   if (target.dataset.action === "close-system-health-panel") {
     if (closeSystemHealthPanel()) {
-      render({ refreshVisibleTerminals: false });
+      requestRender(RENDER_STATUS);
     }
     return;
   }
@@ -2048,13 +2073,13 @@ async function handleClick(event) {
 
   if (target.dataset.action === "toggle-activity-rail") {
     toggleActivityRail();
-    render();
+    requestPanelSurfacesRender();
     return;
   }
 
   if (target.dataset.action === "close-activity-rail") {
     uiState.activityRailVisible = false;
-    render();
+    requestRender(RENDER_STATUS | RENDER_ACTIVITY);
     return;
   }
 
@@ -2062,14 +2087,14 @@ async function handleClick(event) {
     const nextScope = normalizeActivityScope(target.dataset.activityScope, uiState.snapshot);
     if (uiState.activityRailScope !== nextScope) {
       uiState.activityRailScope = nextScope;
-      render();
+      requestRender(RENDER_ACTIVITY);
     }
     return;
   }
 
   if (target.dataset.action === "mark-all-activity-seen") {
     if (clearAllActivityAttention()) {
-      render();
+      requestActivityRender();
     }
     return;
   }
@@ -2093,32 +2118,32 @@ async function handleClick(event) {
 
   if (target.dataset.action === "close-git-panel") {
     closeSourceControlPanel();
-    render();
+    requestSourceControlRender();
     return;
   }
 
   if (target.dataset.action === "close-quick-switcher") {
     closeQuickSwitcher();
-    render();
+    requestRender(RENDER_MODAL);
     return;
   }
 
   if (target.dataset.action === "toggle-workspace-todo-completed") {
     uiState.workspaceTodos.completedCollapsed = !uiState.workspaceTodos.completedCollapsed;
-    render({ refreshVisibleTerminals: false });
+    requestRender(RENDER_MODAL);
     return;
   }
 
   if (target.dataset.action === "start-workspace-todo-edit") {
     const todoId = String(target.dataset.todoId || "");
     startWorkspaceTodoEdit(todoId);
-    render({ refreshVisibleTerminals: false });
+    requestRender(RENDER_MODAL);
     return;
   }
 
   if (target.dataset.action === "cancel-workspace-todo-edit") {
     cancelWorkspaceTodoEdit();
-    render({ refreshVisibleTerminals: false });
+    requestRender(RENDER_MODAL);
     return;
   }
 
@@ -2173,7 +2198,7 @@ async function handleClick(event) {
 
     closeQuickSwitcher();
     startWorkspaceRename(workspaceId);
-    render();
+    requestRender(RENDER_STRIP);
     return;
   }
 
@@ -2184,7 +2209,7 @@ async function handleClick(event) {
 
   if (target.dataset.action === "cancel-layout-picker") {
     uiState.pendingWorkspaceDraft = null;
-    render();
+    requestRender(RENDER_MODAL);
     return;
   }
 
@@ -2228,7 +2253,7 @@ async function handleClick(event) {
       ...uiState.pendingWorkspaceDraft,
       paneCount: clampPaneCount(uiState.pendingWorkspaceDraft.paneCount + delta),
     };
-    render();
+    requestRender(RENDER_MODAL);
     return;
   }
 
@@ -2241,7 +2266,7 @@ async function handleClick(event) {
       ...uiState.pendingWorkspaceDraft,
       paneCount: clampPaneCount(Number(target.dataset.paneCount || uiState.pendingWorkspaceDraft.paneCount)),
     };
-    render();
+    requestRender(RENDER_MODAL);
     return;
   }
 
@@ -2310,7 +2335,7 @@ function handleContextMenu(event) {
   const pane = event.target.closest("[data-pane-id]");
   if (!pane || !uiState.snapshot?.activeWorkspace) {
     uiState.contextMenu = null;
-    render();
+    requestRender(RENDER_CONTEXT);
     return;
   }
 
@@ -2326,7 +2351,7 @@ function handleContextMenu(event) {
     x: event.clientX,
     y: event.clientY,
   };
-  render();
+  requestRender(RENDER_CONTEXT);
 }
 
 function handleMouseDown(event) {
@@ -2360,16 +2385,16 @@ function handlePointerDown(event) {
     }
   }
 
-  let shouldRender = false;
+  let renderMask = 0;
 
   if (uiState.sourceControl.activeRowMenuKey && !target?.closest("[data-scm-row-menu-shell]")) {
     closeSourceControlRowMenu();
-    shouldRender = true;
+    renderMask |= RENDER_MODAL;
   }
 
   if (uiState.contextMenu && !target?.closest(".terminal-context-menu")) {
     uiState.contextMenu = null;
-    shouldRender = true;
+    renderMask |= RENDER_CONTEXT;
   }
 
   if (
@@ -2378,11 +2403,11 @@ function handlePointerDown(event) {
     && target?.closest('[data-action="toggle-system-health-panel"]') == null
   ) {
     closeSystemHealthPanel();
-    shouldRender = true;
+    renderMask |= RENDER_STATUS;
   }
 
-  if (shouldRender) {
-    render({ refreshVisibleTerminals: false });
+  if (renderMask) {
+    requestRender(renderMask);
   }
 }
 
@@ -3135,7 +3160,7 @@ function handleWindowFocus() {
   const activeWorkspaceId = uiState.snapshot?.activeWorkspaceId || null;
   const didClearAttention = markWorkspaceAttentionSeen(activeWorkspaceId);
   if (didClearAttention && activeWorkspaceId) {
-    render();
+    requestActivityRender();
   }
   scheduleVisibleTerminalRefresh();
 }
@@ -3230,7 +3255,7 @@ function handleInput(event) {
   const branchSearchInput = event.target.closest("[data-scm-branch-search]");
   if (branchSearchInput) {
     uiState.sourceControl.branchSearch = branchSearchInput.value;
-    render();
+    requestSourceControlRender();
     return;
   }
 
@@ -3257,7 +3282,7 @@ function handleInput(event) {
     uiState.quickSwitcherQuery = quickSwitcherInput.value;
     syncQuickSwitcherCursor();
     uiState.quickSwitcherShouldFocus = true;
-    render();
+    requestRender(RENDER_MODAL);
     return;
   }
 
@@ -3300,7 +3325,7 @@ async function handleChange(event) {
     ...uiState.pendingWorkspaceDraft,
     paneCount: clampPaneCount(Number(countInput.value || uiState.pendingWorkspaceDraft.paneCount)),
   };
-  render();
+  requestRender(RENDER_MODAL);
 }
 
 async function handleKeyDown(event) {
@@ -3314,7 +3339,7 @@ async function handleKeyDown(event) {
   if (workspaceTodoEditInput && event.key === "Escape") {
     event.preventDefault();
     cancelWorkspaceTodoEdit();
-    render({ refreshVisibleTerminals: false });
+    requestTodoRender();
     return;
   }
 
@@ -3322,7 +3347,7 @@ async function handleKeyDown(event) {
   if (workspaceTodoInput && event.key === "Escape") {
     event.preventDefault();
     closeTodoPanel();
-    render({ refreshVisibleTerminals: false });
+    requestTodoRender();
     return;
   }
 
@@ -3333,7 +3358,7 @@ async function handleKeyDown(event) {
     if (event.key === "Escape") {
       event.preventDefault();
       closeQuickSwitcher();
-      render();
+      requestPanelSurfacesRender();
       return;
     }
 
@@ -3341,7 +3366,7 @@ async function handleKeyDown(event) {
       event.preventDefault();
       moveQuickSwitcherCursor(1, items.length);
       uiState.quickSwitcherShouldFocus = true;
-      render();
+      requestRender(RENDER_MODAL);
       return;
     }
 
@@ -3349,7 +3374,7 @@ async function handleKeyDown(event) {
       event.preventDefault();
       moveQuickSwitcherCursor(-1, items.length);
       uiState.quickSwitcherShouldFocus = true;
-      render();
+      requestRender(RENDER_MODAL);
       return;
     }
 
@@ -3369,7 +3394,7 @@ async function handleKeyDown(event) {
     if (event.key === "Escape") {
       event.preventDefault();
       cancelWorkspaceRename();
-      render();
+      requestRender(RENDER_STRIP);
     }
     return;
   }
@@ -3385,21 +3410,21 @@ async function handleKeyDown(event) {
     closeQuickSwitcher();
     uiState.pendingWorkspaceDraft = null;
     uiState.contextMenu = null;
-    render();
+    requestPanelSurfacesRender();
     return;
   }
 
   if ((event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === "k") {
     event.preventDefault();
     openQuickSwitcher();
-    render();
+    requestPanelSurfacesRender();
     return;
   }
 
   if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "a") {
     event.preventDefault();
     toggleActivityRail();
-    render();
+    requestPanelSurfacesRender();
     return;
   }
 
@@ -3407,38 +3432,39 @@ async function handleKeyDown(event) {
     event.preventDefault();
     if (uiState.gitPanelVisible) {
       closeSourceControlPanel();
+      requestSourceControlRender();
     } else {
       await openSourceControlPanel({ force: true });
+      return;
     }
-    render();
     return;
   }
 
   if (uiState.codexModalVisible && event.key === "Escape") {
     event.preventDefault();
     closeCodexModal();
-    render({ refreshVisibleTerminals: false });
+    requestCodexRender();
     return;
   }
 
   if (uiState.todoPanelVisible && event.key === "Escape") {
     event.preventDefault();
     closeTodoPanel();
-    render({ refreshVisibleTerminals: false });
+    requestTodoRender();
     return;
   }
 
   if (uiState.systemHealthPanelVisible && event.key === "Escape") {
     event.preventDefault();
     closeSystemHealthPanel();
-    render({ refreshVisibleTerminals: false });
+    requestRender(RENDER_STATUS);
     return;
   }
 
   if (uiState.quickSwitcherVisible && event.key === "Escape") {
     event.preventDefault();
     closeQuickSwitcher();
-    render();
+    requestRender(RENDER_MODAL);
     return;
   }
 
@@ -3451,15 +3477,15 @@ async function handleKeyDown(event) {
   if (uiState.gitPanelVisible && event.key === "Escape") {
     event.preventDefault();
     if (closeSourceControlPublishModal()) {
-      render();
+      requestRender(RENDER_MODAL);
       return;
     }
     if (closeSourceControlRowMenu()) {
-      render();
+      requestRender(RENDER_MODAL);
       return;
     }
     closeSourceControlPanel();
-    render();
+    requestSourceControlRender();
     return;
   }
 
@@ -3478,7 +3504,7 @@ async function handleKeyDown(event) {
   if (uiState.activityRailVisible && event.key === "Escape") {
     event.preventDefault();
     uiState.activityRailVisible = false;
-    render();
+    requestRender(RENDER_STATUS | RENDER_ACTIVITY);
     return;
   }
 
@@ -3515,7 +3541,7 @@ async function handleKeyDown(event) {
   if (countInput && event.key === "Escape") {
     event.preventDefault();
     uiState.pendingWorkspaceDraft = null;
-    render();
+    requestRender(RENDER_MODAL);
     return;
   }
 
@@ -3720,7 +3746,7 @@ async function submitWorkspaceTodoCreate() {
   }
 
   uiState.workspaceTodos.submitting = true;
-  render({ refreshVisibleTerminals: false });
+  requestTodoRender();
 
   try {
     uiState.snapshot = await bridge.addWorkspaceTodo(workspace.id, uiState.workspaceTodos.draft);
@@ -3731,7 +3757,7 @@ async function submitWorkspaceTodoCreate() {
     reportSourceControlError(error);
   } finally {
     uiState.workspaceTodos.submitting = false;
-    render({ refreshVisibleTerminals: false });
+    requestTodoRender();
   }
 }
 
@@ -3742,7 +3768,7 @@ async function submitWorkspaceTodoEdit(todoId) {
   }
 
   uiState.workspaceTodos.submitting = true;
-  render({ refreshVisibleTerminals: false });
+  requestTodoRender();
 
   try {
     uiState.snapshot = await bridge.updateWorkspaceTodo(
@@ -3756,7 +3782,7 @@ async function submitWorkspaceTodoEdit(todoId) {
     reportSourceControlError(error);
   } finally {
     uiState.workspaceTodos.submitting = false;
-    render({ refreshVisibleTerminals: false });
+    requestTodoRender();
   }
 }
 
@@ -3767,7 +3793,7 @@ async function setWorkspaceTodoDone(todoId, done) {
   }
 
   uiState.workspaceTodos.submitting = true;
-  render({ refreshVisibleTerminals: false });
+  requestTodoRender();
 
   try {
     uiState.snapshot = await bridge.setWorkspaceTodoDone(workspace.id, todoId, done);
@@ -3775,7 +3801,7 @@ async function setWorkspaceTodoDone(todoId, done) {
     reportSourceControlError(error);
   } finally {
     uiState.workspaceTodos.submitting = false;
-    render({ refreshVisibleTerminals: false });
+    requestTodoRender();
   }
 }
 
@@ -3786,7 +3812,7 @@ async function deleteWorkspaceTodo(todoId) {
   }
 
   uiState.workspaceTodos.submitting = true;
-  render({ refreshVisibleTerminals: false });
+  requestTodoRender();
 
   try {
     uiState.snapshot = await bridge.deleteWorkspaceTodo(workspace.id, todoId);
@@ -3797,7 +3823,7 @@ async function deleteWorkspaceTodo(todoId) {
     reportSourceControlError(error);
   } finally {
     uiState.workspaceTodos.submitting = false;
-    render({ refreshVisibleTerminals: false });
+    requestTodoRender();
   }
 }
 
@@ -3835,7 +3861,7 @@ async function openCodexModal() {
   uiState.pendingWorkspaceDraft = null;
   uiState.contextMenu = null;
   cancelWorkspaceRename();
-  render({ refreshVisibleTerminals: false });
+  requestCodexRender();
   await loadActiveWorkspaceCodexSessions({ force: true });
 }
 
@@ -3852,7 +3878,7 @@ async function loadActiveWorkspaceCodexSessions({ force = false } = {}) {
   uiState.codexSessionsLoading = true;
   uiState.codexSessionsError = "";
   if (uiState.codexModalVisible) {
-    render({ refreshVisibleTerminals: false });
+    requestRender(RENDER_MODAL);
   }
 
   try {
@@ -3874,7 +3900,7 @@ async function loadActiveWorkspaceCodexSessions({ force = false } = {}) {
   } finally {
     uiState.codexSessionsLoading = false;
     if (uiState.codexModalVisible) {
-      render({ refreshVisibleTerminals: false });
+      requestRender(RENDER_MODAL);
     }
   }
 }
@@ -3892,18 +3918,18 @@ async function resumeSelectedCodexSession() {
   }
 
   uiState.codexSubmitting = true;
-  render({ refreshVisibleTerminals: false });
+  requestRender(RENDER_MODAL);
 
   try {
     uiState.snapshot = await bridge.resumeWorkspaceCodexSession(workspace.id, paneId, sessionId);
     setActivePaneId(paneId, workspace);
     closeCodexModal();
-    render({ refreshVisibleTerminals: false });
+    requestRender(RENDER_ALL);
     focusPaneTerminal(paneId);
   } catch (error) {
     reportSourceControlError(error);
     uiState.codexSubmitting = false;
-    render({ refreshVisibleTerminals: false });
+    requestRender(RENDER_MODAL);
   }
 }
 
@@ -3915,18 +3941,18 @@ async function startNewCodexSession() {
   }
 
   uiState.codexSubmitting = true;
-  render({ refreshVisibleTerminals: false });
+  requestRender(RENDER_MODAL);
 
   try {
     await bridge.startWorkspaceCodexSession(workspace.id, paneId);
     setActivePaneId(paneId, workspace);
     closeCodexModal();
-    render({ refreshVisibleTerminals: false });
+    requestRender(RENDER_ALL);
     focusPaneTerminal(paneId);
   } catch (error) {
     reportSourceControlError(error);
     uiState.codexSubmitting = false;
-    render({ refreshVisibleTerminals: false });
+    requestRender(RENDER_MODAL);
   }
 }
 
@@ -3989,7 +4015,7 @@ function syncSourceControlTaskTray(task, previousTask = null) {
   }
 
   const isNewTask = !previousTask || previousTask.id !== task.id;
-  if (task.canWriteInput || task.status === "failed") {
+  if (task.status === "running" || task.canWriteInput || task.status === "failed") {
     uiState.sourceControl.taskTrayExpanded = true;
     return;
   }
@@ -4446,7 +4472,7 @@ async function openSourceControlPanel({ force = false } = {}) {
   if (!alreadyLoaded) {
     resetSourceControlState();
   }
-  render();
+  requestPanelSurfacesRender();
   await refreshActiveWorkspaceGitStatus({ force: true });
   await loadActiveWorkspaceSourceControl({ force: force || !alreadyLoaded });
 }
@@ -4538,6 +4564,7 @@ function applySourceControlSnapshot(snapshot, { appendGraph = false } = {}) {
     void loadSourceControlDiff(firstFile.path, uiState.sourceControl.selectedDiffMode);
   }
 
+  requestSourceControlRender();
   return nextSnapshot;
 }
 
@@ -4621,7 +4648,7 @@ async function selectSourceControlPath(path, mode = null) {
   uiState.sourceControl.selectedDiffMode = mode || preferredDiffModeForFile(file);
   uiState.sourceControl.diff = null;
   uiState.sourceControl.diffLoading = true;
-  render();
+  requestRender(RENDER_MODAL);
   await loadSourceControlDiff(path, uiState.sourceControl.selectedDiffMode);
 }
 
@@ -4633,7 +4660,7 @@ async function loadSourceControlDiff(path, mode = "working-tree") {
   }
 
   uiState.sourceControl.diffLoading = true;
-  render();
+  requestRender(RENDER_MODAL);
 
   try {
     const diff = await bridge.loadWorkspaceGitDiff(workspaceId, path, mode);
@@ -4646,7 +4673,7 @@ async function loadSourceControlDiff(path, mode = "working-tree") {
     return diff;
   } finally {
     uiState.sourceControl.diffLoading = false;
-    render();
+    requestRender(RENDER_MODAL);
   }
 }
 
@@ -4656,7 +4683,7 @@ async function selectSourceControlCommit(oid) {
   uiState.sourceControl.diff = null;
   uiState.sourceControl.commitDetail = null;
   uiState.sourceControl.commitDetailLoading = true;
-  render();
+  requestRender(RENDER_MODAL);
   await loadSourceControlCommitDetail(oid);
 }
 
@@ -4675,7 +4702,7 @@ async function loadSourceControlCommitDetail(oid) {
     return detail;
   } finally {
     uiState.sourceControl.commitDetailLoading = false;
-    render();
+    requestRender(RENDER_MODAL);
   }
 }
 
@@ -4802,7 +4829,7 @@ async function beginSourceControlPublish(
     remotes: remoteOptions.remotes,
     defaultRemote: remoteOptions.defaultRemote,
   });
-  render();
+  requestRender(RENDER_MODAL);
   return null;
 }
 
@@ -4836,7 +4863,7 @@ async function submitSourceControlTaskRecovery() {
 
 async function runSourceControlMutation(runner, { resetGraphSelection = false } = {}) {
   uiState.sourceControl.submitting = true;
-  render();
+  requestSourceControlRender();
 
   try {
     const snapshot = await runner();
@@ -4853,14 +4880,14 @@ async function runSourceControlMutation(runner, { resetGraphSelection = false } 
         );
       }
     }
-    render();
+    requestSourceControlRender();
     return snapshot;
   } catch (error) {
     reportSourceControlError(error);
     return null;
   } finally {
     uiState.sourceControl.submitting = false;
-    render();
+    requestSourceControlRender();
   }
 }
 
@@ -4887,7 +4914,7 @@ async function submitSourceControlCommit({ commitAll = false } = {}) {
   });
   if (snapshot) {
     uiState.sourceControl.commitMessage = "";
-    render();
+    requestRender(RENDER_MODAL);
   }
 }
 
@@ -4907,7 +4934,7 @@ async function generateSourceControlCommitMessage() {
 
   const initialMessage = uiState.sourceControl.commitMessage;
   uiState.sourceControl.generatingCommitMessage = true;
-  render();
+  requestRender(RENDER_MODAL);
 
   try {
     const suggestion = await bridge.generateGitCommitMessage(workspaceId);
@@ -4925,7 +4952,7 @@ async function generateSourceControlCommitMessage() {
     reportSourceControlError(error);
   } finally {
     uiState.sourceControl.generatingCommitMessage = false;
-    render();
+    requestRender(RENDER_MODAL);
   }
 }
 
@@ -4949,7 +4976,7 @@ async function submitSourceControlCreateBranch() {
   if (snapshot) {
     uiState.sourceControl.createBranchName = "";
     uiState.sourceControl.createBranchStartPoint = "";
-    render();
+    requestRender(RENDER_MODAL);
   }
 }
 
@@ -4969,7 +4996,7 @@ async function submitSourceControlTaskInput() {
     const payload = rawValue.endsWith("\n") ? rawValue : `${rawValue}\n`;
     await bridge.gitTaskWriteStdin(workspaceId, payload);
     uiState.sourceControl.taskInput = "";
-    render();
+    requestRender(RENDER_MODAL);
   } catch (error) {
     reportSourceControlError(error);
   }
@@ -4989,7 +5016,7 @@ async function handleSourceControlAction(target) {
 
   if (action === "close-scm-publish-modal") {
     if (closeSourceControlPublishModal()) {
-      render();
+      requestRender(RENDER_MODAL);
     }
     return;
   }
@@ -5017,21 +5044,20 @@ async function handleSourceControlAction(target) {
         ) {
           void selectSourceControlCommit(uiState.sourceControl.snapshot.graph.commits[0].oid);
         }
-        render();
+        requestRender(RENDER_MODAL);
       }
       return;
     }
     case "scm-toggle-row-menu":
       toggleSourceControlRowMenu(target.dataset.scmMenuKind || "file", target.dataset.scmMenuKey || "");
-      render();
+      requestRender(RENDER_MODAL);
       return;
     case "scm-toggle-task-tray":
       uiState.sourceControl.taskTrayExpanded = !uiState.sourceControl.taskTrayExpanded;
-      render();
+      requestRender(RENDER_MODAL);
       return;
     case "scm-select-path":
       await selectSourceControlPath(path, target.dataset.diffMode || null);
-      render();
       return;
     case "scm-set-diff-mode":
       if (path) {
@@ -5171,19 +5197,19 @@ async function handleSourceControlAction(target) {
     case "scm-branch-from-commit":
       uiState.sourceControl.activeTab = "branches";
       uiState.sourceControl.createBranchStartPoint = commitOid;
-      render();
+      requestRender(RENDER_MODAL);
       return;
     case "scm-load-more-graph":
       if (!target.dataset.cursor || uiState.sourceControl.graphLoadingMore) {
         return;
       }
       uiState.sourceControl.graphLoadingMore = true;
-      render();
+      requestRender(RENDER_MODAL);
       await loadActiveWorkspaceSourceControl({
         graphCursor: target.dataset.cursor,
         appendGraph: true,
       });
-      render();
+      requestRender(RENDER_MODAL);
       return;
     default:
       return;
@@ -5304,12 +5330,12 @@ function toggleActivityRail(forceVisible = !uiState.activityRailVisible) {
 function recordRuntimeEvent(event) {
   const normalizedEvent = normalizeRuntimeEvent(event);
   if (!normalizedEvent) {
-    return;
+    return false;
   }
 
   const workspace = getWorkspaceById(normalizedEvent.workspaceId);
   if (!workspace) {
-    return;
+    return false;
   }
 
   const nextEvent = {
@@ -5339,6 +5365,7 @@ function recordRuntimeEvent(event) {
   if (uiState.runtimeActivity.length > MAX_RUNTIME_ACTIVITY_ITEMS) {
     uiState.runtimeActivity.length = MAX_RUNTIME_ACTIVITY_ITEMS;
   }
+  return true;
 }
 
 function normalizeRuntimeEvent(event) {
@@ -5437,12 +5464,19 @@ function buildActivityWorkspaceSummaries(snapshot = uiState.snapshot) {
   const labels = buildWorkspaceTabLabels(workspaces);
   const activeWorkspaceId = snapshot?.activeWorkspaceId || null;
   const scope = normalizeActivityScope(uiState.activityRailScope, snapshot);
+  const latestEventByWorkspace = new Map();
+
+  for (const entry of uiState.runtimeActivity) {
+    if (!latestEventByWorkspace.has(entry.workspaceId)) {
+      latestEventByWorkspace.set(entry.workspaceId, entry);
+    }
+  }
 
   return workspaces
     .filter((workspace) => scope === "all" || workspace.id === activeWorkspaceId)
     .map((workspace) => {
       const attention = getWorkspaceAttention(workspace.id);
-      const latestEvent = attention?.lastEvent || uiState.runtimeActivity.find((entry) => entry.workspaceId === workspace.id) || null;
+      const latestEvent = attention?.lastEvent || latestEventByWorkspace.get(workspace.id) || null;
       return {
         workspaceId: workspace.id,
         label: labels.get(workspace.id) || workspace.name,
@@ -5633,10 +5667,68 @@ function stashMountedWorkspaceScreen(stageRegion) {
   uiState.mountedLayoutSignature = null;
 }
 
-function render({ refreshVisibleTerminals = true } = {}) {
+function renderMaskIncludes(mask, flag) {
+  return (mask & flag) === flag;
+}
+
+function renderMaskIntersects(mask, flags) {
+  return (mask & flags) !== 0;
+}
+
+function recordRenderMetric(region) {
+  const metrics = runtimeStore.renderMetrics;
+  if (region && metrics.regionFlushCounts[region] !== undefined) {
+    metrics.regionFlushCounts[region] += 1;
+  }
+}
+
+function requestRender(mask = RENDER_ALL) {
+  runtimeStore.pendingRenderMask |= mask;
+  if (runtimeStore.pendingRenderFrame) {
+    return;
+  }
+
+  runtimeStore.pendingRenderFrame = requestAnimationFrame(() => {
+    const pendingMask = runtimeStore.pendingRenderMask || RENDER_ALL;
+    runtimeStore.pendingRenderFrame = 0;
+    runtimeStore.pendingRenderMask = 0;
+    render({ mask: pendingMask });
+  });
+}
+
+function requestPanelSurfacesRender() {
+  requestRender(RENDER_PANEL_SURFACES);
+}
+
+function requestActivityRender() {
+  requestRender(RENDER_ACTIVITY_SURFACES);
+}
+
+function requestTodoRender() {
+  requestRender(RENDER_TODO_SURFACES);
+}
+
+function requestSourceControlRender() {
+  requestRender(RENDER_SOURCE_CONTROL_SURFACES);
+}
+
+function requestCodexRender() {
+  requestRender(RENDER_CODEX_SURFACES);
+}
+
+function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskIntersects(mask, RENDER_STAGE | RENDER_TERMINALS) } = {}) {
   if (!uiState.snapshot) {
     return;
   }
+
+  if (runtimeStore.pendingRenderFrame) {
+    cancelAnimationFrame(runtimeStore.pendingRenderFrame);
+    runtimeStore.pendingRenderFrame = 0;
+    runtimeStore.pendingRenderMask = 0;
+  }
+
+  runtimeStore.renderMetrics.flushCount += 1;
+  runtimeStore.renderMetrics.lastMask = mask;
 
   const snapshot = uiState.snapshot;
   if (!uiState.settingsVisible && uiState.settingsDraft) {
@@ -5708,108 +5800,132 @@ function render({ refreshVisibleTerminals = true } = {}) {
   const activityRegion = app.querySelector('[data-region="activity"]');
   const contextRegion = app.querySelector('[data-region="context"]');
   const modalRegion = app.querySelector('[data-region="modal"]');
-  bindModalLayerControls(modalRegion);
-  const settingsFocusState = uiState.settingsVisible
-    ? captureSettingsFocusState(modalRegion)
-    : null;
-  const settingsScrollState = uiState.settingsVisible
-    ? captureSettingsScrollState(modalRegion)
-    : null;
-  const todoFocusState = uiState.todoPanelVisible
-    ? captureTodoFocusState(modalRegion)
-    : null;
-  const todoScrollState = uiState.todoPanelVisible
-    ? captureTodoScrollState(modalRegion)
-    : null;
-  const sourceControlFocusState = uiState.gitPanelVisible
-    ? captureSourceControlFocusState(modalRegion)
-    : null;
-  const sourceControlScrollState = uiState.gitPanelVisible
-    ? captureSourceControlScrollState(modalRegion)
-    : null;
+  if (renderMaskIncludes(mask, RENDER_STRIP)) {
+    renderWorkspaceStripRegion(stripRegion, snapshot);
+    recordRenderMetric("strip");
+  }
+  if (renderMaskIncludes(mask, RENDER_STATUS)) {
+    statusRegion.innerHTML = renderWorkspaceStatusBar(snapshot, activeWorkspace);
+    recordRenderMetric("status");
+  }
+  if (renderMaskIncludes(mask, RENDER_ACTIVITY)) {
+    const activityVisible = uiState.activityRailVisible;
+    activityRegion.innerHTML = renderActivityRail({
+      visible: activityVisible,
+      scope: normalizeActivityScope(uiState.activityRailScope, snapshot),
+      hasActiveWorkspace: Boolean(snapshot.activeWorkspaceId),
+      ...getRuntimeActivitySummary(snapshot),
+      workspaceSummaries: activityVisible ? buildActivityWorkspaceSummaries(snapshot) : [],
+      items: activityVisible ? buildActivityFeedItems(snapshot) : [],
+      escapeHtml,
+    });
+    recordRenderMetric("activity");
+  }
+  if (renderMaskIncludes(mask, RENDER_MODAL)) {
+    bindModalLayerControls(modalRegion);
+    const settingsFocusState = uiState.settingsVisible
+      ? captureSettingsFocusState(modalRegion)
+      : null;
+    const settingsScrollState = uiState.settingsVisible
+      ? captureSettingsScrollState(modalRegion)
+      : null;
+    const todoFocusState = uiState.todoPanelVisible
+      ? captureTodoFocusState(modalRegion)
+      : null;
+    const todoScrollState = uiState.todoPanelVisible
+      ? captureTodoScrollState(modalRegion)
+      : null;
+    const sourceControlFocusState = uiState.gitPanelVisible
+      ? captureSourceControlFocusState(modalRegion)
+      : null;
+    const sourceControlScrollState = uiState.gitPanelVisible
+      ? captureSourceControlScrollState(modalRegion)
+      : null;
 
-  renderWorkspaceStripRegion(stripRegion, snapshot);
-  statusRegion.innerHTML = renderWorkspaceStatusBar(snapshot, activeWorkspace);
-  activityRegion.innerHTML = renderActivityRail({
-    visible: uiState.activityRailVisible,
-    scope: normalizeActivityScope(uiState.activityRailScope, snapshot),
-    hasActiveWorkspace: Boolean(snapshot.activeWorkspaceId),
-    ...getRuntimeActivitySummary(snapshot),
-    workspaceSummaries: buildActivityWorkspaceSummaries(snapshot),
-    items: buildActivityFeedItems(snapshot),
-    escapeHtml,
-  });
-  modalRegion.innerHTML = uiState.quickSwitcherVisible
-    ? renderQuickSwitcher(snapshot)
-    : uiState.settingsVisible
-      ? renderSettingsSheet(snapshot)
-      : uiState.pendingWorkspaceDraft
-        ? renderLayoutPicker({
-            presets: snapshot.launcher.presets,
-            draft: uiState.pendingWorkspaceDraft,
-            basename,
-            escapeHtml,
-          })
-        : uiState.codexModalVisible && activeWorkspace
-          ? renderCodexModal(activeWorkspace)
-        : uiState.todoPanelVisible && activeWorkspace
-          ? renderTodoPanel(activeWorkspace)
-        : uiState.gitPanelVisible && activeWorkspace
-          ? renderGitPanel(activeWorkspace)
-          : "";
-  modalRegion.classList.toggle(
-    "is-active",
-    Boolean(
-      uiState.quickSwitcherVisible
-      || uiState.settingsVisible
-      || uiState.pendingWorkspaceDraft
-      || (uiState.codexModalVisible && activeWorkspace)
-      || (uiState.todoPanelVisible && activeWorkspace)
-      || (uiState.gitPanelVisible && activeWorkspace),
-    ),
-  );
-  if (uiState.settingsVisible) {
-    syncSettingsPreviewDom(modalRegion);
-    bindSettingsSheetControls(modalRegion);
-    syncSettingsActionDom(modalRegion);
+    modalRegion.innerHTML = uiState.quickSwitcherVisible
+      ? renderQuickSwitcher(snapshot)
+      : uiState.settingsVisible
+        ? renderSettingsSheet(snapshot)
+        : uiState.pendingWorkspaceDraft
+          ? renderLayoutPicker({
+              presets: snapshot.launcher.presets,
+              draft: uiState.pendingWorkspaceDraft,
+              basename,
+              escapeHtml,
+            })
+          : uiState.codexModalVisible && activeWorkspace
+            ? renderCodexModal(activeWorkspace)
+            : uiState.todoPanelVisible && activeWorkspace
+              ? renderTodoPanel(activeWorkspace)
+              : uiState.gitPanelVisible && activeWorkspace
+                ? renderGitPanel(activeWorkspace)
+                : "";
+    modalRegion.classList.toggle(
+      "is-active",
+      Boolean(
+        uiState.quickSwitcherVisible
+        || uiState.settingsVisible
+        || uiState.pendingWorkspaceDraft
+        || (uiState.codexModalVisible && activeWorkspace)
+        || (uiState.todoPanelVisible && activeWorkspace)
+        || (uiState.gitPanelVisible && activeWorkspace),
+      ),
+    );
+    if (uiState.settingsVisible) {
+      syncSettingsPreviewDom(modalRegion);
+      bindSettingsSheetControls(modalRegion);
+      syncSettingsActionDom(modalRegion);
+    }
+    if (settingsScrollState && uiState.settingsVisible) {
+      restoreSettingsScrollState(settingsScrollState, modalRegion);
+    }
+    if (settingsFocusState && uiState.settingsVisible) {
+      restoreSettingsFocusState(settingsFocusState, modalRegion);
+    }
+    if (todoScrollState && uiState.todoPanelVisible) {
+      restoreTodoScrollState(todoScrollState, modalRegion);
+    }
+    if (todoFocusState && uiState.todoPanelVisible) {
+      restoreTodoFocusState(todoFocusState, modalRegion);
+    }
+    if (sourceControlScrollState && uiState.gitPanelVisible) {
+      restoreSourceControlScrollState(sourceControlScrollState, modalRegion);
+    }
+    if (sourceControlFocusState && uiState.gitPanelVisible) {
+      restoreSourceControlFocusState(sourceControlFocusState, modalRegion);
+    }
+    if (uiState.codexModalVisible) {
+      focusCodexModal(modalRegion);
+    }
+    if (uiState.todoPanelVisible) {
+      focusTodoPanel(modalRegion);
+    }
+    if (uiState.gitPanelVisible && uiState.sourceControl.publishModalVisible) {
+      focusSourceControlPublishModal(modalRegion);
+    }
+    recordRenderMetric("modal");
   }
-  if (settingsScrollState && uiState.settingsVisible) {
-    restoreSettingsScrollState(settingsScrollState, modalRegion);
+  if (renderMaskIncludes(mask, RENDER_CONTEXT)) {
+    contextRegion.innerHTML =
+      uiState.contextMenu && activeWorkspace
+        ? renderContextMenu(uiState.contextMenu, activeWorkspace, snapshot)
+        : "";
+    syncContextMenuPosition(contextRegion);
+    recordRenderMetric("context");
   }
-  if (settingsFocusState && uiState.settingsVisible) {
-    restoreSettingsFocusState(settingsFocusState, modalRegion);
-  }
-  if (todoScrollState && uiState.todoPanelVisible) {
-    restoreTodoScrollState(todoScrollState, modalRegion);
-  }
-  if (todoFocusState && uiState.todoPanelVisible) {
-    restoreTodoFocusState(todoFocusState, modalRegion);
-  }
-  if (sourceControlScrollState && uiState.gitPanelVisible) {
-    restoreSourceControlScrollState(sourceControlScrollState, modalRegion);
-  }
-  if (sourceControlFocusState && uiState.gitPanelVisible) {
-    restoreSourceControlFocusState(sourceControlFocusState, modalRegion);
-  }
-  if (uiState.codexModalVisible) {
-    focusCodexModal(modalRegion);
-  }
-  if (uiState.todoPanelVisible) {
-    focusTodoPanel(modalRegion);
-  }
-  if (uiState.gitPanelVisible && uiState.sourceControl.publishModalVisible) {
-    focusSourceControlPublishModal(modalRegion);
-  }
-  contextRegion.innerHTML =
-    uiState.contextMenu && activeWorkspace
-      ? renderContextMenu(uiState.contextMenu, activeWorkspace, snapshot)
-      : "";
-  syncContextMenuPosition(contextRegion);
   if (uiState.quickSwitcherVisible && uiState.quickSwitcherShouldFocus) {
     focusQuickSwitcherInput();
   }
   syncGitRefreshLoop();
   syncSystemHealthLoop();
+
+  if (!renderMaskIncludes(mask, RENDER_STAGE)) {
+    if (refreshVisibleTerminals) {
+      scheduleVisibleTerminalRefresh(activeWorkspace);
+      recordRenderMetric("terminals");
+    }
+    return;
+  }
 
   if (shouldShowLauncher) {
     if (uiState.mountedWorkspaceId) {
@@ -5827,6 +5943,11 @@ function render({ refreshVisibleTerminals = true } = {}) {
       stageRegion.dataset.stageSignature = nextLauncherSignature;
     }
 
+    recordRenderMetric("stage");
+    if (refreshVisibleTerminals) {
+      scheduleVisibleTerminalRefresh(activeWorkspace);
+      recordRenderMetric("terminals");
+    }
     return;
   }
 
@@ -5880,7 +6001,9 @@ function render({ refreshVisibleTerminals = true } = {}) {
   syncWorkspace(activeWorkspace);
   if (refreshVisibleTerminals) {
     scheduleVisibleTerminalRefresh(activeWorkspace);
+    recordRenderMetric("terminals");
   }
+  recordRenderMetric("stage");
 }
 
 function renderBranchIcon() {
@@ -8621,7 +8744,9 @@ function renderSourceControlTaskPanel(task) {
       ? "Needs attention"
       : task.status === "succeeded"
         ? "Finished successfully"
-        : "Running";
+        : task.output?.trim()
+          ? "Running"
+          : "Starting task";
 
   return `
     <section class="workspace-scm-task-tray is-${tone} ${isExpanded ? "is-expanded" : ""}">
@@ -8648,7 +8773,7 @@ function renderSourceControlTaskPanel(task) {
         isExpanded
           ? `
             <div class="workspace-scm-task-tray-body">
-              <pre class="workspace-scm-task-output workspace-scm-task-tray-output">${escapeHtml(task.output || "Waiting for task output…")}</pre>
+              <pre class="workspace-scm-task-output workspace-scm-task-tray-output">${escapeHtml(formatSourceControlTaskOutput(task))}</pre>
           `
           : ""
       }
@@ -8791,6 +8916,27 @@ function formatSourceControlTaskStatus(task) {
     default:
       return "Running";
   }
+}
+
+function formatSourceControlTaskOutput(task) {
+  if (!task) {
+    return "";
+  }
+
+  const output = typeof task.output === "string" ? task.output : "";
+  if (output.trim()) {
+    return output;
+  }
+
+  if (task.status === "failed") {
+    return "Task failed before producing output.";
+  }
+
+  if (task.status === "succeeded") {
+    return "Task completed.";
+  }
+
+  return `Running ${task.command}...`;
 }
 
 function queryableEmptyCopy(title, remote) {
@@ -9094,7 +9240,7 @@ async function loadSystemHealthSnapshot({ force = false, silent = false } = {}) 
 
   if (!silent || !uiState.systemHealthSnapshot) {
     uiState.systemHealthLoading = true;
-    render({ refreshVisibleTerminals: false });
+    requestRender(RENDER_STATUS);
   }
 
   runtimeStore.systemHealthRefreshInFlight = (async () => {
@@ -9114,7 +9260,7 @@ async function loadSystemHealthSnapshot({ force = false, silent = false } = {}) 
     } finally {
       uiState.systemHealthLoading = false;
       runtimeStore.systemHealthRefreshInFlight = null;
-      render({ refreshVisibleTerminals: false });
+      requestRender(RENDER_STATUS);
     }
   })();
 
@@ -9136,7 +9282,11 @@ async function refreshActiveWorkspaceGitStatus({ force = false } = {}) {
     try {
       const snapshot = await bridge.refreshWorkspaceGitStatus(workspaceId);
       uiState.snapshot = snapshot;
-      render();
+      requestRender(
+        uiState.gitPanelVisible
+          ? RENDER_SOURCE_CONTROL_SURFACES
+          : (RENDER_STRIP | RENDER_STATUS),
+      );
       if (uiState.gitPanelVisible && uiState.sourceControl.lastLoadedWorkspaceId === workspaceId) {
         void loadActiveWorkspaceSourceControl({ force: true });
       }
@@ -9500,6 +9650,7 @@ async function handleContextMenuAction(target) {
 
   const paneId = contextMenu.paneId;
   let focusPaneId = null;
+  let requiresWorkspaceRender = false;
 
   try {
     if (action === "context-copy-path") {
@@ -9511,6 +9662,7 @@ async function handleContextMenuAction(target) {
       || action === "context-close-pane"
       || action === "context-maximize-pane"
     ) {
+      requiresWorkspaceRender = true;
       focusPaneId = await runPaneAction(action, paneId, {
         direction: target.dataset.direction || "right",
       });
@@ -9519,7 +9671,11 @@ async function handleContextMenuAction(target) {
     console.error(error);
   } finally {
     uiState.contextMenu = null;
-    render();
+    if (requiresWorkspaceRender) {
+      render();
+    } else {
+      requestRender(RENDER_CONTEXT);
+    }
     focusPaneTerminal(focusPaneId);
   }
 }

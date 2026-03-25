@@ -112,5 +112,20 @@ export function createRuntimeStore() {
     systemHealthRefreshTimer: 0,
     systemHealthRefreshMode: "",
     systemHealthRefreshInFlight: null,
+    pendingRenderMask: 0,
+    pendingRenderFrame: 0,
+    renderMetrics: {
+      flushCount: 0,
+      lastMask: 0,
+      regionFlushCounts: {
+        strip: 0,
+        stage: 0,
+        status: 0,
+        activity: 0,
+        modal: 0,
+        context: 0,
+        terminals: 0,
+      },
+    },
   };
 }
