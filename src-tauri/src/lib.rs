@@ -35,6 +35,22 @@ const MIN_TERMINAL_FONT_SIZE: f64 = 11.0;
 const MAX_TERMINAL_FONT_SIZE: f64 = 18.0;
 const MAX_CODEX_SESSION_SCAN_LINES: usize = 80;
 const MAX_CODEX_SESSION_TITLE_CHARS: usize = 72;
+const FILE_EXPLORER_HIDDEN_NAMES: [&str; 14] = [
+    ".git",
+    "node_modules",
+    "dist",
+    "build",
+    ".next",
+    ".nuxt",
+    ".turbo",
+    ".cache",
+    "coverage",
+    "target",
+    "__pycache__",
+    ".pytest_cache",
+    ".venv",
+    "venv",
+];
 const LOGIN_SHELL_PATH_START_MARKER: &[u8] = b"__CREWDOCK_PATH_START__";
 const LOGIN_SHELL_PATH_END_MARKER: &[u8] = b"__CREWDOCK_PATH_END__";
 
@@ -494,6 +510,31 @@ struct LauncherCommandResult {
 struct LauncherCompletionResult {
     completed_input: String,
     matches: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceFileExplorerDirectorySnapshot {
+    workspace_id: String,
+    relative_path: String,
+    entries: Vec<WorkspaceFileExplorerEntrySnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceFileExplorerEntrySnapshot {
+    name: String,
+    relative_path: String,
+    kind: WorkspaceFileExplorerEntryKind,
+    expandable: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum WorkspaceFileExplorerEntryKind {
+    Directory,
+    File,
+    Symlink,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1547,6 +1588,157 @@ fn normalize_path_for_comparison(path: &str) -> String {
         .to_string()
 }
 
+fn load_workspace_file_explorer_directory_snapshot(
+    runtime: &RuntimeState,
+    workspace_id: &str,
+    relative_path: &str,
+) -> Result<WorkspaceFileExplorerDirectorySnapshot, String> {
+    let workspace = runtime
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.id == workspace_id)
+        .ok_or_else(|| "workspace not found".to_string())?;
+    let workspace_root = normalize_workspace_path(&workspace.path)?;
+    let normalized_relative_path = normalize_workspace_relative_path(relative_path)?;
+    let target = resolve_workspace_file_explorer_target(&workspace_root, &normalized_relative_path)?;
+    let entries =
+        list_workspace_file_explorer_entries(&workspace_root, &normalized_relative_path, &target)?;
+
+    Ok(WorkspaceFileExplorerDirectorySnapshot {
+        workspace_id: workspace.id.clone(),
+        relative_path: normalized_relative_path,
+        entries,
+    })
+}
+
+fn normalize_workspace_relative_path(raw: &str) -> Result<String, String> {
+    if Path::new(raw.trim()).is_absolute() {
+        return Err("path must be workspace-relative".to_string());
+    }
+
+    let normalized = raw.replace('\\', "/");
+    let mut parts = Vec::new();
+
+    for part in normalized.split('/') {
+        let segment = part.trim();
+        if segment.is_empty() || segment == "." {
+            continue;
+        }
+        if segment == ".." {
+            return Err("path traversal outside the workspace is not allowed".to_string());
+        }
+        if segment.contains('\0') {
+            return Err("invalid workspace-relative path".to_string());
+        }
+        parts.push(segment);
+    }
+
+    Ok(parts.join("/"))
+}
+
+fn resolve_workspace_file_explorer_target(
+    workspace_root: &Path,
+    relative_path: &str,
+) -> Result<PathBuf, String> {
+    let target = if relative_path.is_empty() {
+        workspace_root.to_path_buf()
+    } else {
+        workspace_root.join(relative_path)
+    };
+
+    let metadata = fs::symlink_metadata(&target)
+        .map_err(|error| format!("failed to access directory: {error}"))?;
+    if metadata.file_type().is_symlink() {
+        return Err("symlinked directories cannot be expanded".to_string());
+    }
+
+    let resolved = fs::canonicalize(&target)
+        .map_err(|error| format!("failed to access directory: {error}"))?;
+    if !resolved.starts_with(workspace_root) {
+        return Err("path escapes the workspace root".to_string());
+    }
+    if !resolved.is_dir() {
+        return Err("path must be a directory".to_string());
+    }
+
+    Ok(resolved)
+}
+
+fn list_workspace_file_explorer_entries(
+    workspace_root: &Path,
+    relative_path: &str,
+    directory: &Path,
+) -> Result<Vec<WorkspaceFileExplorerEntrySnapshot>, String> {
+    let mut entries = fs::read_dir(directory)
+        .map_err(|error| format!("failed to read directory: {error}"))?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.is_empty() || should_hide_workspace_file_explorer_entry(&name) {
+                return None;
+            }
+
+            let file_type = entry.file_type().ok()?;
+            let kind = if file_type.is_symlink() {
+                WorkspaceFileExplorerEntryKind::Symlink
+            } else if file_type.is_dir() {
+                WorkspaceFileExplorerEntryKind::Directory
+            } else {
+                WorkspaceFileExplorerEntryKind::File
+            };
+            let relative_path = join_workspace_relative_path(relative_path, &name);
+            let full_path = workspace_root.join(&relative_path);
+            let expandable = kind == WorkspaceFileExplorerEntryKind::Directory
+                && fs::symlink_metadata(&full_path)
+                    .ok()
+                    .map(|metadata| !metadata.file_type().is_symlink())
+                    .unwrap_or(false);
+
+            Some(WorkspaceFileExplorerEntrySnapshot {
+                name,
+                relative_path,
+                kind,
+                expandable,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    entries.sort_by(compare_workspace_file_explorer_entries);
+    Ok(entries)
+}
+
+fn should_hide_workspace_file_explorer_entry(name: &str) -> bool {
+    FILE_EXPLORER_HIDDEN_NAMES
+        .iter()
+        .any(|hidden| name.eq_ignore_ascii_case(hidden))
+}
+
+fn join_workspace_relative_path(parent: &str, name: &str) -> String {
+    if parent.is_empty() {
+        name.to_string()
+    } else {
+        format!("{parent}/{name}")
+    }
+}
+
+fn compare_workspace_file_explorer_entries(
+    left: &WorkspaceFileExplorerEntrySnapshot,
+    right: &WorkspaceFileExplorerEntrySnapshot,
+) -> Ordering {
+    workspace_file_explorer_sort_bucket(left.kind)
+        .cmp(&workspace_file_explorer_sort_bucket(right.kind))
+        .then_with(|| left.name.to_ascii_lowercase().cmp(&right.name.to_ascii_lowercase()))
+        .then_with(|| left.name.cmp(&right.name))
+}
+
+fn workspace_file_explorer_sort_bucket(kind: WorkspaceFileExplorerEntryKind) -> u8 {
+    match kind {
+        WorkspaceFileExplorerEntryKind::Directory => 0,
+        WorkspaceFileExplorerEntryKind::File => 1,
+        WorkspaceFileExplorerEntryKind::Symlink => 2,
+    }
+}
+
 fn shell_escape(value: &str) -> String {
     if value.is_empty() {
         return "''".to_string();
@@ -2463,6 +2655,19 @@ fn load_workspace_source_control(
         .lock()
         .map_err(|_| "failed to acquire application state".to_string())?;
     build_workspace_source_control(&runtime, &workspace_id, graph_cursor)
+}
+
+#[tauri::command]
+fn load_workspace_file_explorer_directory(
+    workspace_id: String,
+    relative_path: String,
+    state: State<'_, AppState>,
+) -> Result<WorkspaceFileExplorerDirectorySnapshot, String> {
+    let runtime = state
+        .inner
+        .lock()
+        .map_err(|_| "failed to acquire application state".to_string())?;
+    load_workspace_file_explorer_directory_snapshot(&runtime, &workspace_id, &relative_path)
 }
 
 #[tauri::command]
@@ -4272,6 +4477,7 @@ pub fn run() {
             start_workspace_codex_session,
             refresh_workspace_git_status,
             load_workspace_source_control,
+            load_workspace_file_explorer_directory,
             load_workspace_git_diff,
             load_workspace_git_commit_detail,
             git_stage_paths,
@@ -4313,17 +4519,21 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    #[cfg(unix)]
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
     use super::{
         build_codex_cli_snapshot, build_codex_session_display_title, collect_git_detail,
         collect_git_detail_with_binary, compare_codex_cli_versions,
         complete_launcher_input_for_base, default_launcher_path, execute_launcher_command,
         extract_login_shell_path, extract_navigation_target, layout_for_pane_count,
-        layout_presets, merge_path_values, normalize_workspace_path, parse_battery_snapshot,
-        parse_codex_cli_version, parse_git_status_porcelain, persistence::ActivityEventKind,
-        prepare_workspace_launch, read_codex_session_summary, resolve_navigation_path,
-        validate_git_cli_arg, BatteryState, CodexCliCandidateSnapshot,
+        layout_presets, load_workspace_file_explorer_directory_snapshot, merge_path_values,
+        normalize_workspace_path, parse_battery_snapshot, parse_codex_cli_version,
+        parse_git_status_porcelain, persistence::ActivityEventKind, prepare_workspace_launch,
+        read_codex_session_summary, resolve_navigation_path, validate_git_cli_arg,
+        BatteryState, CodexCliCandidateSnapshot,
         CodexCliSelectionMode, CodexCliSource, CodexCliStatus, GitFileKind, GitState,
-        RuntimeState, ThemeId, WorkspaceTodoRecord,
+        RuntimeState, ThemeId, WorkspaceFileExplorerEntryKind, WorkspaceTodoRecord,
         DEFAULT_INTERFACE_TEXT_SCALE, DEFAULT_TERMINAL_FONT_SIZE,
     };
 
@@ -4990,6 +5200,131 @@ mod tests {
     }
 
     #[test]
+    fn workspace_file_explorer_lists_root_entries_with_filters_and_sorting() {
+        let fixture = TestWorkspace::new();
+        fs::create_dir_all(fixture.project_dir().join("Frontend")).unwrap();
+        fs::create_dir_all(fixture.project_dir().join("node_modules")).unwrap();
+        fs::create_dir_all(fixture.project_dir().join(".git")).unwrap();
+        fs::write(fixture.project_dir().join("README.md"), "hello\n").unwrap();
+        fs::write(fixture.project_dir().join("zeta.txt"), "zeta\n").unwrap();
+
+        let (runtime, workspace_id) = runtime_with_workspace(fixture.project_dir());
+        let snapshot = load_workspace_file_explorer_directory_snapshot(&runtime, &workspace_id, "")
+            .expect("root listing should load");
+
+        assert_eq!(snapshot.relative_path, "");
+        assert_eq!(
+            snapshot
+                .entries
+                .iter()
+                .map(|entry| (entry.name.as_str(), entry.kind))
+                .collect::<Vec<_>>(),
+            vec![
+                ("backend", WorkspaceFileExplorerEntryKind::Directory),
+                ("Frontend", WorkspaceFileExplorerEntryKind::Directory),
+                ("README.md", WorkspaceFileExplorerEntryKind::File),
+                ("zeta.txt", WorkspaceFileExplorerEntryKind::File),
+            ]
+        );
+    }
+
+    #[test]
+    fn workspace_file_explorer_loads_nested_relative_directory() {
+        let fixture = TestWorkspace::new();
+        fs::write(fixture.api_dir().join("routes.py"), "print('ok')\n").unwrap();
+        fs::create_dir_all(fixture.api_dir().join("handlers")).unwrap();
+
+        let (runtime, workspace_id) = runtime_with_workspace(fixture.project_dir());
+        let snapshot = load_workspace_file_explorer_directory_snapshot(
+            &runtime,
+            &workspace_id,
+            "backend/api",
+        )
+        .expect("nested listing should load");
+
+        assert_eq!(snapshot.relative_path, "backend/api");
+        assert_eq!(
+            snapshot
+                .entries
+                .iter()
+                .map(|entry| (entry.name.as_str(), entry.relative_path.as_str(), entry.kind))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "handlers",
+                    "backend/api/handlers",
+                    WorkspaceFileExplorerEntryKind::Directory,
+                ),
+                (
+                    "routes.py",
+                    "backend/api/routes.py",
+                    WorkspaceFileExplorerEntryKind::File,
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn workspace_file_explorer_rejects_path_traversal() {
+        let fixture = TestWorkspace::new();
+        let (runtime, workspace_id) = runtime_with_workspace(fixture.project_dir());
+
+        let error = load_workspace_file_explorer_directory_snapshot(&runtime, &workspace_id, "../")
+            .expect_err("path traversal should be rejected");
+
+        assert!(error.contains("path traversal"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_file_explorer_marks_symlink_directories_as_non_expandable() {
+        let fixture = TestWorkspace::new();
+        let target = fixture.root_dir().join("shared");
+        fs::create_dir_all(&target).unwrap();
+        let link = fixture.project_dir().join("linked-shared");
+        symlink(&target, &link).unwrap();
+
+        let (runtime, workspace_id) = runtime_with_workspace(fixture.project_dir());
+        let snapshot = load_workspace_file_explorer_directory_snapshot(&runtime, &workspace_id, "")
+            .expect("root listing should load");
+        let entry = snapshot
+            .entries
+            .iter()
+            .find(|entry| entry.name == "linked-shared")
+            .expect("symlink entry should be present");
+
+        assert_eq!(entry.kind, WorkspaceFileExplorerEntryKind::Symlink);
+        assert!(!entry.expandable);
+        assert!(
+            load_workspace_file_explorer_directory_snapshot(&runtime, &workspace_id, "linked-shared")
+                .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_file_explorer_returns_error_for_unreadable_directory() {
+        let fixture = TestWorkspace::new();
+        let private_dir = fixture.project_dir().join("private");
+        fs::create_dir_all(&private_dir).unwrap();
+        let original_permissions = fs::metadata(&private_dir).unwrap().permissions();
+        let mut unreadable_permissions = original_permissions.clone();
+        unreadable_permissions.set_mode(0o000);
+        fs::set_permissions(&private_dir, unreadable_permissions).unwrap();
+
+        let (runtime, workspace_id) = runtime_with_workspace(fixture.project_dir());
+        let error = load_workspace_file_explorer_directory_snapshot(&runtime, &workspace_id, "private")
+            .expect_err("unreadable directories should surface an error");
+
+        fs::set_permissions(&private_dir, original_permissions).unwrap();
+
+        assert!(
+            error.contains("failed to read directory") || error.contains("failed to access directory"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
     fn navigation_input_supports_cd_and_plain_paths() {
         assert_eq!(extract_navigation_target("cd ..").unwrap(), "..");
         assert_eq!(extract_navigation_target("src/api").unwrap(), "src/api");
@@ -5377,6 +5712,18 @@ src/old name.rs\0\
 
     fn canonical_path(path: &Path) -> PathBuf {
         fs::canonicalize(path).expect("fixture path should be canonicalizable")
+    }
+
+    fn runtime_with_workspace(path: &Path) -> (RuntimeState, String) {
+        let mut runtime = RuntimeState::seeded();
+        let normalized_path = normalize_workspace_path(path.to_str().unwrap()).unwrap();
+        let workspace = runtime
+            .build_workspace_record(&normalized_path, 1, None)
+            .expect("workspace should build");
+        let workspace_id = workspace.id.clone();
+        runtime.active_workspace_id = Some(workspace_id.clone());
+        runtime.workspaces.push(workspace);
+        (runtime, workspace_id)
     }
 
     fn run_git(cwd: &Path, args: &[&str]) {

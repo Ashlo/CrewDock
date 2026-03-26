@@ -14,6 +14,7 @@ export function createBridge({
   completeMockLauncherInput,
   resolveMockNavigationPath,
   mockListDirectory,
+  mockLoadWorkspaceFileExplorerDirectory,
 } = {}) {
   const tauriApi = window.__TAURI__;
 
@@ -63,6 +64,8 @@ export function createBridge({
         tauriApi.core.invoke("refresh_workspace_git_status", { workspaceId }),
       loadWorkspaceSourceControl: (workspaceId, graphCursor = null) =>
         tauriApi.core.invoke("load_workspace_source_control", { workspaceId, graphCursor }),
+      loadWorkspaceFileExplorerDirectory: (workspaceId, relativePath = "") =>
+        tauriApi.core.invoke("load_workspace_file_explorer_directory", { workspaceId, relativePath }),
       loadWorkspaceGitDiff: (workspaceId, path, mode) =>
         tauriApi.core.invoke("load_workspace_git_diff", { workspaceId, path, mode }),
       loadWorkspaceGitCommitDetail: (workspaceId, oid) =>
@@ -163,6 +166,7 @@ export function createBridge({
     completeMockLauncherInput,
     resolveMockNavigationPath,
     mockListDirectory,
+    mockLoadWorkspaceFileExplorerDirectory,
   });
 }
 
@@ -177,6 +181,7 @@ function createMockBridge({
   completeMockLauncherInput,
   resolveMockNavigationPath,
   mockListDirectory,
+  mockLoadWorkspaceFileExplorerDirectory,
 }) {
   const stateListeners = new Set();
   const terminalListeners = new Set();
@@ -649,6 +654,22 @@ function createMockBridge({
     };
   }
 
+  function loadMockWorkspaceFileExplorerDirectory(workspace, relativePath = "") {
+    if (!workspace) {
+      throw new Error("workspace not found");
+    }
+    if (typeof mockLoadWorkspaceFileExplorerDirectory !== "function") {
+      throw new Error("mock file explorer is unavailable");
+    }
+
+    const snapshot = mockLoadWorkspaceFileExplorerDirectory(workspace.path, relativePath);
+    return {
+      workspaceId: workspace.id,
+      relativePath: snapshot?.relativePath ?? String(relativePath || ""),
+      entries: Array.isArray(snapshot?.entries) ? snapshot.entries : [],
+    };
+  }
+
   return {
     getAppSnapshot: async () => emitState(),
     loadSystemHealthSnapshot: async () => buildMockSystemHealthSnapshot(),
@@ -902,6 +923,10 @@ function createMockBridge({
         throw new Error("workspace not found");
       }
       return buildMockSourceControl(workspace, graphCursor);
+    },
+    loadWorkspaceFileExplorerDirectory: async (workspaceId, relativePath = "") => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      return loadMockWorkspaceFileExplorerDirectory(workspace, relativePath);
     },
     loadWorkspaceGitDiff: async (_workspaceId, path, mode) => buildMockDiff(path, mode),
     loadWorkspaceGitCommitDetail: async (_workspaceId, oid) => buildMockCommitDetail(oid),

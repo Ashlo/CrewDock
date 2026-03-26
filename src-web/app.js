@@ -44,18 +44,21 @@ const RENDER_ACTIVITY = 1 << 3;
 const RENDER_MODAL = 1 << 4;
 const RENDER_CONTEXT = 1 << 5;
 const RENDER_TERMINALS = 1 << 6;
+const RENDER_EXPLORER = 1 << 7;
 const RENDER_ALL = RENDER_STRIP
   | RENDER_STAGE
   | RENDER_STATUS
   | RENDER_ACTIVITY
   | RENDER_MODAL
   | RENDER_CONTEXT
-  | RENDER_TERMINALS;
+  | RENDER_TERMINALS
+  | RENDER_EXPLORER;
 const RENDER_PANEL_SURFACES = RENDER_STATUS | RENDER_ACTIVITY | RENDER_MODAL | RENDER_CONTEXT;
 const RENDER_ACTIVITY_SURFACES = RENDER_STRIP | RENDER_STATUS | RENDER_ACTIVITY;
 const RENDER_TODO_SURFACES = RENDER_STATUS | RENDER_MODAL;
 const RENDER_SOURCE_CONTROL_SURFACES = RENDER_STRIP | RENDER_STATUS | RENDER_MODAL;
 const RENDER_CODEX_SURFACES = RENDER_STATUS | RENDER_MODAL;
+const RENDER_FILE_EXPLORER_SURFACES = RENDER_STATUS | RENDER_EXPLORER;
 
 const THEME_REGISTRY = Object.freeze({
   "one-dark": {
@@ -597,6 +600,7 @@ const bridge = createBridge({
   completeMockLauncherInput,
   resolveMockNavigationPath,
   mockListDirectory,
+  mockLoadWorkspaceFileExplorerDirectory,
 });
 
 const uiState = createUiState();
@@ -615,12 +619,14 @@ void init();
 async function init() {
   document.body.dataset.platform = detectPlatform();
   uiState.snapshot = await bridge.getAppSnapshot();
+  pruneWorkspaceFileExplorerState(uiState.snapshot);
   hydrateRuntimeActivityFromSnapshot(uiState.snapshot);
   applySnapshotSettings(uiState.snapshot);
 
   if (bridge.listenState) {
     await bridge.listenState((snapshot) => {
       uiState.snapshot = snapshot;
+      pruneWorkspaceFileExplorerState(snapshot);
       applySnapshotSettings(snapshot);
       requestRender(RENDER_ALL);
     });
@@ -722,6 +728,233 @@ function getWorkspaceTodoState(workspace = getActiveWorkspace()) {
     openCount: openTodos.length,
     completedCount: completedTodos.length,
   };
+}
+
+function createWorkspaceFileExplorerState() {
+  return {
+    visible: false,
+    selectedPath: "",
+    expandedDirectories: new Set(),
+    directories: new Map(),
+    loadingPaths: new Set(),
+    errorByPath: new Map(),
+    version: 0,
+  };
+}
+
+function getWorkspaceFileExplorerState(workspaceId, { create = true } = {}) {
+  if (!workspaceId) {
+    return null;
+  }
+
+  let state = uiState.workspaceFileExplorer.get(workspaceId) || null;
+  if (!state && create) {
+    state = createWorkspaceFileExplorerState();
+    uiState.workspaceFileExplorer.set(workspaceId, state);
+  }
+
+  return state;
+}
+
+function pruneWorkspaceFileExplorerState(snapshot = uiState.snapshot) {
+  const workspaceIds = new Set((snapshot?.workspaces || []).map((workspace) => workspace.id));
+  for (const workspaceId of uiState.workspaceFileExplorer.keys()) {
+    if (!workspaceIds.has(workspaceId)) {
+      uiState.workspaceFileExplorer.delete(workspaceId);
+    }
+  }
+}
+
+function normalizeWorkspaceFileExplorerRelativePath(value) {
+  if (!value) {
+    return "";
+  }
+
+  return String(value)
+    .replaceAll("\\", "/")
+    .split("/")
+    .map((segment) => segment.trim())
+    .filter((segment) => segment && segment !== ".")
+    .join("/");
+}
+
+function isWorkspaceFileExplorerVisible(workspaceId = getActiveWorkspace()?.id || "") {
+  return Boolean(getWorkspaceFileExplorerState(workspaceId, { create: false })?.visible);
+}
+
+function requestWorkspaceFileExplorerRender(mask = RENDER_FILE_EXPLORER_SURFACES) {
+  requestRender(mask);
+}
+
+function clearWorkspaceFileExplorerCache(workspaceId) {
+  const state = getWorkspaceFileExplorerState(workspaceId);
+  if (!state) {
+    return;
+  }
+
+  state.version += 1;
+  state.selectedPath = "";
+  state.expandedDirectories.clear();
+  state.directories.clear();
+  state.loadingPaths.clear();
+  state.errorByPath.clear();
+}
+
+async function loadWorkspaceFileExplorerDirectory(workspaceId, relativePath = "", { force = false } = {}) {
+  const workspace = getWorkspaceById(workspaceId);
+  const explorerState = getWorkspaceFileExplorerState(workspaceId);
+  if (!workspace || !explorerState || typeof bridge.loadWorkspaceFileExplorerDirectory !== "function") {
+    return null;
+  }
+
+  const normalizedPath = normalizeWorkspaceFileExplorerRelativePath(relativePath);
+  if (!force && explorerState.directories.has(normalizedPath)) {
+    explorerState.errorByPath.delete(normalizedPath);
+    return explorerState.directories.get(normalizedPath);
+  }
+  if (explorerState.loadingPaths.has(normalizedPath)) {
+    return explorerState.directories.get(normalizedPath) || null;
+  }
+
+  const requestVersion = explorerState.version;
+  explorerState.loadingPaths.add(normalizedPath);
+  explorerState.errorByPath.delete(normalizedPath);
+  if (force) {
+    explorerState.directories.delete(normalizedPath);
+  }
+  requestRender(RENDER_EXPLORER);
+
+  try {
+    const snapshot = await bridge.loadWorkspaceFileExplorerDirectory(workspaceId, normalizedPath);
+    if (explorerState.version !== requestVersion) {
+      return null;
+    }
+
+    const entries = Array.isArray(snapshot?.entries)
+      ? snapshot.entries.map((entry) => ({
+          name: String(entry?.name || basename(entry?.relativePath || "")),
+          relativePath: normalizeWorkspaceFileExplorerRelativePath(entry?.relativePath || ""),
+          kind: entry?.kind === "directory" || entry?.kind === "symlink" ? entry.kind : "file",
+          expandable: entry?.kind === "directory" && entry?.expandable !== false,
+        }))
+      : [];
+    const normalizedSnapshot = {
+      workspaceId,
+      relativePath: normalizedPath,
+      entries,
+    };
+
+    explorerState.directories.set(normalizedPath, normalizedSnapshot);
+    explorerState.errorByPath.delete(normalizedPath);
+    return normalizedSnapshot;
+  } catch (error) {
+    if (explorerState.version === requestVersion) {
+      explorerState.errorByPath.set(
+        normalizedPath,
+        error instanceof Error ? error.message : String(error || "Failed to load directory."),
+      );
+    }
+    return null;
+  } finally {
+    if (explorerState.version === requestVersion) {
+      explorerState.loadingPaths.delete(normalizedPath);
+    }
+    requestRender(RENDER_EXPLORER);
+  }
+}
+
+function ensureWorkspaceFileExplorerRootLoaded(workspaceId = getActiveWorkspace()?.id || "") {
+  const explorerState = getWorkspaceFileExplorerState(workspaceId, { create: false });
+  if (!explorerState?.visible || explorerState.directories.has("") || explorerState.loadingPaths.has("")) {
+    return;
+  }
+
+  void loadWorkspaceFileExplorerDirectory(workspaceId, "");
+}
+
+function closeWorkspaceFileExplorer(workspaceId = getActiveWorkspace()?.id || "") {
+  const explorerState = getWorkspaceFileExplorerState(workspaceId, { create: false });
+  if (!explorerState?.visible) {
+    return false;
+  }
+
+  explorerState.visible = false;
+  return true;
+}
+
+function openWorkspaceFileExplorer(workspaceId = getActiveWorkspace()?.id || "") {
+  const explorerState = getWorkspaceFileExplorerState(workspaceId);
+  if (!explorerState) {
+    return false;
+  }
+
+  explorerState.visible = true;
+  ensureWorkspaceFileExplorerRootLoaded(workspaceId);
+  return true;
+}
+
+async function toggleWorkspaceFileExplorer(forceVisible = !isWorkspaceFileExplorerVisible()) {
+  const workspace = getActiveWorkspace();
+  if (!workspace) {
+    return;
+  }
+
+  if (!forceVisible) {
+    if (closeWorkspaceFileExplorer(workspace.id)) {
+      requestWorkspaceFileExplorerRender(RENDER_FILE_EXPLORER_SURFACES | RENDER_TERMINALS);
+    }
+    return;
+  }
+
+  if (openWorkspaceFileExplorer(workspace.id)) {
+    requestWorkspaceFileExplorerRender(RENDER_FILE_EXPLORER_SURFACES | RENDER_TERMINALS);
+  }
+}
+
+async function refreshWorkspaceFileExplorer() {
+  const workspace = getActiveWorkspace();
+  if (!workspace) {
+    return;
+  }
+
+  clearWorkspaceFileExplorerCache(workspace.id);
+  requestRender(RENDER_EXPLORER);
+  await loadWorkspaceFileExplorerDirectory(workspace.id, "", { force: true });
+}
+
+function selectWorkspaceFileExplorerEntry(relativePath) {
+  const workspace = getActiveWorkspace();
+  const explorerState = getWorkspaceFileExplorerState(workspace?.id, { create: false });
+  if (!workspace || !explorerState) {
+    return;
+  }
+
+  explorerState.selectedPath = normalizeWorkspaceFileExplorerRelativePath(relativePath);
+}
+
+function toggleWorkspaceFileExplorerDirectory(relativePath) {
+  const workspace = getActiveWorkspace();
+  const explorerState = getWorkspaceFileExplorerState(workspace?.id, { create: false });
+  if (!workspace || !explorerState) {
+    return;
+  }
+
+  const normalizedPath = normalizeWorkspaceFileExplorerRelativePath(relativePath);
+  if (!normalizedPath) {
+    return;
+  }
+
+  if (explorerState.expandedDirectories.has(normalizedPath)) {
+    explorerState.expandedDirectories.delete(normalizedPath);
+    requestRender(RENDER_EXPLORER);
+    return;
+  }
+
+  explorerState.expandedDirectories.add(normalizedPath);
+  requestRender(RENDER_EXPLORER);
+  if (!explorerState.directories.has(normalizedPath) && !explorerState.loadingPaths.has(normalizedPath)) {
+    void loadWorkspaceFileExplorerDirectory(workspace.id, normalizedPath);
+  }
 }
 
 function formatWorkspaceTodoSummary({ openCount, completedCount }) {
@@ -1987,6 +2220,34 @@ async function handleClick(event) {
 
   if (target.dataset.action === "show-git-panel") {
     await openSourceControlPanel({ force: true });
+    return;
+  }
+
+  if (target.dataset.action === "toggle-file-explorer") {
+    await toggleWorkspaceFileExplorer();
+    return;
+  }
+
+  if (target.dataset.action === "collapse-file-explorer") {
+    if (closeWorkspaceFileExplorer()) {
+      requestWorkspaceFileExplorerRender(RENDER_FILE_EXPLORER_SURFACES | RENDER_TERMINALS);
+    }
+    return;
+  }
+
+  if (target.dataset.action === "refresh-file-explorer") {
+    await refreshWorkspaceFileExplorer();
+    return;
+  }
+
+  if (target.dataset.action === "toggle-file-explorer-directory") {
+    toggleWorkspaceFileExplorerDirectory(target.dataset.relativePath || "");
+    return;
+  }
+
+  if (target.dataset.action === "select-file-explorer-entry") {
+    selectWorkspaceFileExplorerEntry(target.dataset.relativePath || "");
+    requestRender(RENDER_EXPLORER);
     return;
   }
 
@@ -5739,6 +6000,7 @@ function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskInterse
 
   applyRenderedSettings(snapshot);
   syncRuntimeActivityState(snapshot);
+  pruneWorkspaceFileExplorerState(snapshot);
   ensureFrame();
 
   const activeWorkspace = snapshot.activeWorkspace;
@@ -5919,7 +6181,7 @@ function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskInterse
   syncGitRefreshLoop();
   syncSystemHealthLoop();
 
-  if (!renderMaskIncludes(mask, RENDER_STAGE)) {
+  if (!renderMaskIntersects(mask, RENDER_STAGE | RENDER_EXPLORER)) {
     if (refreshVisibleTerminals) {
       scheduleVisibleTerminalRefresh(activeWorkspace);
       recordRenderMetric("terminals");
@@ -5998,7 +6260,18 @@ function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskInterse
     stageRegion.dataset.stageSignature = nextLayoutSignature;
   }
 
+  if (!renderMaskIncludes(mask, RENDER_STAGE)) {
+    syncWorkspaceFileExplorerSurface(activeWorkspace);
+    recordRenderMetric("explorer");
+    if (refreshVisibleTerminals) {
+      scheduleVisibleTerminalRefresh(activeWorkspace);
+      recordRenderMetric("terminals");
+    }
+    return;
+  }
+
   syncWorkspace(activeWorkspace);
+  recordRenderMetric("explorer");
   if (refreshVisibleTerminals) {
     scheduleVisibleTerminalRefresh(activeWorkspace);
     recordRenderMetric("terminals");
@@ -6054,6 +6327,14 @@ function renderSystemIcon() {
   `;
 }
 
+function renderFolderIcon() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M4.5 7.5A2.5 2.5 0 0 1 7 5h3l1.6 1.8H17A2.5 2.5 0 0 1 19.5 9.3v6.2A2.5 2.5 0 0 1 17 18H7a2.5 2.5 0 0 1-2.5-2.5V7.5Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></path>
+    </svg>
+  `;
+}
+
 function renderFileIcon() {
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -6071,7 +6352,11 @@ function renderMoreIcon() {
 }
 
 function renderChevronIcon(direction = "down") {
-  const rotation = direction === "up" ? "rotate(180 12 12)" : "rotate(0 12 12)";
+  const rotation = direction === "up"
+    ? "rotate(180 12 12)"
+    : direction === "right"
+      ? "rotate(-90 12 12)"
+      : "rotate(0 12 12)";
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
       <path d="M7 10.2 12 15l5-4.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" transform="${rotation}"></path>
@@ -6109,6 +6394,7 @@ function renderWorkspaceStatusBar(snapshot, activeWorkspace) {
     const pathLabel = compactWorkspacePath(activeWorkspace.path);
 
     leftItems.push(renderStatusBarItem(pathLabel, activeWorkspace.path, "is-path is-primary"));
+    leftItems.push(renderStatusBarFilesButton(activeWorkspace));
     leftItems.push(renderStatusBarCodexButton(activeWorkspace));
     leftItems.push(renderStatusBarGitButton(summary));
     leftItems.push(renderStatusBarTodoButton(activeWorkspace));
@@ -6171,6 +6457,26 @@ function renderStatusBarGitButton(summary) {
     >
       <span class="workspace-statusbar-icon" aria-hidden="true">${renderBranchIcon()}</span>
       <span>${escapeHtml(label)}</span>
+    </button>
+  `;
+}
+
+function renderStatusBarFilesButton(activeWorkspace) {
+  const isOpen = isWorkspaceFileExplorerVisible(activeWorkspace.id);
+  const title = isOpen
+    ? `Hide the file explorer for ${activeWorkspace.name}`
+    : `Show the file explorer for ${activeWorkspace.name}`;
+  return `
+    <button
+      class="workspace-statusbar-item workspace-statusbar-button is-neutral ${isOpen ? "is-panel-open" : ""}"
+      type="button"
+      data-action="toggle-file-explorer"
+      title="${escapeHtml(title)}"
+      aria-label="${escapeHtml(title)}"
+      aria-pressed="${isOpen ? "true" : "false"}"
+    >
+      <span class="workspace-statusbar-icon" aria-hidden="true">${renderFolderIcon()}</span>
+      <span>Files</span>
     </button>
   `;
 }
@@ -9422,8 +9728,10 @@ function renderWorkspace(workspace) {
     ? workspace.panes.find((pane) => pane.id === uiState.maximizedPaneId) || null
     : null;
   const paneIndexById = new Map(workspace.panes.map((pane, index) => [pane.id, index]));
+  const fileExplorerVisible = isWorkspaceFileExplorerVisible(workspace.id);
   return `
-    <main class="workspace-screen ${maximizedPane ? "is-maximized" : ""}">
+    <main class="workspace-screen ${maximizedPane ? "is-maximized" : ""} ${fileExplorerVisible ? "has-file-explorer" : ""}">
+      ${renderWorkspaceFileExplorerShell(workspace)}
       <section class="terminal-layout">
         ${
           maximizedPane
@@ -9432,6 +9740,186 @@ function renderWorkspace(workspace) {
         }
       </section>
     </main>
+  `;
+}
+
+function renderWorkspaceFileExplorerShell(workspace) {
+  const visible = isWorkspaceFileExplorerVisible(workspace.id);
+  return `
+    <aside
+      class="workspace-file-explorer-shell ${visible ? "is-visible" : ""}"
+      data-workspace-file-explorer="${escapeHtml(workspace.id)}"
+      aria-hidden="${visible ? "false" : "true"}"
+    >
+      ${renderWorkspaceFileExplorer(workspace)}
+    </aside>
+  `;
+}
+
+function renderWorkspaceFileExplorer(workspace) {
+  const explorerState = getWorkspaceFileExplorerState(workspace.id, { create: false });
+  const rootSnapshot = explorerState?.directories.get("") || null;
+  const rootLoading = Boolean(explorerState?.loadingPaths.has(""));
+  const rootError = explorerState?.errorByPath.get("") || "";
+  const summaryLabel = rootLoading
+    ? "Scanning workspace"
+    : rootError
+      ? "Directory unavailable"
+      : rootSnapshot?.entries?.length
+        ? `${rootSnapshot.entries.length} visible ${rootSnapshot.entries.length === 1 ? "item" : "items"}`
+        : "Read-only workspace tree";
+
+  return `
+    <div class="workspace-file-explorer-panel">
+      <header class="workspace-file-explorer-header">
+        <div class="workspace-file-explorer-heading">
+          <span class="workspace-file-explorer-kicker">Files</span>
+          <strong>${escapeHtml(workspace.name)}</strong>
+          <span class="workspace-file-explorer-path" title="${escapeHtml(workspace.path)}">
+            ${escapeHtml(compactWorkspacePath(workspace.path))}
+          </span>
+        </div>
+        <div class="workspace-file-explorer-actions">
+          <button
+            class="workspace-file-explorer-action"
+            type="button"
+            data-action="refresh-file-explorer"
+            title="Refresh the workspace file tree"
+            aria-label="Refresh the workspace file tree"
+          >
+            <span aria-hidden="true">${renderRefreshIcon()}</span>
+            <span>Refresh</span>
+          </button>
+          <button
+            class="workspace-file-explorer-close"
+            type="button"
+            data-action="collapse-file-explorer"
+            title="Collapse file explorer"
+            aria-label="Collapse file explorer"
+          >
+            ${renderCloseIcon()}
+          </button>
+        </div>
+      </header>
+      <div class="workspace-file-explorer-meta">
+        <span class="workspace-file-explorer-meta-label">${escapeHtml(summaryLabel)}</span>
+      </div>
+      <div class="workspace-file-explorer-body" role="tree" aria-label="${escapeHtml(workspace.name)} files">
+        <div class="workspace-file-explorer-tree-shell">
+          ${renderWorkspaceFileExplorerTree({
+            rootSnapshot,
+            rootLoading,
+            rootError,
+            explorerState,
+            selectedPath: explorerState?.selectedPath || "",
+          })}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderWorkspaceFileExplorerTree({
+  rootSnapshot,
+  rootLoading,
+  rootError,
+  explorerState,
+  selectedPath,
+}) {
+  if (rootLoading) {
+    return renderWorkspaceFileExplorerState("Loading workspace files…");
+  }
+
+  if (rootError) {
+    return renderWorkspaceFileExplorerState(rootError, { tone: "error" });
+  }
+
+  if (!rootSnapshot?.entries?.length) {
+    return renderWorkspaceFileExplorerState(
+      rootSnapshot ? "No visible files in this workspace root." : "Open the explorer to browse this workspace.",
+    );
+  }
+
+  return renderWorkspaceFileExplorerEntries(rootSnapshot.entries, explorerState, selectedPath, 0);
+}
+
+function renderWorkspaceFileExplorerEntries(entries, explorerState, selectedPath, depth) {
+  return entries
+    .map((entry) => {
+      const kind = entry.kind === "directory" || entry.kind === "symlink" ? entry.kind : "file";
+      const isDirectory = kind === "directory";
+      const isExpanded = isDirectory && explorerState?.expandedDirectories.has(entry.relativePath);
+      const isSelected = selectedPath === entry.relativePath;
+      const childSnapshot = explorerState?.directories.get(entry.relativePath) || null;
+      const childLoading = Boolean(explorerState?.loadingPaths.has(entry.relativePath));
+      const childError = explorerState?.errorByPath.get(entry.relativePath) || "";
+      const disclosure = isDirectory
+        ? `
+            <button
+              class="workspace-file-explorer-disclosure ${isExpanded ? "is-expanded" : ""}"
+              type="button"
+              data-action="toggle-file-explorer-directory"
+              data-relative-path="${escapeHtml(entry.relativePath)}"
+              title="${isExpanded ? "Collapse folder" : "Expand folder"}"
+              aria-label="${isExpanded ? "Collapse folder" : "Expand folder"}"
+              aria-expanded="${isExpanded ? "true" : "false"}"
+            >
+              ${renderChevronIcon(isExpanded ? "down" : "right")}
+            </button>
+          `
+        : `<span class="workspace-file-explorer-disclosure is-spacer" aria-hidden="true"></span>`;
+      const badge = kind === "symlink"
+        ? `<span class="workspace-file-explorer-badge">Link</span>`
+        : "";
+      const childContent = !isExpanded
+        ? ""
+        : childLoading
+          ? renderWorkspaceFileExplorerState("Loading…", { tone: "muted", depth: depth + 1 })
+          : childError
+            ? renderWorkspaceFileExplorerState(childError, { tone: "error", depth: depth + 1 })
+            : childSnapshot?.entries?.length
+              ? renderWorkspaceFileExplorerEntries(
+                  childSnapshot.entries,
+                  explorerState,
+                  selectedPath,
+                  depth + 1,
+                )
+              : renderWorkspaceFileExplorerState("No visible items.", {
+                  tone: "muted",
+                  depth: depth + 1,
+                });
+
+      return `
+        <div class="workspace-file-explorer-node ${isExpanded ? "is-expanded" : ""}">
+          <div class="workspace-file-explorer-row" style="--explorer-depth:${depth}">
+            ${disclosure}
+            <button
+              class="workspace-file-explorer-entry is-${escapeHtml(kind)} ${isSelected ? "is-selected" : ""}"
+              type="button"
+              data-action="select-file-explorer-entry"
+              data-relative-path="${escapeHtml(entry.relativePath)}"
+              data-kind="${escapeHtml(kind)}"
+              title="${escapeHtml(entry.relativePath || entry.name)}"
+            >
+              <span class="workspace-file-explorer-entry-icon" aria-hidden="true">
+                ${kind === "directory" ? renderFolderIcon() : renderFileIcon()}
+              </span>
+              <span class="workspace-file-explorer-entry-label">${escapeHtml(entry.name)}</span>
+              ${badge}
+            </button>
+          </div>
+          ${isExpanded ? `<div class="workspace-file-explorer-children">${childContent}</div>` : ""}
+        </div>
+      `;
+    })
+    .join("");
+}
+
+function renderWorkspaceFileExplorerState(message, { tone = "muted", depth = 0 } = {}) {
+  return `
+    <div class="workspace-file-explorer-state is-${escapeHtml(tone)}" style="--explorer-depth:${depth}">
+      ${escapeHtml(message)}
+    </div>
   `;
 }
 
@@ -9760,11 +10248,34 @@ function mountWorkspaceTerminals(workspace, root = document) {
   }
 }
 
+function syncWorkspaceFileExplorerSurface(workspace, root = document) {
+  const screen = root.querySelector(`.workspace-screen[data-workspace-id="${workspace.id}"]`);
+  if (!(screen instanceof HTMLElement)) {
+    return;
+  }
+
+  const shell = screen.querySelector(`[data-workspace-file-explorer="${workspace.id}"]`);
+  if (!(shell instanceof HTMLElement)) {
+    return;
+  }
+
+  const visible = isWorkspaceFileExplorerVisible(workspace.id);
+  screen.classList.toggle("has-file-explorer", visible);
+  shell.classList.toggle("is-visible", visible);
+  shell.setAttribute("aria-hidden", visible ? "false" : "true");
+  shell.innerHTML = renderWorkspaceFileExplorer(workspace);
+  if (visible) {
+    ensureWorkspaceFileExplorerRootLoaded(workspace.id);
+  }
+}
+
 function syncWorkspace(workspace) {
   const theme = getCurrentThemeDefinition();
   const terminalFontSize = getTerminalFontSize();
   const nextPaneIds = workspace.panes.map((pane) => pane.id);
   const previousPaneIds = workspacePaneIds.get(workspace.id) || [];
+
+  syncWorkspaceFileExplorerSurface(workspace);
 
   for (const pane of workspace.panes) {
     const paneElement = document.querySelector(`[data-pane-id="${pane.id}"]`);
@@ -9868,6 +10379,7 @@ function clearWorkspaceBuffers(workspaceId) {
 
   discardCachedWorkspaceScreen(workspaceId, { dispose: false });
   workspacePaneIds.delete(workspaceId);
+  uiState.workspaceFileExplorer.delete(workspaceId);
 }
 
 function clearSinglePaneBuffer(paneId) {
@@ -10317,18 +10829,101 @@ function completeMockLauncherInput(basePath, rawInput) {
 }
 
 function mockDirectoryEntries(path) {
-  const index = {
-    "/Users/ashutoshbele/Desktop/ashlab/crewdock": ["README.md", "package.json", "src-tauri/", "src-web/"],
-    "/Users/ashutoshbele/Desktop/ashlab": ["crewdock/"],
-    "/Users/ashutoshbele/Desktop": ["ashlab/"],
-  };
+  const entries = mockFileExplorerEntriesForPath(path);
+  if (!entries) {
+    return ["(mock listing unavailable)"];
+  }
 
-  return index[path] || ["(mock listing unavailable)"];
+  return entries.map((entry) => (entry.kind === "directory" ? `${entry.name}/` : entry.name));
 }
 
 function mockListDirectory(path) {
   const entries = mockDirectoryEntries(path);
   return [path, entries.join("  ")];
+}
+
+function mockLoadWorkspaceFileExplorerDirectory(workspacePath, relativePath = "") {
+  const rootPath = normalizePath(workspacePath || "/");
+  const normalizedRelativePath = normalizeWorkspaceFileExplorerRelativePath(relativePath);
+  const targetPath = normalizedRelativePath
+    ? normalizePath(`${rootPath}/${normalizedRelativePath}`)
+    : rootPath;
+  const staticIndex = getMockStaticFileExplorerIndex();
+  const workspaceIndex = buildMockWorkspaceFileExplorerIndex(rootPath);
+  const entries = staticIndex[targetPath] || workspaceIndex[targetPath] || null;
+
+  if (!entries) {
+    throw new Error("mock directory not found");
+  }
+
+  return {
+    relativePath: normalizedRelativePath,
+    entries: entries.map((entry) => ({
+      name: entry.name,
+      relativePath: normalizeWorkspaceFileExplorerRelativePath(
+        normalizedRelativePath ? `${normalizedRelativePath}/${entry.name}` : entry.name,
+      ),
+      kind: entry.kind,
+      expandable: entry.kind === "directory",
+    })),
+  };
+}
+
+function mockFileExplorerEntriesForPath(path) {
+  const normalizedPath = normalizePath(path || "/");
+  const staticIndex = getMockStaticFileExplorerIndex();
+
+  if (staticIndex[normalizedPath]) {
+    return staticIndex[normalizedPath];
+  }
+
+  const workspaceIndex = buildMockWorkspaceFileExplorerIndex(normalizedPath);
+  return workspaceIndex[normalizedPath] || null;
+}
+
+function getMockStaticFileExplorerIndex() {
+  return {
+    "/Users/ashutoshbele/Desktop/ashlab": [
+      { name: "crewdock", kind: "directory" },
+    ],
+    "/Users/ashutoshbele/Desktop": [
+      { name: "ashlab", kind: "directory" },
+    ],
+  };
+}
+
+function buildMockWorkspaceFileExplorerIndex(rootPath) {
+  const normalizedRoot = normalizePath(rootPath || "/");
+  const joinPath = (next) => normalizePath(`${normalizedRoot}/${next}`);
+
+  return {
+    [normalizedRoot]: [
+      { name: "README.md", kind: "file" },
+      { name: "package.json", kind: "file" },
+      { name: "src-tauri", kind: "directory" },
+      { name: "src-web", kind: "directory" },
+    ],
+    [joinPath("src-web")]: [
+      { name: "app.js", kind: "file" },
+      { name: "bridge.js", kind: "file" },
+      { name: "store.js", kind: "file" },
+      { name: "styles.css", kind: "file" },
+      { name: "vendor", kind: "directory" },
+    ],
+    [joinPath("src-web/vendor")]: [
+      { name: "addon-fit.mjs", kind: "file" },
+      { name: "xterm.mjs", kind: "file" },
+    ],
+    [joinPath("src-tauri")]: [
+      { name: "Cargo.toml", kind: "file" },
+      { name: "src", kind: "directory" },
+    ],
+    [joinPath("src-tauri/src")]: [
+      { name: "lib.rs", kind: "file" },
+      { name: "workspace_manager.rs", kind: "file" },
+      { name: "source_control.rs", kind: "file" },
+    ],
+  };
 }
 
 function completeLauncherCommandName(rawInput) {
