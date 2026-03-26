@@ -2241,6 +2241,10 @@ button {
   line-height: 1.35;
 }
 
+.workspace-codex-session-id-full {
+  overflow-wrap: anywhere;
+}
+
 .workspace-codex-pane-picker {
   display: grid;
   gap: 8px;

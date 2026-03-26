@@ -510,6 +510,7 @@ function createMockBridge({
     const sessions = Array.from({ length: 2 }, (_, index) => ({
       id: `session-${workspace.id}-${index + 1}`,
       cwd: workspace.path,
+      displayTitle: `${workspace.name}: ${index === 0 ? "Resume recent CrewDock work" : "Review workspace follow-ups"}`,
       cliVersion: settings.codexCli.effectiveVersion || "0.116.0",
       source: "cli",
       originator: "codex_cli_rs",

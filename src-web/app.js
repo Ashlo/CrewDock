@@ -6484,6 +6484,16 @@ function formatRelativeTime(timestampMs) {
   return `${deltaDays}d ago`;
 }
 
+function formatCodexSessionShortId(sessionId) {
+  if (typeof sessionId !== "string" || !sessionId.trim()) {
+    return "";
+  }
+  if (sessionId.length <= 16) {
+    return sessionId;
+  }
+  return `${sessionId.slice(0, 8)}...${sessionId.slice(-4)}`;
+}
+
 function isCodexPaneReady(pane) {
   return pane?.status === "ready";
 }
@@ -6637,7 +6647,8 @@ function renderCodexModal(workspace) {
                           ? `
                             <div class="workspace-codex-modal-detail-card">
                               <span class="workspace-codex-meta-label">Selected session</span>
-                              <strong>${escapeHtml(selectedSession.id)}</strong>
+                              <strong>${escapeHtml(selectedSession.displayTitle || selectedSession.id)}</strong>
+                              <span class="workspace-codex-session-id-full">${escapeHtml(selectedSession.id)}</span>
                               <span>${escapeHtml(selectedSession.cliVersion ? `CLI ${selectedSession.cliVersion}` : "CLI version unavailable")}</span>
                               <span>${escapeHtml(formatRelativeTime(selectedSession.lastActiveAtMs))}</span>
                             </div>
@@ -6726,6 +6737,8 @@ function renderCodexTargetPaneButton(pane, { isSelected = false, isActive = fals
 }
 
 function renderCodexSessionRow(session, { isSelected = false, isRemembered = false } = {}) {
+  const primaryLabel = session.displayTitle || session.id;
+  const secondaryLabel = session.originator || session.source || "Codex CLI";
   const badges = [
     isRemembered ? '<span class="workspace-codex-session-badge is-active">Remembered</span>' : "",
     session.cliVersion ? `<span class="workspace-codex-session-badge">CLI ${escapeHtml(session.cliVersion)}</span>` : "",
@@ -6741,11 +6754,12 @@ function renderCodexSessionRow(session, { isSelected = false, isRemembered = fal
       data-session-id="${escapeHtml(session.id)}"
     >
       <div class="workspace-codex-session-row-top">
-        <strong>${escapeHtml(session.id)}</strong>
+        <strong title="${escapeHtml(primaryLabel)}">${escapeHtml(primaryLabel)}</strong>
         <span>${escapeHtml(formatRelativeTime(session.lastActiveAtMs))}</span>
       </div>
       <div class="workspace-codex-session-row-meta">
-        <span>${escapeHtml(session.originator || session.source || "Codex CLI")}</span>
+        <span>${escapeHtml(formatCodexSessionShortId(session.id))}</span>
+        <span>${escapeHtml(secondaryLabel)}</span>
         ${badges}
       </div>
     </button>

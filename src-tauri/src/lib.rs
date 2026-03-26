@@ -33,6 +33,8 @@ const MAX_INTERFACE_TEXT_SCALE: f64 = 1.2;
 const DEFAULT_TERMINAL_FONT_SIZE: f64 = 13.5;
 const MIN_TERMINAL_FONT_SIZE: f64 = 11.0;
 const MAX_TERMINAL_FONT_SIZE: f64 = 18.0;
+const MAX_CODEX_SESSION_SCAN_LINES: usize = 80;
+const MAX_CODEX_SESSION_TITLE_CHARS: usize = 72;
 const LOGIN_SHELL_PATH_START_MARKER: &[u8] = b"__CREWDOCK_PATH_START__";
 const LOGIN_SHELL_PATH_END_MARKER: &[u8] = b"__CREWDOCK_PATH_END__";
 
@@ -411,6 +413,7 @@ struct WorkspaceCodexSessionsSnapshot {
 struct CodexSessionMatchSnapshot {
     id: String,
     cwd: String,
+    display_title: String,
     cli_version: Option<String>,
     source: Option<String>,
     originator: Option<String>,
@@ -435,6 +438,12 @@ struct CodexSessionMetaPayload {
     source: Option<String>,
     #[serde(default)]
     originator: Option<String>,
+}
+
+#[derive(Debug)]
+struct CodexSessionFileSummary {
+    meta: CodexSessionMetaPayload,
+    first_user_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1186,10 +1195,10 @@ fn discover_codex_sessions_for_workspace(
     let mut matches = Vec::new();
 
     for session_file in collect_codex_session_files(&root) {
-        let Some(meta) = read_codex_session_meta(&session_file) else {
+        let Some(summary) = read_codex_session_summary(&session_file) else {
             continue;
         };
-        if normalize_path_for_comparison(&meta.cwd) != workspace_key {
+        if normalize_path_for_comparison(&summary.meta.cwd) != workspace_key {
             continue;
         }
 
@@ -1201,14 +1210,18 @@ fn discover_codex_sessions_for_workspace(
             .unwrap_or(0);
 
         matches.push(CodexSessionMatchSnapshot {
-            id: meta.id.clone(),
-            cwd: meta.cwd,
-            cli_version: meta.cli_version,
-            source: meta.source,
-            originator: meta.originator,
+            id: summary.meta.id.clone(),
+            cwd: summary.meta.cwd.clone(),
+            display_title: build_codex_session_display_title(
+                &summary.meta.cwd,
+                summary.first_user_prompt.as_deref(),
+            ),
+            cli_version: summary.meta.cli_version,
+            source: summary.meta.source,
+            originator: summary.meta.originator,
             last_active_at_ms,
             is_remembered: remembered_session_id
-                .map(|session_id| session_id == meta.id.as_str())
+                .map(|session_id| session_id == summary.meta.id.as_str())
                 .unwrap_or(false),
         });
     }
@@ -1259,26 +1272,272 @@ fn collect_codex_session_files(root: &Path) -> Vec<PathBuf> {
     files
 }
 
-fn read_codex_session_meta(path: &Path) -> Option<CodexSessionMetaPayload> {
+fn read_codex_session_summary(path: &Path) -> Option<CodexSessionFileSummary> {
     let file = fs::File::open(path).ok()?;
     let reader = BufReader::new(file);
+    let mut meta = None;
+    let mut first_user_prompt = None;
+    let mut scanned_records = 0usize;
 
-    for line in reader.lines().take(12) {
-        let line = line.ok()?;
+    for line in reader.lines() {
+        if scanned_records >= MAX_CODEX_SESSION_SCAN_LINES {
+            break;
+        }
+
+        let Ok(line) = line else {
+            continue;
+        };
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
 
-        let record: CodexSessionJsonLine = serde_json::from_str(trimmed).ok()?;
-        if record.line_type != "session_meta" {
+        scanned_records += 1;
+
+        let Ok(record) = serde_json::from_str::<CodexSessionJsonLine>(trimmed) else {
             continue;
+        };
+
+        if meta.is_none() && record.line_type == "session_meta" {
+            meta = serde_json::from_value(record.payload.clone()).ok();
         }
 
-        return serde_json::from_value(record.payload).ok();
+        if first_user_prompt.is_none() {
+            if let Some(candidate) = extract_codex_user_prompt_from_record(&record) {
+                if normalize_codex_prompt_for_title(&candidate).is_some() {
+                    first_user_prompt = Some(candidate);
+                }
+            }
+        }
+
+        if meta.is_some() && first_user_prompt.is_some() {
+            break;
+        }
     }
 
-    None
+    meta.map(|meta| CodexSessionFileSummary {
+        meta,
+        first_user_prompt,
+    })
+}
+
+fn extract_codex_user_prompt_from_record(record: &CodexSessionJsonLine) -> Option<String> {
+    match record.line_type.as_str() {
+        "event_msg" => extract_codex_event_user_message(&record.payload),
+        "response_item" => extract_codex_response_item_user_message(&record.payload),
+        _ => None,
+    }
+}
+
+fn extract_codex_event_user_message(payload: &serde_json::Value) -> Option<String> {
+    if payload.get("type").and_then(|value| value.as_str()) != Some("user_message") {
+        return None;
+    }
+
+    payload
+        .get("message")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+}
+
+fn extract_codex_response_item_user_message(payload: &serde_json::Value) -> Option<String> {
+    if payload.get("type").and_then(|value| value.as_str()) != Some("message") {
+        return None;
+    }
+    if payload.get("role").and_then(|value| value.as_str()) != Some("user") {
+        return None;
+    }
+
+    let content = payload.get("content")?.as_array()?;
+    let text = content
+        .iter()
+        .filter_map(|entry| entry.get("text").and_then(|value| value.as_str()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn build_codex_session_display_title(cwd: &str, first_user_prompt: Option<&str>) -> String {
+    let context_label = codex_session_context_label(cwd);
+    let Some(summary) = first_user_prompt.and_then(normalize_codex_prompt_for_title) else {
+        return format!("{context_label} session");
+    };
+
+    format!("{context_label}: {summary}")
+}
+
+fn codex_session_context_label(cwd: &str) -> String {
+    Path::new(cwd)
+        .file_name()
+        .and_then(OsStr::to_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| "Workspace".to_string())
+}
+
+fn normalize_codex_prompt_for_title(prompt: &str) -> Option<String> {
+    let stripped = strip_codex_wrapper_blocks(prompt);
+    let without_instruction_headers = strip_codex_instruction_headers(&stripped);
+    let without_images = strip_codex_image_placeholders(&without_instruction_headers);
+    let without_urls = strip_leading_codex_urls(&collapse_whitespace(&without_images));
+    let trimmed = trim_codex_title_leading_phrase(without_urls.trim());
+    if !is_meaningful_codex_prompt(trimmed) {
+        return None;
+    }
+
+    let summary = summarize_codex_prompt(trimmed);
+    if summary.is_empty() {
+        None
+    } else {
+        Some(summary)
+    }
+}
+
+fn strip_codex_wrapper_blocks(prompt: &str) -> String {
+    ["image", "environment_context", "proposed_plan", "INSTRUCTIONS"]
+        .into_iter()
+        .fold(prompt.to_string(), |value, tag| remove_tag_block(&value, tag))
+}
+
+fn strip_codex_instruction_headers(value: &str) -> String {
+    let mut output = Vec::new();
+
+    for line in value.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("# AGENTS.md instructions for ") {
+            continue;
+        }
+        output.push(line);
+    }
+
+    output.join("\n")
+}
+
+fn remove_tag_block(input: &str, tag: &str) -> String {
+    let open_marker = format!("<{tag}");
+    let close_marker = format!("</{tag}>");
+    let mut output = input.to_string();
+
+    loop {
+        let Some(start) = output.find(&open_marker) else {
+            break;
+        };
+        let Some(end_offset) = output[start..].find(&close_marker) else {
+            break;
+        };
+        let end = start + end_offset + close_marker.len();
+        output.replace_range(start..end, " ");
+    }
+
+    output
+}
+
+fn strip_codex_image_placeholders(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut rest = value;
+
+    while let Some(start) = rest.find("[Image #") {
+        output.push_str(&rest[..start]);
+        let placeholder = &rest[start..];
+        let Some(end) = placeholder.find(']') else {
+            rest = &rest[start..];
+            break;
+        };
+        rest = &placeholder[end + 1..];
+    }
+
+    output.push_str(rest);
+    output
+}
+
+fn collapse_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn strip_leading_codex_urls(value: &str) -> String {
+    let mut tokens = value.split_whitespace().collect::<Vec<_>>();
+    while tokens.len() > 1
+        && tokens
+            .first()
+            .map(|token| token.starts_with("http://") || token.starts_with("https://"))
+            .unwrap_or(false)
+    {
+        tokens.remove(0);
+    }
+    tokens.join(" ")
+}
+
+fn trim_codex_title_leading_phrase(value: &str) -> &str {
+    let prefixes = [
+        "can you please ",
+        "could you please ",
+        "can you ",
+        "could you ",
+        "would you ",
+        "will you ",
+        "please ",
+        "i want you to ",
+        "i need you to ",
+        "help me ",
+    ];
+    let mut trimmed = value.trim();
+
+    loop {
+        let lower = trimmed.to_ascii_lowercase();
+        let Some(prefix) = prefixes.iter().find(|prefix| lower.starts_with(**prefix)) else {
+            break;
+        };
+        let next = trimmed[prefix.len()..].trim_start();
+        if next.is_empty() {
+            break;
+        }
+        trimmed = next;
+    }
+
+    trimmed
+}
+
+fn is_meaningful_codex_prompt(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.len() < 6 {
+        return false;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    !lower.starts_with("<environment_context>")
+}
+
+fn summarize_codex_prompt(value: &str) -> String {
+    let boundary = value
+        .char_indices()
+        .find_map(|(index, character)| match character {
+            '.' | '!' | '?' | ';' if index >= 24 => Some(index),
+            _ => None,
+        })
+        .unwrap_or(value.len());
+    let summary = value[..boundary]
+        .trim()
+        .trim_end_matches(|character: char| ".!?,;:".contains(character))
+        .trim();
+
+    truncate_chars(summary, MAX_CODEX_SESSION_TITLE_CHARS)
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut characters = value.chars();
+    let truncated = characters.by_ref().take(max_chars).collect::<String>();
+    if characters.next().is_some() {
+        let mut shortened = truncated.trim_end().to_string();
+        shortened.push_str("...");
+        shortened
+    } else {
+        truncated
+    }
 }
 
 fn normalize_path_for_comparison(path: &str) -> String {
@@ -4055,15 +4314,16 @@ mod tests {
     };
 
     use super::{
-        build_codex_cli_snapshot, collect_git_detail, collect_git_detail_with_binary,
-        compare_codex_cli_versions, complete_launcher_input_for_base, default_launcher_path,
-        execute_launcher_command, extract_login_shell_path, extract_navigation_target,
-        layout_for_pane_count, layout_presets, merge_path_values, normalize_workspace_path,
-        parse_battery_snapshot, parse_codex_cli_version, parse_git_status_porcelain,
-        persistence::ActivityEventKind, prepare_workspace_launch, resolve_navigation_path,
-        validate_git_cli_arg, BatteryState, CodexCliCandidateSnapshot, CodexCliSelectionMode,
-        CodexCliSource, CodexCliStatus, GitFileKind, GitState, RuntimeState, ThemeId,
-        WorkspaceTodoRecord,
+        build_codex_cli_snapshot, build_codex_session_display_title, collect_git_detail,
+        collect_git_detail_with_binary, compare_codex_cli_versions,
+        complete_launcher_input_for_base, default_launcher_path, execute_launcher_command,
+        extract_login_shell_path, extract_navigation_target, layout_for_pane_count,
+        layout_presets, merge_path_values, normalize_workspace_path, parse_battery_snapshot,
+        parse_codex_cli_version, parse_git_status_porcelain, persistence::ActivityEventKind,
+        prepare_workspace_launch, read_codex_session_summary, resolve_navigation_path,
+        validate_git_cli_arg, BatteryState, CodexCliCandidateSnapshot,
+        CodexCliSelectionMode, CodexCliSource, CodexCliStatus, GitFileKind, GitState,
+        RuntimeState, ThemeId, WorkspaceTodoRecord,
         DEFAULT_INTERFACE_TEXT_SCALE, DEFAULT_TERMINAL_FONT_SIZE,
     };
 
@@ -4103,6 +4363,146 @@ mod tests {
 
         assert_eq!(battery_percent, Some(100.0));
         assert!(matches!(battery_state, Some(BatteryState::Full)));
+    }
+
+    #[test]
+    fn codex_session_title_uses_cleaned_first_prompt() {
+        let title = build_codex_session_display_title(
+            "/tmp/crewdock",
+            Some(
+                "<image name=[Image #1]>preview</image> [Image #1] Can you please fix terminal right-click menu clipping so it stays on-screen?",
+            ),
+        );
+
+        assert_eq!(
+            title,
+            "crewdock: fix terminal right-click menu clipping so it stays on-screen"
+        );
+    }
+
+    #[test]
+    fn codex_session_title_drops_leading_urls() {
+        let title = build_codex_session_display_title(
+            "/tmp/crewdock",
+            Some("https://chatgpt.com/codex?foo=1 Could you review the render scheduler change in CrewDock?"),
+        );
+
+        assert_eq!(title, "crewdock: review the render scheduler change in CrewDock");
+    }
+
+    #[test]
+    fn codex_session_title_falls_back_when_no_prompt_exists() {
+        let title = build_codex_session_display_title("/tmp/crewdock", None);
+        assert_eq!(title, "crewdock session");
+    }
+
+    #[test]
+    fn codex_session_title_strips_instruction_wrapper_but_keeps_real_ask() {
+        let title = build_codex_session_display_title(
+            "/tmp/fastapi-backends",
+            Some(
+                "# AGENTS.md instructions for /tmp/fastapi-backends\n\n<INSTRUCTIONS>\ninternal guidance\n</INSTRUCTIONS>\nCan you inspect the auth flow and explain what is missing?",
+            ),
+        );
+
+        assert_eq!(
+            title,
+            "fastapi-backends: inspect the auth flow and explain what is missing"
+        );
+    }
+
+    #[test]
+    fn codex_session_summary_reads_event_user_message() {
+        let workspace = TestWorkspace::new();
+        let session_file = workspace.root_dir().join("codex-event.jsonl");
+        fs::write(
+            &session_file,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"session-1\",\"cwd\":\"/tmp/crewdock\",\"originator\":\"codex_cli_rs\",\"cli_version\":\"0.116.0\",\"source\":\"cli\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Can you inspect the right click menu clipping?\"}}\n",
+            ),
+        )
+        .unwrap();
+
+        let summary =
+            read_codex_session_summary(&session_file).expect("session summary should load");
+
+        assert_eq!(summary.meta.id, "session-1");
+        assert_eq!(
+            summary.first_user_prompt.as_deref(),
+            Some("Can you inspect the right click menu clipping?")
+        );
+    }
+
+    #[test]
+    fn codex_session_summary_skips_environment_context_and_uses_real_ask() {
+        let workspace = TestWorkspace::new();
+        let session_file = workspace.root_dir().join("codex-environment-context.jsonl");
+        fs::write(
+            &session_file,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"session-ctx\",\"cwd\":\"/tmp/fastapi-backends\",\"originator\":\"codex_cli_rs\",\"cli_version\":\"0.116.0\",\"source\":\"cli\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"<environment_context>\\n  <cwd>/tmp/fastapi-backends</cwd>\\n</environment_context>\"}]}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Can you map the auth endpoints for this backend?\"}}\n",
+            ),
+        )
+        .unwrap();
+
+        let summary =
+            read_codex_session_summary(&session_file).expect("session summary should load");
+
+        assert_eq!(
+            summary.first_user_prompt.as_deref(),
+            Some("Can you map the auth endpoints for this backend?")
+        );
+    }
+
+    #[test]
+    fn codex_session_summary_skips_agents_instructions_blob() {
+        let workspace = TestWorkspace::new();
+        let session_file = workspace.root_dir().join("codex-agents-instructions.jsonl");
+        fs::write(
+            &session_file,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"session-3\",\"cwd\":\"/tmp/fastapi-backends\",\"originator\":\"codex_cli_rs\",\"cli_version\":\"0.116.0\",\"source\":\"cli\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"# AGENTS.md instructions for /tmp/fastapi-backends\\n\\n<INSTRUCTIONS>\\ninternal guidance\\n</INSTRUCTIONS>\"}]}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Could you explain the current backend structure and what is left to build?\"}]}}\n",
+            ),
+        )
+        .unwrap();
+
+        let summary =
+            read_codex_session_summary(&session_file).expect("session summary should load");
+
+        assert_eq!(
+            summary.first_user_prompt.as_deref(),
+            Some("Could you explain the current backend structure and what is left to build?")
+        );
+    }
+
+    #[test]
+    fn codex_session_summary_falls_back_to_response_item_user_message() {
+        let workspace = TestWorkspace::new();
+        let session_file = workspace.root_dir().join("codex-response-item.jsonl");
+        fs::write(
+            &session_file,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"session-2\",\"cwd\":\"/tmp/crewdock\",\"originator\":\"codex_cli_rs\",\"cli_version\":\"0.116.0\",\"source\":\"cli\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"skip\"}]}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_image\"},{\"type\":\"input_text\",\"text\":\"Please audit the render path for perf pitfalls.\"}]}}\n",
+            ),
+        )
+        .unwrap();
+
+        let summary =
+            read_codex_session_summary(&session_file).expect("session summary should load");
+
+        assert_eq!(summary.meta.id, "session-2");
+        assert_eq!(
+            summary.first_user_prompt.as_deref(),
+            Some("Please audit the render path for perf pitfalls.")
+        );
     }
 
     #[test]
