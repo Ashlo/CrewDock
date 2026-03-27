@@ -169,13 +169,6 @@ fn spawn_terminal_session(
                 killer,
             },
         );
-        persistence::record_runtime_activity(
-            &mut runtime,
-            &workspace_id,
-            ActivityEventKind::PaneReady,
-            &label,
-            None,
-        );
         runtime.persist_to_disk()?;
         runtime.build_snapshot()
     };
@@ -189,6 +182,11 @@ fn spawn_terminal_session(
             label: label.clone(),
         },
     )?;
+    if let Err(error) =
+        super::maybe_auto_restore_codex_for_ready_pane(shared, app, &workspace_id, &pane_id)
+    {
+        eprintln!("failed to auto-restore Codex session: {error}");
+    }
 
     let app_handle = app.clone();
     let shared = shared.clone();
@@ -272,7 +270,6 @@ fn mark_pane_closed(
             .map_err(|_| "failed to acquire application state".to_string())?;
 
         let mut event = None;
-        let mut activity = None;
         runtime.sessions.remove(pane_id);
         if let Some(workspace) = runtime
             .workspaces
@@ -281,7 +278,6 @@ fn mark_pane_closed(
         {
             if let Some(pane) = workspace.panes.iter_mut().find(|pane| pane.id == pane_id) {
                 pane.status = PaneStatus::Closed;
-                activity = Some((workspace.id.clone(), pane.label.clone()));
                 event = Some(RuntimeEvent::PaneClosed {
                     workspace_id: workspace.id.clone(),
                     pane_id: pane_id.to_string(),
@@ -290,16 +286,7 @@ fn mark_pane_closed(
             }
         }
 
-        if let Some((workspace_id, label)) = activity {
-            persistence::record_runtime_activity(
-                &mut runtime,
-                &workspace_id,
-                ActivityEventKind::PaneClosed,
-                &label,
-                None,
-            );
-            runtime.persist_to_disk()?;
-        }
+        runtime.persist_to_disk()?;
 
         (runtime.build_snapshot(), event)
     };
@@ -317,13 +304,14 @@ fn fail_pane(
     pane_id: &str,
     error: String,
 ) -> Result<(), String> {
-    let (snapshot, event) = {
+    let (snapshot, event, activity_event) = {
         let mut runtime = shared
             .lock()
             .map_err(|_| "failed to acquire application state".to_string())?;
 
         let mut event = None;
         let mut activity = None;
+        let mut activity_event = None;
         runtime.sessions.remove(pane_id);
         if let Some(workspace) = runtime
             .workspaces
@@ -343,9 +331,10 @@ fn fail_pane(
         }
 
         if let Some((workspace_id, label, failure)) = activity {
-            persistence::record_runtime_activity(
+            activity_event = persistence::record_runtime_activity(
                 &mut runtime,
                 &workspace_id,
+                Some(pane_id),
                 ActivityEventKind::PaneFailed,
                 &label,
                 Some(failure.as_str()),
@@ -353,12 +342,20 @@ fn fail_pane(
             runtime.persist_to_disk()?;
         }
 
-        (runtime.build_snapshot(), event)
+        (runtime.build_snapshot(), event, activity_event)
     };
 
     emit_snapshot(app, &snapshot)?;
     if let Some(event) = event {
         emit_runtime_event(app, &event)?;
+    }
+    if let Some(activity_event) = activity_event {
+        emit_runtime_event(
+            app,
+            &RuntimeEvent::ActivityRecorded {
+                event: activity_event,
+            },
+        )?;
     }
     emit_terminal_data(
         app,

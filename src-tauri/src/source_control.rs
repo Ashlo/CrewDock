@@ -14,6 +14,7 @@ use tauri::AppHandle;
 use crate::{
     collect_git_detail,
     events::{emit_runtime_event, emit_snapshot, RuntimeEvent},
+    persistence::{self, ActivityEventKind},
     run_git_command, validate_git_cli_arg, AppSnapshot, GitFileSnapshot, GitState,
     GitSummarySnapshot, RuntimeState,
 };
@@ -743,6 +744,59 @@ fn format_git_task_start_output(args: &[String]) -> String {
     format!("$ git {}\n\nStarting task...\n", args.join(" "))
 }
 
+fn record_git_task_activity(
+    shared: &Arc<Mutex<RuntimeState>>,
+    workspace_id: &str,
+    task: &GitTaskSnapshot,
+) -> Result<Option<persistence::ActivityEventSnapshot>, String> {
+    let (kind, error) = match task.status {
+        GitTaskStatus::Succeeded => (ActivityEventKind::GitTaskSucceeded, None),
+        GitTaskStatus::Failed => (
+            ActivityEventKind::GitTaskFailed,
+            extract_git_task_error_summary(&task.output),
+        ),
+        GitTaskStatus::Running if task.can_write_input => {
+            (ActivityEventKind::GitTaskNeedsInput, None)
+        }
+        GitTaskStatus::Running => return Ok(None),
+    };
+
+    let mut runtime = shared
+        .lock()
+        .map_err(|_| "failed to acquire application state".to_string())?;
+    let activity_event = persistence::record_runtime_activity(
+        &mut runtime,
+        workspace_id,
+        None,
+        kind,
+        &task.title,
+        error.as_deref(),
+    );
+    runtime.persist_to_disk()?;
+    Ok(activity_event)
+}
+
+fn extract_git_task_error_summary(output: &str) -> Option<String> {
+    output
+        .lines()
+        .rev()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with("$ git ") && *line != "Starting task...")
+        .map(|line| truncate_activity_error(line, 180))
+}
+
+fn truncate_activity_error(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+
+    value
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>()
+        + "..."
+}
+
 fn spawn_git_task_process(
     repo_root: &Path,
     args: &[String],
@@ -857,7 +911,7 @@ fn stream_git_task_output(
                         &app,
                         &RuntimeEvent::GitTaskSnapshot {
                             workspace_id: workspace_id.clone(),
-                            task,
+                            task: task.clone(),
                         },
                     );
                 }
@@ -870,9 +924,22 @@ fn stream_git_task_output(
                         &app,
                         &RuntimeEvent::GitTaskSnapshot {
                             workspace_id: workspace_id.clone(),
-                            task,
+                            task: task.clone(),
                         },
                     );
+                    if let Ok(Some(activity_event)) =
+                        record_git_task_activity(&shared, &workspace_id, &task)
+                    {
+                        let _ = emit_runtime_event(
+                            &app,
+                            &RuntimeEvent::ActivityRecorded {
+                                event: activity_event,
+                            },
+                        );
+                    }
+                    if let Ok(snapshot) = rebuild_app_snapshot(&shared, &workspace_id) {
+                        let _ = emit_snapshot(&app, &snapshot);
+                    }
                 }
                 return;
             }
@@ -893,9 +960,17 @@ fn stream_git_task_output(
             &app,
             &RuntimeEvent::GitTaskSnapshot {
                 workspace_id: workspace_id.clone(),
-                task,
+                task: task.clone(),
             },
         );
+        if let Ok(Some(activity_event)) = record_git_task_activity(&shared, &workspace_id, &task) {
+            let _ = emit_runtime_event(
+                &app,
+                &RuntimeEvent::ActivityRecorded {
+                    event: activity_event,
+                },
+            );
+        }
     }
 
     if let Ok(snapshot) = rebuild_app_snapshot(&shared, &workspace_id) {
@@ -1597,14 +1672,15 @@ mod tests {
         fs,
         path::PathBuf,
         process::Command,
+        sync::{Arc, Mutex},
         time::{SystemTime, UNIX_EPOCH},
     };
 
     use super::{
         build_commit_message_generation_request, extract_openai_response_text,
         format_git_task_start_output, load_git_remotes, parse_commit_detail,
-        resolve_repo_relative_existing_path, run_git_task_blocking, select_default_git_remote,
-        GitTaskRecoveryKind, GitTaskStatus,
+        record_git_task_activity, resolve_repo_relative_existing_path, run_git_task_blocking,
+        select_default_git_remote, GitTaskRecoveryKind, GitTaskSnapshot, GitTaskStatus,
     };
 
     #[test]
@@ -2124,6 +2200,80 @@ mod tests {
         );
     }
 
+    #[test]
+    fn record_git_task_activity_stores_failed_dispatch_with_error_summary() {
+        let repo = init_test_repo("git-task-activity-failed");
+        let shared = Arc::new(Mutex::new(runtime_with_workspace(&repo)));
+        let task = GitTaskSnapshot {
+            id: "task-1".to_string(),
+            title: "Push main".to_string(),
+            command: "git push".to_string(),
+            status: GitTaskStatus::Failed,
+            output: "$ git push\n\nfatal: the current branch main has no upstream branch\n"
+                .to_string(),
+            can_write_input: false,
+            started_at: 1_710_000_000_000,
+            finished_at: Some(1_710_000_000_100),
+            exit_code: Some(128),
+            recovery: None,
+        };
+
+        let activity = record_git_task_activity(&shared, "workspace-1", &task)
+            .expect("activity should record")
+            .expect("failed task should emit dispatch");
+
+        assert_eq!(
+            activity.kind,
+            crate::persistence::ActivityEventKind::GitTaskFailed
+        );
+        assert_eq!(activity.workspace_id, "workspace-1");
+        assert_eq!(activity.pane_id, "");
+        assert_eq!(activity.label, "Push main");
+        assert_eq!(
+            activity.error,
+            "fatal: the current branch main has no upstream branch"
+        );
+
+        let runtime = shared.lock().expect("runtime should lock");
+        assert_eq!(runtime.activity_history.len(), 1);
+        assert_eq!(
+            runtime.activity_history[0].kind,
+            crate::persistence::ActivityEventKind::GitTaskFailed
+        );
+        assert_eq!(runtime.activity_history[0].label, "Push main");
+    }
+
+    #[test]
+    fn record_git_task_activity_marks_interactive_running_tasks_as_needs_input() {
+        let repo = init_test_repo("git-task-activity-input");
+        let shared = Arc::new(Mutex::new(runtime_with_workspace(&repo)));
+        let task = GitTaskSnapshot {
+            id: "task-2".to_string(),
+            title: "Publish branch".to_string(),
+            command: "git push --set-upstream origin feature/demo".to_string(),
+            status: GitTaskStatus::Running,
+            output: "$ git push --set-upstream origin feature/demo\n\n".to_string(),
+            can_write_input: true,
+            started_at: 1_710_000_000_000,
+            finished_at: None,
+            exit_code: None,
+            recovery: None,
+        };
+
+        let activity = record_git_task_activity(&shared, "workspace-1", &task)
+            .expect("activity should record")
+            .expect("interactive task should emit dispatch");
+
+        assert_eq!(
+            activity.kind,
+            crate::persistence::ActivityEventKind::GitTaskNeedsInput
+        );
+        assert_eq!(activity.workspace_id, "workspace-1");
+        assert_eq!(activity.pane_id, "");
+        assert_eq!(activity.label, "Publish branch");
+        assert!(activity.error.is_empty());
+    }
+
     fn unique_temp_dir(label: &str) -> PathBuf {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2176,6 +2326,8 @@ mod tests {
             started: true,
             git: None,
             codex_session_id: None,
+            codex_restore_bindings: Vec::new(),
+            file_draft: None,
         });
         runtime.active_workspace_id = Some("workspace-1".to_string());
         runtime

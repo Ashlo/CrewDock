@@ -19,6 +19,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use portable_pty::{ChildKiller, PtySize};
 use serde::{Deserialize, Serialize};
 use sysinfo::{CpuRefreshKind, DiskRefreshKind, Disks, MemoryRefreshKind, RefreshKind, System};
@@ -35,6 +36,9 @@ const MIN_TERMINAL_FONT_SIZE: f64 = 11.0;
 const MAX_TERMINAL_FONT_SIZE: f64 = 18.0;
 const MAX_CODEX_SESSION_SCAN_LINES: usize = 80;
 const MAX_CODEX_SESSION_TITLE_CHARS: usize = 72;
+const CODEX_PENDING_START_DISCOVERY_ATTEMPTS: usize = 20;
+const CODEX_PENDING_START_DISCOVERY_INTERVAL_MS: u64 = 750;
+const MAX_WORKSPACE_TEXT_FILE_BYTES: u64 = 1024 * 1024;
 const FILE_EXPLORER_HIDDEN_NAMES: [&str; 14] = [
     ".git",
     "node_modules",
@@ -54,7 +58,7 @@ const FILE_EXPLORER_HIDDEN_NAMES: [&str; 14] = [
 const LOGIN_SHELL_PATH_START_MARKER: &[u8] = b"__CREWDOCK_PATH_START__";
 const LOGIN_SHELL_PATH_END_MARKER: &[u8] = b"__CREWDOCK_PATH_END__";
 
-use events::emit_snapshot;
+use events::{emit_runtime_event, emit_snapshot};
 use persistence::resolve_persistence_path;
 use session_manager::{prepare_workspace_launch, spawn_pane_jobs, LiveSession, PaneJob};
 use source_control::{
@@ -104,6 +108,7 @@ struct RuntimeState {
     activity_history: Vec<persistence::ActivityEventRecord>,
     sessions: HashMap<String, LiveSession>,
     git_tasks: HashMap<String, GitTaskRecord>,
+    pending_codex_starts: Vec<PendingCodexStartRecord>,
     persistence_path: Option<PathBuf>,
 }
 
@@ -124,6 +129,33 @@ struct WorkspaceRecord {
     started: bool,
     git: Option<GitDetailSnapshot>,
     codex_session_id: Option<String>,
+    codex_restore_bindings: Vec<CodexPaneRestoreBindingRecord>,
+    file_draft: Option<WorkspaceFileDraftRecord>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum CodexRestoreBindingKind {
+    Codex,
+}
+
+#[derive(Debug, Clone)]
+struct CodexPaneRestoreBindingRecord {
+    slot_index: usize,
+    kind: CodexRestoreBindingKind,
+    session_id: String,
+    cwd: String,
+    last_bound_at_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+struct PendingCodexStartRecord {
+    workspace_id: String,
+    pane_id: String,
+    pane_slot_index: usize,
+    cwd: String,
+    started_at_ms: u64,
+    known_session_ids: HashSet<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -132,6 +164,14 @@ struct WorkspaceTodoRecord {
     id: String,
     text: String,
     done: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceFileDraftRecord {
+    relative_path: String,
+    draft: String,
+    base_version_token: String,
 }
 
 #[derive(Debug, Clone)]
@@ -171,6 +211,7 @@ impl RuntimeState {
             activity_history: Vec::new(),
             sessions: HashMap::new(),
             git_tasks: HashMap::new(),
+            pending_codex_starts: Vec::new(),
             persistence_path: None,
         }
     }
@@ -195,6 +236,7 @@ impl RuntimeState {
             pane_layout: workspace.pane_layout.clone(),
             todos: workspace.todos.clone(),
             git_detail: workspace.git.clone(),
+            file_draft: workspace.file_draft.clone(),
         });
         let active_workspace_name = active_workspace_record.map(|workspace| workspace.name.clone());
         let window_title = active_workspace_name
@@ -230,6 +272,7 @@ impl RuntimeState {
                     path: workspace.path.clone(),
                     layout: workspace.layout.clone(),
                     is_live: workspace.started,
+                    has_file_draft: workspace.file_draft.is_some(),
                     git_summary: workspace.git.as_ref().map(|git| git.summary.clone()),
                 })
                 .collect(),
@@ -303,6 +346,16 @@ impl RuntimeState {
             .into_iter()
             .filter_map(|pane_id| self.sessions.remove(&pane_id).map(|session| session.killer))
             .collect()
+    }
+
+    fn clear_pending_codex_starts_for_workspace(&mut self, workspace_id: &str) {
+        self.pending_codex_starts
+            .retain(|pending| pending.workspace_id != workspace_id);
+    }
+
+    fn clear_pending_codex_start_for_pane(&mut self, pane_id: &str) {
+        self.pending_codex_starts
+            .retain(|pending| pending.pane_id != pane_id);
     }
 }
 
@@ -444,7 +497,7 @@ struct CodexSessionJsonLine {
     payload: serde_json::Value,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct CodexSessionMetaPayload {
     id: String,
     cwd: String,
@@ -522,6 +575,28 @@ struct WorkspaceFileExplorerDirectorySnapshot {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkspaceTextFileSnapshot {
+    workspace_id: String,
+    relative_path: String,
+    content: String,
+    size_bytes: u64,
+    newline_style: WorkspaceTextFileNewlineStyle,
+    has_trailing_newline: bool,
+    version_token: String,
+    read_only: bool,
+    reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum WorkspaceTextFileNewlineStyle {
+    Lf,
+    CrLf,
+    Cr,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct WorkspaceFileExplorerEntrySnapshot {
     name: String,
     relative_path: String,
@@ -545,6 +620,7 @@ struct WorkspaceTabSnapshot {
     path: String,
     layout: LayoutPreset,
     is_live: bool,
+    has_file_draft: bool,
     git_summary: Option<GitSummarySnapshot>,
 }
 
@@ -559,6 +635,7 @@ struct WorkspaceSnapshot {
     pane_layout: PaneLayout,
     todos: Vec<WorkspaceTodoRecord>,
     git_detail: Option<GitDetailSnapshot>,
+    file_draft: Option<WorkspaceFileDraftRecord>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -715,6 +792,94 @@ impl Default for ThemeId {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum ExternalWorkspaceTargetKind {
+    Editor,
+    System,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct ExternalWorkspaceTargetSnapshot {
+    id: String,
+    label: String,
+    kind: ExternalWorkspaceTargetKind,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    icon_data_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExternalWorkspaceTargetSpec {
+    id: &'static str,
+    label: &'static str,
+    kind: ExternalWorkspaceTargetKind,
+    app_name: Option<&'static str>,
+}
+
+const EXTERNAL_WORKSPACE_TARGET_SPECS: [ExternalWorkspaceTargetSpec; 10] = [
+    ExternalWorkspaceTargetSpec {
+        id: "cursor",
+        label: "Cursor",
+        kind: ExternalWorkspaceTargetKind::Editor,
+        app_name: Some("Cursor"),
+    },
+    ExternalWorkspaceTargetSpec {
+        id: "vscode",
+        label: "VS Code",
+        kind: ExternalWorkspaceTargetKind::Editor,
+        app_name: Some("Visual Studio Code"),
+    },
+    ExternalWorkspaceTargetSpec {
+        id: "windsurf",
+        label: "Windsurf",
+        kind: ExternalWorkspaceTargetKind::Editor,
+        app_name: Some("Windsurf"),
+    },
+    ExternalWorkspaceTargetSpec {
+        id: "zed",
+        label: "Zed",
+        kind: ExternalWorkspaceTargetKind::Editor,
+        app_name: Some("Zed"),
+    },
+    ExternalWorkspaceTargetSpec {
+        id: "xcode",
+        label: "Xcode",
+        kind: ExternalWorkspaceTargetKind::Editor,
+        app_name: Some("Xcode"),
+    },
+    ExternalWorkspaceTargetSpec {
+        id: "android-studio",
+        label: "Android Studio",
+        kind: ExternalWorkspaceTargetKind::Editor,
+        app_name: Some("Android Studio"),
+    },
+    ExternalWorkspaceTargetSpec {
+        id: "finder",
+        label: "Finder",
+        kind: ExternalWorkspaceTargetKind::System,
+        app_name: None,
+    },
+    ExternalWorkspaceTargetSpec {
+        id: "terminal",
+        label: "Terminal",
+        kind: ExternalWorkspaceTargetKind::System,
+        app_name: Some("Terminal"),
+    },
+    ExternalWorkspaceTargetSpec {
+        id: "iterm2",
+        label: "iTerm2",
+        kind: ExternalWorkspaceTargetKind::System,
+        app_name: Some("iTerm"),
+    },
+    ExternalWorkspaceTargetSpec {
+        id: "warp",
+        label: "Warp",
+        kind: ExternalWorkspaceTargetKind::System,
+        app_name: Some("Warp"),
+    },
+];
+
 impl ThemeId {
     fn as_str(self) -> &'static str {
         match self {
@@ -794,6 +959,120 @@ fn normalize_optional_codex_session_id(value: Option<String>) -> Option<String> 
             Some(trimmed.to_string())
         }
     })
+}
+
+fn now_timestamp_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn workspace_pane_slot_index(workspace: &WorkspaceRecord, pane_id: &str) -> Option<usize> {
+    workspace.panes.iter().position(|pane| pane.id == pane_id)
+}
+
+fn binding_for_workspace_pane_slot(
+    workspace: &WorkspaceRecord,
+    slot_index: usize,
+) -> Option<&CodexPaneRestoreBindingRecord> {
+    workspace
+        .codex_restore_bindings
+        .iter()
+        .find(|binding| binding.slot_index == slot_index)
+}
+
+fn upsert_workspace_codex_restore_binding(
+    workspace: &mut WorkspaceRecord,
+    slot_index: usize,
+    session_id: String,
+    cwd: String,
+    at: u64,
+) {
+    if let Some(binding) = workspace
+        .codex_restore_bindings
+        .iter_mut()
+        .find(|binding| binding.slot_index == slot_index)
+    {
+        binding.kind = CodexRestoreBindingKind::Codex;
+        binding.session_id = session_id;
+        binding.cwd = cwd;
+        binding.last_bound_at_ms = at;
+    } else {
+        workspace
+            .codex_restore_bindings
+            .push(CodexPaneRestoreBindingRecord {
+                slot_index,
+                kind: CodexRestoreBindingKind::Codex,
+                session_id,
+                cwd,
+                last_bound_at_ms: at,
+            });
+    }
+
+    workspace
+        .codex_restore_bindings
+        .sort_by(|left, right| left.slot_index.cmp(&right.slot_index));
+}
+
+fn remove_workspace_codex_restore_binding(workspace: &mut WorkspaceRecord, slot_index: usize) {
+    workspace
+        .codex_restore_bindings
+        .retain(|binding| binding.slot_index != slot_index);
+}
+
+fn shift_workspace_codex_restore_bindings_for_insert(
+    workspace: &mut WorkspaceRecord,
+    insertion_index: usize,
+) {
+    for binding in &mut workspace.codex_restore_bindings {
+        if binding.slot_index >= insertion_index {
+            binding.slot_index += 1;
+        }
+    }
+}
+
+fn shift_workspace_codex_restore_bindings_for_remove(
+    workspace: &mut WorkspaceRecord,
+    removed_index: usize,
+) {
+    workspace
+        .codex_restore_bindings
+        .retain(|binding| binding.slot_index != removed_index);
+    for binding in &mut workspace.codex_restore_bindings {
+        if binding.slot_index > removed_index {
+            binding.slot_index -= 1;
+        }
+    }
+}
+
+fn shift_pending_codex_starts_for_insert(
+    runtime: &mut RuntimeState,
+    workspace_id: &str,
+    insertion_index: usize,
+) {
+    for pending in &mut runtime.pending_codex_starts {
+        if pending.workspace_id == workspace_id && pending.pane_slot_index >= insertion_index {
+            pending.pane_slot_index += 1;
+        }
+    }
+}
+
+fn shift_pending_codex_starts_for_remove(
+    runtime: &mut RuntimeState,
+    workspace_id: &str,
+    removed_index: usize,
+    removed_pane_id: &str,
+) {
+    runtime.pending_codex_starts.retain(|pending| {
+        !(pending.workspace_id == workspace_id && pending.pane_id == removed_pane_id)
+    });
+
+    for pending in &mut runtime.pending_codex_starts {
+        if pending.workspace_id == workspace_id && pending.pane_slot_index > removed_index {
+            pending.pane_slot_index -= 1;
+        }
+    }
 }
 
 fn detect_codex_cli_snapshot(configured_path: Option<&str>) -> CodexCliSnapshot {
@@ -1276,6 +1555,328 @@ fn discover_codex_sessions_for_workspace(
     matches
 }
 
+fn discover_codex_session_metas_for_workspace(
+    workspace_path: &str,
+) -> Vec<CodexSessionMetaPayload> {
+    let Some(root) = codex_sessions_root() else {
+        return Vec::new();
+    };
+    if !root.is_dir() {
+        return Vec::new();
+    }
+
+    let workspace_key = normalize_path_for_comparison(workspace_path);
+    let mut matches = Vec::new();
+
+    for session_file in collect_codex_session_files(&root) {
+        let Some(summary) = read_codex_session_summary(&session_file) else {
+            continue;
+        };
+        if normalize_path_for_comparison(&summary.meta.cwd) != workspace_key {
+            continue;
+        }
+        matches.push(summary.meta);
+    }
+
+    matches
+}
+
+fn discover_codex_session_ids_for_workspace(workspace_path: &str) -> HashSet<String> {
+    discover_codex_session_metas_for_workspace(workspace_path)
+        .into_iter()
+        .map(|meta| meta.id)
+        .collect()
+}
+
+fn find_codex_session_meta_for_workspace(
+    workspace_path: &str,
+    session_id: &str,
+) -> Option<CodexSessionMetaPayload> {
+    discover_codex_session_metas_for_workspace(workspace_path)
+        .into_iter()
+        .find(|meta| meta.id == session_id)
+}
+
+fn maybe_auto_restore_codex_for_ready_pane(
+    shared: &Arc<Mutex<RuntimeState>>,
+    app: &AppHandle,
+    workspace_id: &str,
+    pane_id: &str,
+) -> Result<(), String> {
+    let outcome = {
+        let mut runtime = shared
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+        let Some(workspace_index) = runtime
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == workspace_id)
+        else {
+            return Ok(());
+        };
+        let Some(slot_index) =
+            workspace_pane_slot_index(&runtime.workspaces[workspace_index], pane_id)
+        else {
+            return Ok(());
+        };
+        let Some(binding) =
+            binding_for_workspace_pane_slot(&runtime.workspaces[workspace_index], slot_index)
+                .cloned()
+        else {
+            return Ok(());
+        };
+
+        let Some(writer) = runtime.sessions.get(pane_id).and_then(|session| {
+            (session.workspace_id == workspace_id).then_some(session.writer.clone())
+        }) else {
+            return Ok(());
+        };
+
+        if runtime.codex_cli.effective_path.is_none() {
+            let error = runtime
+                .codex_cli
+                .message
+                .clone()
+                .unwrap_or_else(|| "No Codex CLI is configured.".to_string());
+            (
+                None,
+                None,
+                None,
+                None,
+                Some(events::RuntimeEvent::CodexRestoreFailed {
+                    workspace_id: workspace_id.to_string(),
+                    pane_id: pane_id.to_string(),
+                    session_id: Some(binding.session_id.clone()),
+                    error,
+                }),
+                None,
+            )
+        } else if find_codex_session_meta_for_workspace(&binding.cwd, &binding.session_id).is_none()
+        {
+            remove_workspace_codex_restore_binding(
+                &mut runtime.workspaces[workspace_index],
+                slot_index,
+            );
+            runtime.persist_to_disk()?;
+            let snapshot = runtime.build_snapshot();
+            (
+                None,
+                None,
+                None,
+                None,
+                Some(events::RuntimeEvent::CodexRestoreFailed {
+                    workspace_id: workspace_id.to_string(),
+                    pane_id: pane_id.to_string(),
+                    session_id: Some(binding.session_id.clone()),
+                    error: "Saved Codex session is no longer present in local history.".to_string(),
+                }),
+                Some(snapshot),
+            )
+        } else {
+            let codex_binary = runtime.codex_cli.effective_path.clone().unwrap_or_default();
+            let command = format!(
+                "{} resume {} -C {}\n",
+                shell_escape(&codex_binary),
+                shell_escape(&binding.session_id),
+                shell_escape(&binding.cwd),
+            );
+            (
+                Some(writer),
+                Some(command),
+                Some(events::RuntimeEvent::CodexRestoreStarted {
+                    workspace_id: workspace_id.to_string(),
+                    pane_id: pane_id.to_string(),
+                    session_id: binding.session_id.clone(),
+                }),
+                Some(events::RuntimeEvent::CodexRestoreSucceeded {
+                    workspace_id: workspace_id.to_string(),
+                    pane_id: pane_id.to_string(),
+                    session_id: binding.session_id.clone(),
+                }),
+                None,
+                None,
+            )
+        }
+    };
+    let (writer, command, start_event, success_event, failure_event, snapshot) = outcome;
+
+    if let Some(snapshot) = snapshot.as_ref() {
+        emit_snapshot(app, snapshot)?;
+    }
+    if let Some(event) = failure_event.as_ref() {
+        emit_runtime_event(app, event)?;
+        return Ok(());
+    }
+
+    let Some(writer) = writer else {
+        return Ok(());
+    };
+    let Some(command) = command else {
+        return Ok(());
+    };
+
+    if let Some(event) = start_event.as_ref() {
+        emit_runtime_event(app, event)?;
+    }
+
+    if let Err(error) = write_shell_command(&writer, &command) {
+        let session_id = match start_event.as_ref() {
+            Some(events::RuntimeEvent::CodexRestoreStarted { session_id, .. }) => {
+                Some(session_id.clone())
+            }
+            _ => None,
+        };
+        emit_runtime_event(
+            app,
+            &events::RuntimeEvent::CodexRestoreFailed {
+                workspace_id: workspace_id.to_string(),
+                pane_id: pane_id.to_string(),
+                session_id,
+                error,
+            },
+        )?;
+        return Ok(());
+    }
+
+    if let Some(event) = success_event.as_ref() {
+        emit_runtime_event(app, event)?;
+    }
+    Ok(())
+}
+
+fn spawn_pending_codex_start_discovery(
+    shared: Arc<Mutex<RuntimeState>>,
+    app: AppHandle,
+    workspace_id: String,
+) {
+    std::thread::spawn(move || {
+        for _ in 0..CODEX_PENDING_START_DISCOVERY_ATTEMPTS {
+            match try_bind_pending_codex_start(&shared, &app, &workspace_id) {
+                Ok(true) => return,
+                Ok(false) => {
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        CODEX_PENDING_START_DISCOVERY_INTERVAL_MS,
+                    ));
+                }
+                Err(error) => {
+                    eprintln!("failed to bind fresh Codex session: {error}");
+                    return;
+                }
+            }
+        }
+    });
+}
+
+fn try_bind_pending_codex_start(
+    shared: &Arc<Mutex<RuntimeState>>,
+    app: &AppHandle,
+    workspace_id: &str,
+) -> Result<bool, String> {
+    let pending = {
+        let mut runtime = shared
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+        let Some(workspace) = runtime
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == workspace_id)
+        else {
+            runtime.clear_pending_codex_starts_for_workspace(workspace_id);
+            return Ok(true);
+        };
+
+        let pending_for_workspace = runtime
+            .pending_codex_starts
+            .iter()
+            .filter(|pending| pending.workspace_id == workspace_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        if pending_for_workspace.is_empty() {
+            return Ok(true);
+        }
+        if pending_for_workspace.len() > 1 {
+            runtime.clear_pending_codex_starts_for_workspace(workspace_id);
+            return Ok(true);
+        }
+
+        let pending = pending_for_workspace[0].clone();
+        if workspace_pane_slot_index(workspace, &pending.pane_id).is_none() {
+            runtime.clear_pending_codex_start_for_pane(&pending.pane_id);
+            return Ok(true);
+        }
+        pending
+    };
+
+    let session_metas = discover_codex_session_metas_for_workspace(&pending.cwd);
+    let new_sessions = session_metas
+        .into_iter()
+        .filter(|meta| !pending.known_session_ids.contains(meta.id.as_str()))
+        .collect::<Vec<_>>();
+    if new_sessions.is_empty() {
+        return Ok(false);
+    }
+
+    if new_sessions.len() > 1 {
+        let mut runtime = shared
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+        runtime.clear_pending_codex_starts_for_workspace(workspace_id);
+        return Ok(true);
+    }
+
+    let discovered = new_sessions[0].clone();
+    let snapshot = {
+        let mut runtime = shared
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+        let Some(workspace_index) = runtime
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == workspace_id)
+        else {
+            runtime.clear_pending_codex_starts_for_workspace(workspace_id);
+            return Ok(true);
+        };
+        let pending_count = runtime
+            .pending_codex_starts
+            .iter()
+            .filter(|entry| entry.workspace_id == workspace_id)
+            .count();
+        if pending_count != 1 {
+            runtime.clear_pending_codex_starts_for_workspace(workspace_id);
+            return Ok(true);
+        }
+        let Some(current_pending) = runtime
+            .pending_codex_starts
+            .iter()
+            .find(|entry| entry.workspace_id == workspace_id)
+            .cloned()
+        else {
+            return Ok(true);
+        };
+        if current_pending.pane_id != pending.pane_id
+            || current_pending.started_at_ms != pending.started_at_ms
+        {
+            return Ok(true);
+        }
+
+        upsert_workspace_codex_restore_binding(
+            &mut runtime.workspaces[workspace_index],
+            pending.pane_slot_index,
+            discovered.id.clone(),
+            discovered.cwd.clone(),
+            now_timestamp_ms(),
+        );
+        runtime.workspaces[workspace_index].codex_session_id = Some(discovered.id.clone());
+        runtime.clear_pending_codex_start_for_pane(&pending.pane_id);
+        runtime.persist_to_disk()?;
+        runtime.build_snapshot()
+    };
+
+    emit_snapshot(app, &snapshot)?;
+    Ok(true)
+}
+
 fn codex_sessions_root() -> Option<PathBuf> {
     home_dir()
         .ok()
@@ -1440,9 +2041,16 @@ fn normalize_codex_prompt_for_title(prompt: &str) -> Option<String> {
 }
 
 fn strip_codex_wrapper_blocks(prompt: &str) -> String {
-    ["image", "environment_context", "proposed_plan", "INSTRUCTIONS"]
-        .into_iter()
-        .fold(prompt.to_string(), |value, tag| remove_tag_block(&value, tag))
+    [
+        "image",
+        "environment_context",
+        "proposed_plan",
+        "INSTRUCTIONS",
+    ]
+    .into_iter()
+    .fold(prompt.to_string(), |value, tag| {
+        remove_tag_block(&value, tag)
+    })
 }
 
 fn strip_codex_instruction_headers(value: &str) -> String {
@@ -1600,7 +2208,8 @@ fn load_workspace_file_explorer_directory_snapshot(
         .ok_or_else(|| "workspace not found".to_string())?;
     let workspace_root = normalize_workspace_path(&workspace.path)?;
     let normalized_relative_path = normalize_workspace_relative_path(relative_path)?;
-    let target = resolve_workspace_file_explorer_target(&workspace_root, &normalized_relative_path)?;
+    let target =
+        resolve_workspace_file_explorer_target(&workspace_root, &normalized_relative_path)?;
     let entries =
         list_workspace_file_explorer_entries(&workspace_root, &normalized_relative_path, &target)?;
 
@@ -1662,6 +2271,311 @@ fn resolve_workspace_file_explorer_target(
     }
 
     Ok(resolved)
+}
+
+struct ResolvedWorkspaceTextFileTarget {
+    workspace_id: String,
+    relative_path: String,
+    target_path: PathBuf,
+    metadata: fs::Metadata,
+    is_symlink: bool,
+}
+
+fn resolve_workspace_text_file_target(
+    runtime: &RuntimeState,
+    workspace_id: &str,
+    relative_path: &str,
+) -> Result<ResolvedWorkspaceTextFileTarget, String> {
+    let workspace = runtime
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.id == workspace_id)
+        .ok_or_else(|| "workspace not found".to_string())?;
+    let workspace_root = normalize_workspace_path(&workspace.path)?;
+    let normalized_relative_path = normalize_workspace_relative_path(relative_path)?;
+    if normalized_relative_path.is_empty() {
+        return Err("path must be workspace-relative".to_string());
+    }
+
+    let target_path = workspace_root.join(&normalized_relative_path);
+    let metadata = fs::symlink_metadata(&target_path)
+        .map_err(|error| format!("failed to access file: {error}"))?;
+    let is_symlink = metadata.file_type().is_symlink();
+    if !is_symlink {
+        let resolved = fs::canonicalize(&target_path)
+            .map_err(|error| format!("failed to access file: {error}"))?;
+        if !resolved.starts_with(&workspace_root) {
+            return Err("path escapes the workspace root".to_string());
+        }
+        if !resolved.is_file() {
+            return Err("path must be a file".to_string());
+        }
+    }
+
+    Ok(ResolvedWorkspaceTextFileTarget {
+        workspace_id: workspace.id.clone(),
+        relative_path: normalized_relative_path,
+        target_path,
+        metadata,
+        is_symlink,
+    })
+}
+
+fn workspace_text_file_metadata_version_token(metadata: &fs::Metadata) -> String {
+    let modified_ns = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    format!("{}:{modified_ns}", metadata.len())
+}
+
+fn workspace_text_file_content_version_token(bytes: &[u8]) -> String {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+
+    format!("{}:{hash:016x}", bytes.len())
+}
+
+fn detect_workspace_text_file_newline_style(
+    content: &str,
+) -> Result<WorkspaceTextFileNewlineStyle, String> {
+    let bytes = content.as_bytes();
+    let mut saw_lf = false;
+    let mut saw_crlf = false;
+    let mut saw_cr = false;
+    let mut index = 0;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\r' => {
+                if bytes.get(index + 1) == Some(&b'\n') {
+                    saw_crlf = true;
+                    index += 2;
+                } else {
+                    saw_cr = true;
+                    index += 1;
+                }
+            }
+            b'\n' => {
+                saw_lf = true;
+                index += 1;
+            }
+            _ => {
+                index += 1;
+            }
+        }
+    }
+
+    let newline_variant_count = usize::from(saw_lf) + usize::from(saw_crlf) + usize::from(saw_cr);
+    if newline_variant_count > 1 {
+        return Err("CrewDock only edits files with a single newline style.".to_string());
+    }
+
+    Ok(if saw_crlf {
+        WorkspaceTextFileNewlineStyle::CrLf
+    } else if saw_cr {
+        WorkspaceTextFileNewlineStyle::Cr
+    } else {
+        WorkspaceTextFileNewlineStyle::Lf
+    })
+}
+
+fn load_workspace_text_file_snapshot(
+    runtime: &RuntimeState,
+    workspace_id: &str,
+    relative_path: &str,
+) -> Result<WorkspaceTextFileSnapshot, String> {
+    let resolved = resolve_workspace_text_file_target(runtime, workspace_id, relative_path)?;
+    let metadata_version_token = workspace_text_file_metadata_version_token(&resolved.metadata);
+
+    if resolved.is_symlink {
+        return Ok(WorkspaceTextFileSnapshot {
+            workspace_id: resolved.workspace_id,
+            relative_path: resolved.relative_path,
+            content: String::new(),
+            size_bytes: resolved.metadata.len(),
+            newline_style: WorkspaceTextFileNewlineStyle::Lf,
+            has_trailing_newline: false,
+            version_token: metadata_version_token,
+            read_only: true,
+            reason: Some("Symlinked files are not editable in CrewDock yet.".to_string()),
+        });
+    }
+
+    if resolved.metadata.len() > MAX_WORKSPACE_TEXT_FILE_BYTES {
+        return Ok(WorkspaceTextFileSnapshot {
+            workspace_id: resolved.workspace_id,
+            relative_path: resolved.relative_path,
+            content: String::new(),
+            size_bytes: resolved.metadata.len(),
+            newline_style: WorkspaceTextFileNewlineStyle::Lf,
+            has_trailing_newline: false,
+            version_token: metadata_version_token,
+            read_only: true,
+            reason: Some(format!(
+                "CrewDock only edits files up to {} KB in this view.",
+                MAX_WORKSPACE_TEXT_FILE_BYTES / 1024
+            )),
+        });
+    }
+
+    let bytes =
+        fs::read(&resolved.target_path).map_err(|error| format!("failed to read file: {error}"))?;
+    let version_token = workspace_text_file_content_version_token(&bytes);
+    if bytes.contains(&0) {
+        return Ok(WorkspaceTextFileSnapshot {
+            workspace_id: resolved.workspace_id,
+            relative_path: resolved.relative_path,
+            content: String::new(),
+            size_bytes: resolved.metadata.len(),
+            newline_style: WorkspaceTextFileNewlineStyle::Lf,
+            has_trailing_newline: false,
+            version_token,
+            read_only: true,
+            reason: Some("Binary files are not editable in CrewDock yet.".to_string()),
+        });
+    }
+
+    let content = match String::from_utf8(bytes) {
+        Ok(content) => content,
+        Err(_) => {
+            return Ok(WorkspaceTextFileSnapshot {
+                workspace_id: resolved.workspace_id,
+                relative_path: resolved.relative_path,
+                content: String::new(),
+                size_bytes: resolved.metadata.len(),
+                newline_style: WorkspaceTextFileNewlineStyle::Lf,
+                has_trailing_newline: false,
+                version_token,
+                read_only: true,
+                reason: Some("CrewDock only edits UTF-8 text files in this view.".to_string()),
+            });
+        }
+    };
+    let newline_style = match detect_workspace_text_file_newline_style(&content) {
+        Ok(style) => style,
+        Err(reason) => {
+            return Ok(WorkspaceTextFileSnapshot {
+                workspace_id: resolved.workspace_id,
+                relative_path: resolved.relative_path,
+                content,
+                size_bytes: resolved.metadata.len(),
+                newline_style: WorkspaceTextFileNewlineStyle::Lf,
+                has_trailing_newline: false,
+                version_token,
+                read_only: true,
+                reason: Some(reason),
+            });
+        }
+    };
+    let has_trailing_newline = content.ends_with('\n') || content.ends_with('\r');
+    let read_only = resolved.metadata.permissions().readonly();
+    let reason = read_only.then(|| "This file is read-only on disk.".to_string());
+
+    Ok(WorkspaceTextFileSnapshot {
+        workspace_id: resolved.workspace_id,
+        relative_path: resolved.relative_path,
+        content,
+        size_bytes: resolved.metadata.len(),
+        newline_style,
+        has_trailing_newline,
+        version_token,
+        read_only,
+        reason,
+    })
+}
+
+fn save_workspace_text_file_snapshot(
+    runtime: &RuntimeState,
+    workspace_id: &str,
+    relative_path: &str,
+    content: &str,
+    expected_version_token: &str,
+) -> Result<WorkspaceTextFileSnapshot, String> {
+    let resolved = resolve_workspace_text_file_target(runtime, workspace_id, relative_path)?;
+    if resolved.is_symlink {
+        return Err("symlinked files are not editable in CrewDock yet.".to_string());
+    }
+    if resolved.metadata.permissions().readonly() {
+        return Err("file is read-only on disk.".to_string());
+    }
+
+    let current_version_token = if resolved.metadata.len() <= MAX_WORKSPACE_TEXT_FILE_BYTES {
+        let current_bytes = fs::read(&resolved.target_path)
+            .map_err(|error| format!("failed to read file: {error}"))?;
+        workspace_text_file_content_version_token(&current_bytes)
+    } else {
+        workspace_text_file_metadata_version_token(&resolved.metadata)
+    };
+    if current_version_token != expected_version_token.trim() {
+        return Err("save conflict: file changed on disk.".to_string());
+    }
+
+    if content.len() as u64 > MAX_WORKSPACE_TEXT_FILE_BYTES {
+        return Err(format!(
+            "CrewDock only edits files up to {} KB in this view.",
+            MAX_WORKSPACE_TEXT_FILE_BYTES / 1024
+        ));
+    }
+
+    fs::write(&resolved.target_path, content.as_bytes())
+        .map_err(|error| format!("failed to save file: {error}"))?;
+    load_workspace_text_file_snapshot(runtime, workspace_id, relative_path)
+}
+
+fn persist_workspace_file_draft_record(
+    runtime: &mut RuntimeState,
+    workspace_id: &str,
+    relative_path: &str,
+    draft: String,
+    base_version_token: &str,
+) -> Result<(), String> {
+    let workspace = runtime
+        .workspaces
+        .iter_mut()
+        .find(|workspace| workspace.id == workspace_id)
+        .ok_or_else(|| "workspace not found".to_string())?;
+    let normalized_relative_path = normalize_workspace_relative_path(relative_path)?;
+    if normalized_relative_path.is_empty() {
+        return Err("path must be workspace-relative".to_string());
+    }
+
+    let normalized_base_version_token = base_version_token.trim().to_string();
+    if normalized_base_version_token.is_empty() {
+        return Err("base version token is required".to_string());
+    }
+
+    workspace.file_draft = Some(WorkspaceFileDraftRecord {
+        relative_path: normalized_relative_path,
+        draft,
+        base_version_token: normalized_base_version_token,
+    });
+    runtime.persist_to_disk()
+}
+
+fn clear_workspace_file_draft_record(
+    runtime: &mut RuntimeState,
+    workspace_id: &str,
+) -> Result<(), String> {
+    let workspace = runtime
+        .workspaces
+        .iter_mut()
+        .find(|workspace| workspace.id == workspace_id)
+        .ok_or_else(|| "workspace not found".to_string())?;
+    if workspace.file_draft.is_none() {
+        return Ok(());
+    }
+
+    workspace.file_draft = None;
+    runtime.persist_to_disk()
 }
 
 fn list_workspace_file_explorer_entries(
@@ -1727,7 +2641,11 @@ fn compare_workspace_file_explorer_entries(
 ) -> Ordering {
     workspace_file_explorer_sort_bucket(left.kind)
         .cmp(&workspace_file_explorer_sort_bucket(right.kind))
-        .then_with(|| left.name.to_ascii_lowercase().cmp(&right.name.to_ascii_lowercase()))
+        .then_with(|| {
+            left.name
+                .to_ascii_lowercase()
+                .cmp(&right.name.to_ascii_lowercase())
+        })
         .then_with(|| left.name.cmp(&right.name))
 }
 
@@ -2002,6 +2920,7 @@ fn reset_to_launcher(state: State<'_, AppState>, app: AppHandle) -> Result<AppSn
         let killers = runtime.drain_all_killers();
         runtime.workspaces.clear();
         runtime.active_workspace_id = None;
+        runtime.pending_codex_starts.clear();
         runtime.persist_to_disk()?;
         (runtime.build_snapshot(), killers)
     };
@@ -2287,6 +3206,245 @@ fn show_in_finder(path: String) -> Result<(), String> {
     Ok(())
 }
 
+fn external_workspace_target_spec(target_id: &str) -> Option<ExternalWorkspaceTargetSpec> {
+    EXTERNAL_WORKSPACE_TARGET_SPECS
+        .iter()
+        .copied()
+        .find(|spec| spec.id == target_id)
+}
+
+#[cfg(target_os = "macos")]
+fn common_macos_app_search_roots() -> Vec<PathBuf> {
+    let mut roots = vec![
+        PathBuf::from("/Applications"),
+        PathBuf::from("/Applications/Utilities"),
+        PathBuf::from("/System/Applications"),
+        PathBuf::from("/System/Applications/Utilities"),
+    ];
+
+    if let Ok(home) = env::var("HOME") {
+        roots.push(PathBuf::from(home).join("Applications"));
+    }
+
+    roots
+}
+
+#[cfg(target_os = "macos")]
+fn external_workspace_target_app_path(spec: ExternalWorkspaceTargetSpec) -> Option<PathBuf> {
+    let app_name = match spec.id {
+        "finder" => return Some(PathBuf::from("/System/Library/CoreServices/Finder.app")),
+        _ => spec.app_name?,
+    };
+
+    let bundle_name = format!("{app_name}.app");
+    common_macos_app_search_roots()
+        .into_iter()
+        .map(|root| root.join(&bundle_name))
+        .find(|candidate| candidate.is_dir())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn external_workspace_target_app_path(_spec: ExternalWorkspaceTargetSpec) -> Option<PathBuf> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn bundle_info_value(path: &Path, key: &str) -> Option<String> {
+    let output = ProcessCommand::new("plutil")
+        .arg("-convert")
+        .arg("json")
+        .arg("-o")
+        .arg("-")
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let value = serde_json::from_slice::<serde_json::Value>(&output.stdout).ok()?;
+    value
+        .get(key)
+        .and_then(|entry| entry.as_str())
+        .map(|entry| entry.trim().to_string())
+        .filter(|entry| !entry.is_empty())
+}
+
+#[cfg(target_os = "macos")]
+fn workspace_target_icon_candidates(
+    app_path: &Path,
+    spec: ExternalWorkspaceTargetSpec,
+) -> Vec<PathBuf> {
+    let resources_dir = app_path.join("Contents").join("Resources");
+    if !resources_dir.is_dir() {
+        return Vec::new();
+    }
+
+    let info_plist = app_path.join("Contents").join("Info.plist");
+    let mut raw_candidates = Vec::new();
+    if info_plist.is_file() {
+        if let Some(icon_file) = bundle_info_value(&info_plist, "CFBundleIconFile") {
+            raw_candidates.push(icon_file);
+        }
+        if let Some(icon_name) = bundle_info_value(&info_plist, "CFBundleIconName") {
+            raw_candidates.push(icon_name);
+        }
+    }
+    raw_candidates.push(spec.label.to_string());
+    if let Some(app_name) = spec.app_name {
+        raw_candidates.push(app_name.to_string());
+    }
+    if let Some(bundle_name) = app_path.file_stem().and_then(|name| name.to_str()) {
+        raw_candidates.push(bundle_name.to_string());
+    }
+
+    let mut candidates = Vec::new();
+    for raw in raw_candidates {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let direct = resources_dir.join(trimmed);
+        if direct.extension().is_some() {
+            candidates.push(direct);
+        } else {
+            candidates.push(resources_dir.join(format!("{trimmed}.icns")));
+            candidates.push(resources_dir.join(format!("{trimmed}.png")));
+        }
+    }
+
+    let mut deduped = Vec::new();
+    let mut seen = HashSet::new();
+    for candidate in candidates {
+        let key = candidate.to_string_lossy().to_string();
+        if seen.insert(key) {
+            deduped.push(candidate);
+        }
+    }
+    deduped
+}
+
+#[cfg(target_os = "macos")]
+fn external_workspace_target_icon_path(
+    app_path: &Path,
+    spec: ExternalWorkspaceTargetSpec,
+) -> Option<PathBuf> {
+    workspace_target_icon_candidates(app_path, spec)
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+}
+
+#[cfg(target_os = "macos")]
+fn convert_workspace_target_icon_to_png_bytes(
+    icon_path: &Path,
+    target_id: &str,
+) -> Option<Vec<u8>> {
+    let temp_path = env::temp_dir().join(format!(
+        "crewdock-target-icon-{}-{}-{}.png",
+        std::process::id(),
+        target_id,
+        now_timestamp_ms()
+    ));
+    let output = ProcessCommand::new("sips")
+        .arg("-s")
+        .arg("format")
+        .arg("png")
+        .arg(icon_path)
+        .arg("--resampleHeightWidth")
+        .arg("64")
+        .arg("64")
+        .arg("--out")
+        .arg(&temp_path)
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        let _ = fs::remove_file(&temp_path);
+        return None;
+    }
+
+    let bytes = fs::read(&temp_path).ok()?;
+    let _ = fs::remove_file(&temp_path);
+    Some(bytes)
+}
+
+#[cfg(target_os = "macos")]
+fn load_external_workspace_target_icon_data_url(
+    app_path: &Path,
+    spec: ExternalWorkspaceTargetSpec,
+) -> Option<String> {
+    let icon_path = external_workspace_target_icon_path(app_path, spec)?;
+    let icon_bytes = convert_workspace_target_icon_to_png_bytes(&icon_path, spec.id)?;
+    Some(format!(
+        "data:image/png;base64,{}",
+        BASE64_STANDARD.encode(icon_bytes)
+    ))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn load_external_workspace_target_icon_data_url(
+    _app_path: &Path,
+    _spec: ExternalWorkspaceTargetSpec,
+) -> Option<String> {
+    None
+}
+
+fn build_external_workspace_target_snapshot(
+    spec: ExternalWorkspaceTargetSpec,
+    icon_data_url: Option<String>,
+) -> ExternalWorkspaceTargetSnapshot {
+    ExternalWorkspaceTargetSnapshot {
+        id: spec.id.to_string(),
+        label: spec.label.to_string(),
+        kind: spec.kind,
+        icon_data_url,
+    }
+}
+
+#[tauri::command]
+fn list_external_workspace_targets() -> Result<Vec<ExternalWorkspaceTargetSnapshot>, String> {
+    Ok(EXTERNAL_WORKSPACE_TARGET_SPECS
+        .iter()
+        .copied()
+        .filter_map(|spec| {
+            let app_path = external_workspace_target_app_path(spec)?;
+            Some(build_external_workspace_target_snapshot(
+                spec,
+                load_external_workspace_target_icon_data_url(&app_path, spec),
+            ))
+        })
+        .collect())
+}
+
+#[tauri::command]
+fn open_workspace_in_target(path: String, target_id: String) -> Result<(), String> {
+    let target_path = normalize_workspace_path(&path)?;
+    let spec = external_workspace_target_spec(target_id.trim())
+        .ok_or_else(|| format!("unsupported workspace target: {}", target_id.trim()))?;
+
+    let Some(app_path) = external_workspace_target_app_path(spec) else {
+        return Err(format!("{} is not available on this system", spec.label));
+    };
+
+    #[cfg(target_os = "macos")]
+    {
+        let mut command = ProcessCommand::new("open");
+        command.arg("-a").arg(app_path);
+        command
+            .arg(target_path)
+            .spawn()
+            .map_err(|error| format!("failed to open {}: {error}", spec.label))?;
+        return Ok(());
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = target_path;
+        Err("Opening workspaces in external apps is not supported on this platform yet".to_string())
+    }
+}
+
 #[tauri::command]
 fn run_launcher_command(
     input: String,
@@ -2531,13 +3689,11 @@ fn resume_workspace_codex_session(
             .iter()
             .position(|workspace| workspace.id == workspace_id)
             .ok_or_else(|| "workspace not found".to_string())?;
-        if !runtime.workspaces[workspace_index]
-            .panes
-            .iter()
-            .any(|pane| pane.id == pane_id)
-        {
+        let Some(slot_index) =
+            workspace_pane_slot_index(&runtime.workspaces[workspace_index], &pane_id)
+        else {
             return Err("pane does not belong to the workspace".to_string());
-        }
+        };
 
         let writer = runtime
             .sessions
@@ -2559,6 +3715,14 @@ fn resume_workspace_codex_session(
         })?;
         let workspace_path = runtime.workspaces[workspace_index].path.clone();
         runtime.workspaces[workspace_index].codex_session_id = Some(session_id.clone());
+        upsert_workspace_codex_restore_binding(
+            &mut runtime.workspaces[workspace_index],
+            slot_index,
+            session_id.clone(),
+            workspace_path.clone(),
+            now_timestamp_ms(),
+        );
+        runtime.clear_pending_codex_start_for_pane(&pane_id);
         runtime.persist_to_disk()?;
         let command = format!(
             "{} resume {} -C {}\n",
@@ -2579,8 +3743,10 @@ fn start_workspace_codex_session(
     workspace_id: String,
     pane_id: String,
     state: State<'_, AppState>,
+    app: AppHandle,
 ) -> Result<(), String> {
-    let (writer, command) = {
+    let shared = state.inner.clone();
+    let (writer, command, workspace_path) = {
         let runtime = state
             .inner
             .lock()
@@ -2617,10 +3783,53 @@ fn start_workspace_codex_session(
             shell_escape(&codex_binary),
             shell_escape(&workspace.path),
         );
-        (writer, command)
+        (writer, command, workspace.path.clone())
     };
 
     write_shell_command(&writer, &command)?;
+    let known_session_ids = discover_codex_session_ids_for_workspace(&workspace_path);
+    let should_spawn_discovery = {
+        let mut runtime = shared
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+        let Some(workspace_index) = runtime
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == workspace_id)
+        else {
+            return Ok(());
+        };
+        let Some(slot_index) =
+            workspace_pane_slot_index(&runtime.workspaces[workspace_index], &pane_id)
+        else {
+            return Ok(());
+        };
+
+        runtime.clear_pending_codex_start_for_pane(&pane_id);
+        runtime.pending_codex_starts.push(PendingCodexStartRecord {
+            workspace_id: workspace_id.clone(),
+            pane_id: pane_id.clone(),
+            pane_slot_index: slot_index,
+            cwd: workspace_path.clone(),
+            started_at_ms: now_timestamp_ms(),
+            known_session_ids,
+        });
+
+        let workspace_pending_count = runtime
+            .pending_codex_starts
+            .iter()
+            .filter(|pending| pending.workspace_id == workspace_id)
+            .count();
+        if workspace_pending_count > 1 {
+            runtime.clear_pending_codex_starts_for_workspace(&workspace_id);
+            false
+        } else {
+            true
+        }
+    };
+    if should_spawn_discovery {
+        spawn_pending_codex_start_discovery(shared, app, workspace_id);
+    }
     Ok(())
 }
 
@@ -2668,6 +3877,73 @@ fn load_workspace_file_explorer_directory(
         .lock()
         .map_err(|_| "failed to acquire application state".to_string())?;
     load_workspace_file_explorer_directory_snapshot(&runtime, &workspace_id, &relative_path)
+}
+
+#[tauri::command]
+fn load_workspace_text_file(
+    workspace_id: String,
+    relative_path: String,
+    state: State<'_, AppState>,
+) -> Result<WorkspaceTextFileSnapshot, String> {
+    let runtime = state
+        .inner
+        .lock()
+        .map_err(|_| "failed to acquire application state".to_string())?;
+    load_workspace_text_file_snapshot(&runtime, &workspace_id, &relative_path)
+}
+
+#[tauri::command]
+fn save_workspace_text_file(
+    workspace_id: String,
+    relative_path: String,
+    content: String,
+    expected_version_token: String,
+    state: State<'_, AppState>,
+) -> Result<WorkspaceTextFileSnapshot, String> {
+    let runtime = state
+        .inner
+        .lock()
+        .map_err(|_| "failed to acquire application state".to_string())?;
+    save_workspace_text_file_snapshot(
+        &runtime,
+        &workspace_id,
+        &relative_path,
+        &content,
+        &expected_version_token,
+    )
+}
+
+#[tauri::command]
+fn persist_workspace_file_draft(
+    workspace_id: String,
+    relative_path: String,
+    draft: String,
+    base_version_token: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mut runtime = state
+        .inner
+        .lock()
+        .map_err(|_| "failed to acquire application state".to_string())?;
+    persist_workspace_file_draft_record(
+        &mut runtime,
+        &workspace_id,
+        &relative_path,
+        draft,
+        &base_version_token,
+    )
+}
+
+#[tauri::command]
+fn clear_workspace_file_draft(
+    workspace_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let mut runtime = state
+        .inner
+        .lock()
+        .map_err(|_| "failed to acquire application state".to_string())?;
+    clear_workspace_file_draft_record(&mut runtime, &workspace_id)
 }
 
 #[tauri::command]
@@ -4478,6 +5754,10 @@ pub fn run() {
             refresh_workspace_git_status,
             load_workspace_source_control,
             load_workspace_file_explorer_directory,
+            load_workspace_text_file,
+            save_workspace_text_file,
+            persist_workspace_file_draft,
+            clear_workspace_file_draft,
             load_workspace_git_diff,
             load_workspace_git_commit_detail,
             git_stage_paths,
@@ -4500,6 +5780,8 @@ pub fn run() {
             split_pane,
             close_pane,
             show_in_finder,
+            list_external_workspace_targets,
+            open_workspace_in_target,
             run_launcher_command,
             write_to_pane,
             resize_pane
@@ -4511,30 +5793,36 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::HashSet,
         env,
         ffi::{OsStr, OsString},
         fs,
         path::{Path, PathBuf},
         process::Command,
-        time::{SystemTime, UNIX_EPOCH},
+        thread,
+        time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
     #[cfg(unix)]
     use std::os::unix::fs::{symlink, PermissionsExt};
 
     use super::{
-        build_codex_cli_snapshot, build_codex_session_display_title, collect_git_detail,
+        build_codex_cli_snapshot, build_codex_session_display_title,
+        build_external_workspace_target_snapshot, collect_git_detail,
         collect_git_detail_with_binary, compare_codex_cli_versions,
         complete_launcher_input_for_base, default_launcher_path, execute_launcher_command,
-        extract_login_shell_path, extract_navigation_target, layout_for_pane_count,
-        layout_presets, load_workspace_file_explorer_directory_snapshot, merge_path_values,
-        normalize_workspace_path, parse_battery_snapshot, parse_codex_cli_version,
-        parse_git_status_porcelain, persistence::ActivityEventKind, prepare_workspace_launch,
-        read_codex_session_summary, resolve_navigation_path, validate_git_cli_arg,
-        BatteryState, CodexCliCandidateSnapshot,
-        CodexCliSelectionMode, CodexCliSource, CodexCliStatus, GitFileKind, GitState,
-        RuntimeState, ThemeId, WorkspaceFileExplorerEntryKind, WorkspaceTodoRecord,
-        DEFAULT_INTERFACE_TEXT_SCALE, DEFAULT_TERMINAL_FONT_SIZE,
+        external_workspace_target_spec, extract_login_shell_path, extract_navigation_target,
+        layout_for_pane_count, layout_presets, load_workspace_file_explorer_directory_snapshot,
+        load_workspace_text_file_snapshot, merge_path_values, normalize_workspace_path,
+        parse_battery_snapshot, parse_codex_cli_version, parse_git_status_porcelain,
+        persistence::ActivityEventKind, prepare_workspace_launch, read_codex_session_summary,
+        resolve_navigation_path, save_workspace_text_file_snapshot,
+        upsert_workspace_codex_restore_binding, validate_git_cli_arg, BatteryState,
+        CodexCliCandidateSnapshot, CodexCliSelectionMode, CodexCliSource, CodexCliStatus,
+        ExternalWorkspaceTargetKind, GitFileKind, GitState, PendingCodexStartRecord, RuntimeState,
+        ThemeId, WorkspaceFileDraftRecord, WorkspaceFileExplorerEntryKind,
+        WorkspaceTextFileNewlineStyle, WorkspaceTodoRecord, DEFAULT_INTERFACE_TEXT_SCALE,
+        DEFAULT_TERMINAL_FONT_SIZE,
     };
 
     #[test]
@@ -4551,6 +5839,33 @@ mod tests {
         assert_eq!(
             runtime.settings.terminal_font_size,
             DEFAULT_TERMINAL_FONT_SIZE
+        );
+    }
+
+    #[test]
+    fn external_workspace_targets_include_cursor_and_finder() {
+        let cursor = external_workspace_target_spec("cursor").expect("cursor target should exist");
+        let finder = external_workspace_target_spec("finder").expect("finder target should exist");
+
+        assert_eq!(cursor.label, "Cursor");
+        assert_eq!(cursor.kind, ExternalWorkspaceTargetKind::Editor);
+        assert_eq!(finder.kind, ExternalWorkspaceTargetKind::System);
+        assert!(external_workspace_target_spec("unknown-target").is_none());
+    }
+
+    #[test]
+    fn external_workspace_target_snapshot_preserves_kind_metadata() {
+        let snapshot = build_external_workspace_target_snapshot(
+            external_workspace_target_spec("vscode").expect("vs code target should exist"),
+            Some("data:image/png;base64,ZmFrZQ==".to_string()),
+        );
+
+        assert_eq!(snapshot.id, "vscode");
+        assert_eq!(snapshot.label, "VS Code");
+        assert_eq!(snapshot.kind, ExternalWorkspaceTargetKind::Editor);
+        assert_eq!(
+            snapshot.icon_data_url.as_deref(),
+            Some("data:image/png;base64,ZmFrZQ==")
         );
     }
 
@@ -4597,7 +5912,10 @@ mod tests {
             Some("https://chatgpt.com/codex?foo=1 Could you review the render scheduler change in CrewDock?"),
         );
 
-        assert_eq!(title, "crewdock: review the render scheduler change in CrewDock");
+        assert_eq!(
+            title,
+            "crewdock: review the render scheduler change in CrewDock"
+        );
     }
 
     #[test]
@@ -4953,10 +6271,12 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("Draft changelog", false)]
         );
-        assert!(
-            super::workspace_manager::add_workspace_todo_in_runtime(&mut runtime, &workspace_id, "   ")
-                .is_err()
-        );
+        assert!(super::workspace_manager::add_workspace_todo_in_runtime(
+            &mut runtime,
+            &workspace_id,
+            "   "
+        )
+        .is_err());
     }
 
     #[test]
@@ -5082,6 +6402,196 @@ mod tests {
     }
 
     #[test]
+    fn codex_restore_bindings_round_trip_through_persistence() {
+        let fixture = TestWorkspace::new();
+        let persistence_path = fixture.root_dir().join("workspaces.json");
+        let mut runtime = RuntimeState::seeded();
+        let workspace = runtime
+            .build_workspace_record(fixture.project_dir(), 2, None)
+            .expect("workspace should build");
+        let workspace_id = workspace.id.clone();
+        runtime.active_workspace_id = Some(workspace_id);
+        runtime.workspaces.push(workspace);
+        let workspace_path = runtime.workspaces[0].path.clone();
+
+        upsert_workspace_codex_restore_binding(
+            &mut runtime.workspaces[0],
+            0,
+            "session-alpha".to_string(),
+            workspace_path.clone(),
+            100,
+        );
+        upsert_workspace_codex_restore_binding(
+            &mut runtime.workspaces[0],
+            1,
+            "session-beta".to_string(),
+            workspace_path.clone(),
+            200,
+        );
+        runtime.workspaces[0].codex_session_id = Some("session-beta".to_string());
+
+        fs::write(
+            &persistence_path,
+            serde_json::to_vec_pretty(&runtime.persisted_state()).expect("state should serialize"),
+        )
+        .expect("persisted state should write");
+
+        let mut restored = RuntimeState::seeded();
+        restored
+            .load_persisted_from_disk(persistence_path)
+            .expect("state should reload");
+
+        assert_eq!(restored.workspaces.len(), 1);
+        assert_eq!(
+            restored.workspaces[0].codex_session_id.as_deref(),
+            Some("session-beta")
+        );
+        assert_eq!(
+            restored.workspaces[0]
+                .codex_restore_bindings
+                .iter()
+                .map(|binding| (binding.slot_index, binding.session_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(0, "session-alpha"), (1, "session-beta")]
+        );
+    }
+
+    #[test]
+    fn legacy_single_pane_codex_session_migrates_to_slot_zero_restore_binding() {
+        let fixture = TestWorkspace::new();
+        let persistence_path = fixture.root_dir().join("workspaces.json");
+        let workspace_path = fixture.project_dir().display().to_string();
+        fs::write(
+            &persistence_path,
+            format!(
+                r#"{{"workspaces":[{{"path":"{workspace_path}","paneCount":1,"codexSessionId":"session-123"}}]}}"#
+            ),
+        )
+        .expect("legacy state should write");
+
+        let mut runtime = RuntimeState::seeded();
+        runtime
+            .load_persisted_from_disk(persistence_path)
+            .expect("legacy state should load");
+
+        assert_eq!(runtime.workspaces.len(), 1);
+        assert_eq!(
+            runtime.workspaces[0].codex_session_id.as_deref(),
+            Some("session-123")
+        );
+        assert_eq!(
+            runtime.workspaces[0]
+                .codex_restore_bindings
+                .iter()
+                .map(|binding| (binding.slot_index, binding.session_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(0, "session-123")]
+        );
+    }
+
+    #[test]
+    fn legacy_multi_pane_codex_session_does_not_auto_bind_ambiguously() {
+        let fixture = TestWorkspace::new();
+        let persistence_path = fixture.root_dir().join("workspaces.json");
+        let workspace_path = fixture.project_dir().display().to_string();
+        fs::write(
+            &persistence_path,
+            format!(
+                r#"{{"workspaces":[{{"path":"{workspace_path}","paneCount":2,"codexSessionId":"session-123"}}]}}"#
+            ),
+        )
+        .expect("legacy state should write");
+
+        let mut runtime = RuntimeState::seeded();
+        runtime
+            .load_persisted_from_disk(persistence_path)
+            .expect("legacy state should load");
+
+        assert_eq!(runtime.workspaces.len(), 1);
+        assert_eq!(
+            runtime.workspaces[0].codex_session_id.as_deref(),
+            Some("session-123")
+        );
+        assert!(runtime.workspaces[0].codex_restore_bindings.is_empty());
+    }
+
+    #[test]
+    fn codex_restore_bindings_follow_pane_slot_reindexing() {
+        let mut runtime = RuntimeState::seeded();
+        let workspace = runtime
+            .build_workspace_record(
+                &normalize_workspace_path(".").expect("cwd should resolve"),
+                2,
+                None,
+            )
+            .expect("workspace should build");
+        let workspace_id = workspace.id.clone();
+        let first_pane_id = workspace.panes[0].id.clone();
+        let second_pane_id = workspace.panes[1].id.clone();
+        runtime.workspaces.push(workspace);
+        let workspace_path = runtime.workspaces[0].path.clone();
+
+        upsert_workspace_codex_restore_binding(
+            &mut runtime.workspaces[0],
+            0,
+            "session-first".to_string(),
+            workspace_path.clone(),
+            100,
+        );
+        upsert_workspace_codex_restore_binding(
+            &mut runtime.workspaces[0],
+            1,
+            "session-second".to_string(),
+            workspace_path.clone(),
+            200,
+        );
+        runtime.pending_codex_starts.push(PendingCodexStartRecord {
+            workspace_id: workspace_id.clone(),
+            pane_id: second_pane_id.clone(),
+            pane_slot_index: 1,
+            cwd: workspace_path,
+            started_at_ms: 300,
+            known_session_ids: HashSet::new(),
+        });
+
+        super::workspace_manager::split_pane_in_runtime(&mut runtime, &first_pane_id, "left")
+            .expect("split should succeed");
+        assert_eq!(
+            runtime.workspaces[0]
+                .codex_restore_bindings
+                .iter()
+                .map(|binding| binding.slot_index)
+                .collect::<Vec<_>>(),
+            vec![1, 2]
+        );
+        assert_eq!(runtime.pending_codex_starts[0].pane_slot_index, 2);
+
+        let inserted_pane_id = runtime.workspaces[0].panes[0].id.clone();
+        super::workspace_manager::close_pane_in_runtime(&mut runtime, &inserted_pane_id)
+            .expect("closing inserted pane should succeed");
+        assert_eq!(
+            runtime.workspaces[0]
+                .codex_restore_bindings
+                .iter()
+                .map(|binding| (binding.slot_index, binding.session_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(0, "session-first"), (1, "session-second")]
+        );
+        assert_eq!(runtime.pending_codex_starts[0].pane_slot_index, 1);
+
+        super::workspace_manager::close_pane_in_runtime(&mut runtime, &first_pane_id)
+            .expect("closing bound pane should succeed");
+        assert_eq!(
+            runtime.workspaces[0]
+                .codex_restore_bindings
+                .iter()
+                .map(|binding| (binding.slot_index, binding.session_id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(0, "session-second")]
+        );
+    }
+
+    #[test]
     fn persisted_state_keeps_workspace_todos_scoped_per_workspace() {
         let mut runtime = RuntimeState::seeded();
         let cwd = normalize_workspace_path(".").expect("cwd should resolve");
@@ -5124,6 +6634,39 @@ mod tests {
     }
 
     #[test]
+    fn persisted_state_keeps_workspace_file_draft_scoped_per_workspace() {
+        let mut runtime = RuntimeState::seeded();
+        let cwd = normalize_workspace_path(".").expect("cwd should resolve");
+
+        let first = runtime.build_workspace_record(&cwd, 1, None).unwrap();
+        let second = runtime.build_workspace_record(&cwd, 2, None).unwrap();
+
+        runtime.active_workspace_id = Some(first.id.clone());
+        runtime.workspaces.push(first);
+        runtime.workspaces.push(second);
+
+        runtime.workspaces[0].file_draft = Some(WorkspaceFileDraftRecord {
+            relative_path: "src-web/app.js".to_string(),
+            draft: "console.log('draft');\n".to_string(),
+            base_version_token: "21:deadbeef".to_string(),
+        });
+
+        let persisted = runtime.persisted_state();
+        assert!(persisted.workspaces[0].file_draft.is_some());
+        assert!(persisted.workspaces[1].file_draft.is_none());
+
+        let snapshot = runtime.build_snapshot();
+        let active_workspace = snapshot
+            .active_workspace
+            .expect("active workspace should exist");
+        let file_draft = active_workspace
+            .file_draft
+            .expect("file draft should be present");
+        assert_eq!(file_draft.relative_path, "src-web/app.js");
+        assert_eq!(file_draft.base_version_token, "21:deadbeef");
+    }
+
+    #[test]
     fn persisted_workspace_todos_are_restored_from_disk() {
         let fixture = TestWorkspace::new();
         let persistence_path = fixture.root_dir().join("workspaces.json");
@@ -5158,6 +6701,33 @@ mod tests {
             runtime.workspaces[0].todos[1].id,
             runtime.workspaces[0].todos[2].id
         );
+    }
+
+    #[test]
+    fn persisted_workspace_file_draft_is_restored_from_disk() {
+        let fixture = TestWorkspace::new();
+        let persistence_path = fixture.root_dir().join("workspaces.json");
+        let workspace_path = fixture.project_dir().display().to_string();
+        fs::write(
+            &persistence_path,
+            format!(
+                r#"{{"workspaces":[{{"path":"{workspace_path}","paneCount":1,"fileDraft":{{"relativePath":"src-web/app.js","draft":"let draft = true;\n","baseVersionToken":"18:cafebabe"}}}}]}}"#
+            ),
+        )
+        .expect("should write persisted state");
+
+        let mut runtime = RuntimeState::seeded();
+        runtime
+            .load_persisted_from_disk(persistence_path)
+            .expect("should load persisted state");
+
+        let file_draft = runtime.workspaces[0]
+            .file_draft
+            .clone()
+            .expect("file draft should restore");
+        assert_eq!(file_draft.relative_path, "src-web/app.js");
+        assert_eq!(file_draft.draft, "let draft = true;\n");
+        assert_eq!(file_draft.base_version_token, "18:cafebabe");
     }
 
     #[test]
@@ -5200,6 +6770,57 @@ mod tests {
     }
 
     #[test]
+    fn persisted_activity_history_restores_git_task_kinds_and_pane_ids() {
+        let fixture = TestWorkspace::new();
+        let persistence_path = fixture.root_dir().join("workspaces.json");
+        let workspace_path = fixture.project_dir().display().to_string();
+        fs::write(
+            &persistence_path,
+            format!(
+                r#"{{"workspaces":[{{"path":"{}","paneCount":1}}],"recentActivity":[{{"kind":"gitTaskFailed","workspacePath":"{}","label":"Push main","error":"fatal: the current branch main has no upstream branch","at":1710000000200}},{{"kind":"paneFailed","workspacePath":"{}","paneId":"pane-7","label":"Shell 02","error":"spawn failed","at":1710000000100}}]}}"#,
+                workspace_path,
+                workspace_path,
+                workspace_path
+            ),
+        )
+        .expect("should write persisted state");
+
+        let mut runtime = RuntimeState::seeded();
+        runtime
+            .load_persisted_from_disk(persistence_path)
+            .expect("should load persisted state");
+
+        assert_eq!(runtime.activity_history.len(), 2);
+        let snapshot = runtime.build_snapshot();
+        assert_eq!(snapshot.activity.recent_events.len(), 2);
+
+        assert_eq!(
+            snapshot.activity.recent_events[0].kind,
+            ActivityEventKind::GitTaskFailed
+        );
+        assert_eq!(
+            snapshot.activity.recent_events[0].workspace_id,
+            runtime.workspaces[0].id
+        );
+        assert_eq!(snapshot.activity.recent_events[0].pane_id, "");
+        assert_eq!(snapshot.activity.recent_events[0].label, "Push main");
+        assert_eq!(
+            snapshot.activity.recent_events[0].error,
+            "fatal: the current branch main has no upstream branch"
+        );
+        assert_eq!(snapshot.activity.recent_events[0].at, 1_710_000_000_200);
+
+        assert_eq!(
+            snapshot.activity.recent_events[1].kind,
+            ActivityEventKind::PaneFailed
+        );
+        assert_eq!(snapshot.activity.recent_events[1].pane_id, "pane-7");
+        assert_eq!(snapshot.activity.recent_events[1].label, "Shell 02");
+        assert_eq!(snapshot.activity.recent_events[1].error, "spawn failed");
+        assert_eq!(snapshot.activity.recent_events[1].at, 1_710_000_000_100);
+    }
+
+    #[test]
     fn workspace_file_explorer_lists_root_entries_with_filters_and_sorting() {
         let fixture = TestWorkspace::new();
         fs::create_dir_all(fixture.project_dir().join("Frontend")).unwrap();
@@ -5235,19 +6856,20 @@ mod tests {
         fs::create_dir_all(fixture.api_dir().join("handlers")).unwrap();
 
         let (runtime, workspace_id) = runtime_with_workspace(fixture.project_dir());
-        let snapshot = load_workspace_file_explorer_directory_snapshot(
-            &runtime,
-            &workspace_id,
-            "backend/api",
-        )
-        .expect("nested listing should load");
+        let snapshot =
+            load_workspace_file_explorer_directory_snapshot(&runtime, &workspace_id, "backend/api")
+                .expect("nested listing should load");
 
         assert_eq!(snapshot.relative_path, "backend/api");
         assert_eq!(
             snapshot
                 .entries
                 .iter()
-                .map(|entry| (entry.name.as_str(), entry.relative_path.as_str(), entry.kind))
+                .map(|entry| (
+                    entry.name.as_str(),
+                    entry.relative_path.as_str(),
+                    entry.kind
+                ))
                 .collect::<Vec<_>>(),
             vec![
                 (
@@ -5295,10 +6917,12 @@ mod tests {
 
         assert_eq!(entry.kind, WorkspaceFileExplorerEntryKind::Symlink);
         assert!(!entry.expandable);
-        assert!(
-            load_workspace_file_explorer_directory_snapshot(&runtime, &workspace_id, "linked-shared")
-                .is_err()
-        );
+        assert!(load_workspace_file_explorer_directory_snapshot(
+            &runtime,
+            &workspace_id,
+            "linked-shared"
+        )
+        .is_err());
     }
 
     #[cfg(unix)]
@@ -5313,15 +6937,190 @@ mod tests {
         fs::set_permissions(&private_dir, unreadable_permissions).unwrap();
 
         let (runtime, workspace_id) = runtime_with_workspace(fixture.project_dir());
-        let error = load_workspace_file_explorer_directory_snapshot(&runtime, &workspace_id, "private")
-            .expect_err("unreadable directories should surface an error");
+        let error =
+            load_workspace_file_explorer_directory_snapshot(&runtime, &workspace_id, "private")
+                .expect_err("unreadable directories should surface an error");
 
         fs::set_permissions(&private_dir, original_permissions).unwrap();
 
         assert!(
-            error.contains("failed to read directory") || error.contains("failed to access directory"),
+            error.contains("failed to read directory")
+                || error.contains("failed to access directory"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn workspace_text_file_loads_utf8_text_and_preserves_newline_metadata() {
+        let fixture = TestWorkspace::new();
+        fs::write(
+            fixture.project_dir().join("notes.txt"),
+            "first line\r\nsecond line\r\n",
+        )
+        .unwrap();
+
+        let (runtime, workspace_id) = runtime_with_workspace(fixture.project_dir());
+        let snapshot = load_workspace_text_file_snapshot(&runtime, &workspace_id, "notes.txt")
+            .expect("text file should load");
+
+        assert_eq!(snapshot.relative_path, "notes.txt");
+        assert_eq!(snapshot.content, "first line\r\nsecond line\r\n");
+        assert_eq!(snapshot.newline_style, WorkspaceTextFileNewlineStyle::CrLf);
+        assert!(snapshot.has_trailing_newline);
+        assert!(!snapshot.read_only);
+        assert!(snapshot.reason.is_none());
+        assert!(!snapshot.version_token.is_empty());
+    }
+
+    #[test]
+    fn workspace_text_file_rejects_path_traversal() {
+        let fixture = TestWorkspace::new();
+        let (runtime, workspace_id) = runtime_with_workspace(fixture.project_dir());
+
+        let error = load_workspace_text_file_snapshot(&runtime, &workspace_id, "../secret.txt")
+            .expect_err("path traversal should be rejected");
+
+        assert!(error.contains("path traversal"));
+    }
+
+    #[test]
+    fn workspace_text_file_blocks_binary_files() {
+        let fixture = TestWorkspace::new();
+        fs::write(
+            fixture.project_dir().join("image.bin"),
+            [0_u8, 159, 146, 150],
+        )
+        .unwrap();
+
+        let (runtime, workspace_id) = runtime_with_workspace(fixture.project_dir());
+        let snapshot = load_workspace_text_file_snapshot(&runtime, &workspace_id, "image.bin")
+            .expect("binary snapshot should load as read-only");
+
+        assert!(snapshot.read_only);
+        assert_eq!(snapshot.content, "");
+        assert_eq!(
+            snapshot.reason.as_deref(),
+            Some("Binary files are not editable in CrewDock yet.")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_text_file_blocks_symlink_targets() {
+        let fixture = TestWorkspace::new();
+        let shared_file = fixture.root_dir().join("shared.txt");
+        fs::write(&shared_file, "shared\n").unwrap();
+        let link = fixture.project_dir().join("shared-link.txt");
+        symlink(&shared_file, &link).unwrap();
+
+        let (runtime, workspace_id) = runtime_with_workspace(fixture.project_dir());
+        let snapshot =
+            load_workspace_text_file_snapshot(&runtime, &workspace_id, "shared-link.txt")
+                .expect("symlink snapshot should load");
+
+        assert!(snapshot.read_only);
+        assert_eq!(
+            snapshot.reason.as_deref(),
+            Some("Symlinked files are not editable in CrewDock yet.")
+        );
+        assert_eq!(snapshot.content, "");
+    }
+
+    #[test]
+    fn workspace_text_file_save_preserves_content_and_refreshes_version_token() {
+        let fixture = TestWorkspace::new();
+        fs::write(fixture.project_dir().join("draft.md"), "hello\n").unwrap();
+
+        let (runtime, workspace_id) = runtime_with_workspace(fixture.project_dir());
+        let original = load_workspace_text_file_snapshot(&runtime, &workspace_id, "draft.md")
+            .expect("draft should load");
+        thread::sleep(Duration::from_millis(5));
+
+        let saved = save_workspace_text_file_snapshot(
+            &runtime,
+            &workspace_id,
+            "draft.md",
+            "updated\ncontent\n",
+            &original.version_token,
+        )
+        .expect("save should succeed");
+
+        assert_eq!(saved.content, "updated\ncontent\n");
+        assert_ne!(saved.version_token, original.version_token);
+        assert_eq!(
+            fs::read_to_string(fixture.project_dir().join("draft.md")).unwrap(),
+            "updated\ncontent\n"
+        );
+    }
+
+    #[test]
+    fn workspace_text_file_save_rejects_stale_version_tokens() {
+        let fixture = TestWorkspace::new();
+        let file_path = fixture.project_dir().join("draft.md");
+        fs::write(&file_path, "hello\n").unwrap();
+
+        let (runtime, workspace_id) = runtime_with_workspace(fixture.project_dir());
+        let original = load_workspace_text_file_snapshot(&runtime, &workspace_id, "draft.md")
+            .expect("draft should load");
+        thread::sleep(Duration::from_millis(5));
+        fs::write(&file_path, "changed elsewhere\n").unwrap();
+
+        let error = save_workspace_text_file_snapshot(
+            &runtime,
+            &workspace_id,
+            "draft.md",
+            "my local draft\n",
+            &original.version_token,
+        )
+        .expect_err("stale save should fail");
+
+        assert!(error.contains("save conflict"));
+        assert_eq!(
+            fs::read_to_string(&file_path).unwrap(),
+            "changed elsewhere\n"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_text_file_save_detects_same_size_changes_even_when_mtime_is_restored() {
+        let fixture = TestWorkspace::new();
+        let file_path = fixture.project_dir().join("draft.md");
+        let reference_path = fixture.project_dir().join("reference.md");
+        fs::write(&file_path, "alpha\n").unwrap();
+        fs::write(&reference_path, "alpha\n").unwrap();
+        assert!(Command::new("touch")
+            .arg("-r")
+            .arg(&file_path)
+            .arg(&reference_path)
+            .status()
+            .unwrap()
+            .success());
+
+        let (runtime, workspace_id) = runtime_with_workspace(fixture.project_dir());
+        let original = load_workspace_text_file_snapshot(&runtime, &workspace_id, "draft.md")
+            .expect("draft should load");
+
+        fs::write(&file_path, "omega\n").unwrap();
+        assert!(Command::new("touch")
+            .arg("-r")
+            .arg(&reference_path)
+            .arg(&file_path)
+            .status()
+            .unwrap()
+            .success());
+
+        let error = save_workspace_text_file_snapshot(
+            &runtime,
+            &workspace_id,
+            "draft.md",
+            "local\n",
+            &original.version_token,
+        )
+        .expect_err("same-size disk changes should still fail save");
+
+        assert!(error.contains("save conflict"));
+        assert_eq!(fs::read_to_string(&file_path).unwrap(), "omega\n");
     }
 
     #[test]

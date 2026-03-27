@@ -7,7 +7,7 @@
 </p>
 
 <p align="center">
-  <img src="./docs/images/source-control-panel.png" alt="CrewDock source control panel with branch status and changed files" width="100%" />
+  <img src="./docs/images/workspace-explorer-editor.png" alt="CrewDock workspace with docked file explorer, built-in editor, and live terminal" width="100%" />
 </p>
 
 <p align="center">
@@ -15,8 +15,9 @@
 </p>
 
 CrewDock is a Tauri app that binds each workspace tab to a real local project
-folder, boots PTY-backed shell panes inside that workspace, and keeps Git
-context close through a built-in source control drawer. It is built for the
+folder, boots PTY-backed shell panes inside that workspace, and keeps the rest
+of the working context close: Git, a docked file explorer, a lightweight text
+editor, workspace-scoped tasks, and Codex session restore. It is built for the
 moment when you are juggling multiple repos, multiple shell layouts, and
 multiple contexts, but you still want everything to feel immediate.
 
@@ -26,11 +27,25 @@ multiple contexts, but you still want everything to feel immediate.
 - Real shell sessions spawned by Rust with `portable-pty`
 - Multi-pane grids powered by `xterm.js`
 - Fast workspace switching without tearing down the current app-run sessions
+- Docked file explorer per workspace with lazy directory loading
+- Built-in text editor for workspace files with save, reload, conflict handling, and recovery drafts
+- Workspace-scoped task list for next steps and reminders
 - Quick switching, activity tracking, and attention badges across workspaces
+- Codex session resume with context-aware titles and pane-level restore bindings
 - Built-in source control for changes, branches, commit history, and sync
 - Built-in launcher commands with path completion for opening and navigating folders quickly
 - Themeable desktop chrome plus adjustable interface and terminal sizing
 - Local persistence for tabs, layouts, active workspace, theme, sizing, and AI settings
+
+## Latest Workflow
+
+The current build already supports the core loop inside one workspace:
+
+- browse the repo from the docked explorer
+- open and edit text files without leaving the terminal workspace
+- recover unsaved drafts after restart
+- jump from source control directly into the editor or reveal the file in the explorer
+- resume Codex sessions back into the right pane after relaunch
 
 ## Product Tour
 
@@ -86,17 +101,21 @@ flowchart TD
 
 ## Current Capabilities
 
-- Top workspace strip with folder-backed tabs, rename actions, git state, and unread activity badges
+- Top workspace strip with folder-backed tabs, rename actions, git state, unread activity badges, and unsaved editor draft indicators
 - Inline workspace rename in the tab bar
 - Workspace creation flow with launcher-based navigation, path completion, and 1 to 16 starting terminals
 - Real directional pane splitting, pane maximize / restore, and pane close actions
 - Per-pane shell input, resize wiring, and file-drop path insertion
-- Source control drawer with staged / modified / untracked / conflicted sections, diff preview, commit entry, branch actions, and commit graph history
+- Docked file explorer with lazy folder expansion and per-workspace state
+- Built-in text editor with save, reload, conflict detection, and recovery drafts
+- Workspace task list with open / completed tracking
+- Codex session picker with context-derived titles and pane-level auto-restore
+- Source control drawer with staged / modified / untracked / conflicted sections, diff preview, commit entry, branch actions, commit graph history, and direct open-in-editor / reveal-in-explorer actions
 - Git actions for stage, unstage, discard, commit, commit-all, fetch, pull, push, publish, upstream wiring, and branch management
 - AI-assisted commit message generation using a saved key or `OPENAI_API_KEY`
 - Quick switcher and activity rail for moving between busy workspaces
 - Settings for theme, interface text scale, terminal font size, and OpenAI API key storage
-- Local persistence across app relaunches for workspaces, pane layouts, active workspace, settings, and recent activity context
+- Local persistence across app relaunches for workspaces, pane layouts, active workspace, settings, recent activity, workspace tasks, file recovery drafts, and Codex restore bindings
 - Six built-in themes
 
 ## Getting Started
@@ -125,10 +144,13 @@ npm run dev
 3. Pick a folder and choose the starting terminal count.
 4. Switch workspaces from the top strip as you move between repos.
 5. Rename a workspace directly from the top bar when the default folder name is not enough.
-6. Use the pane context menu or keyboard shortcuts to split, maximize, or close panes.
-7. Open source control with the footer action or `Cmd/Ctrl+Shift+G` to review diffs, branches, and commit history.
-8. Use `Cmd/Ctrl+K` to quick-switch workspaces and `Cmd/Ctrl+Shift+A` to review unread activity.
-9. Open settings with the gear icon or `Cmd/Ctrl+,` to switch themes, adjust sizing, and manage the local OpenAI key used for AI commit messages.
+6. Open `Files` to browse the repo tree, then open a text file into the built-in editor.
+7. Use the pane context menu or keyboard shortcuts to split, maximize, or close panes.
+8. Open source control with the footer action or `Cmd/Ctrl+Shift+G` to review diffs, branches, commit history, or jump directly into the editor.
+9. Use `Tasks` to keep workspace-specific next steps visible.
+10. Use `Codex` to resume the right session back into the right pane.
+11. Use `Cmd/Ctrl+K` to quick-switch workspaces and `Cmd/Ctrl+Shift+A` to review unread activity.
+12. Open settings with the gear icon or `Cmd/Ctrl+,` to switch themes, adjust sizing, and manage the local OpenAI key used for AI commit messages.
 
 ## Launcher Commands
 
@@ -167,10 +189,22 @@ current implementation includes:
 
 - Change lists grouped by staged, modified, untracked, and conflicted files
 - Read-only diff previews for working tree and staged states
+- Open-in-editor and reveal-in-explorer actions for changed files
 - Commit entry with `Commit`, `Commit All`, and AI-assisted message generation
 - Branch search plus create, checkout, rename, delete, publish, and upstream actions
 - Commit graph browsing with detail inspection, ref labels, and branch-from-commit actions
 - Fetch, pull, and push controls that run through PTY-backed Git tasks
+
+## Editing and Recovery
+
+CrewDock now ships with a lightweight built-in editor for workspace files. V1
+is intentionally narrow and terminal-friendly:
+
+- text-file editing only
+- explicit save / reload actions plus `Cmd/Ctrl+S`
+- external-change conflict detection before overwrite
+- recovery drafts persisted per workspace so unsaved work can come back after relaunch
+- explorer and source control handoff so navigation and editing stay in one workspace surface
 
 ## Project Layout
 
@@ -197,10 +231,10 @@ back to the same setup later.
 
 Current areas to push next:
 
-1. Tighten PTY lifecycle handling when workspaces are closed or recreated rapidly.
+1. Tighten native QA and polish around the editor / explorer / source control workflow.
 2. Restore scrollback and session metadata more gracefully across relaunches.
-3. Add workspace reordering and richer keyboard shortcuts.
-4. Introduce higher-level agent orchestration once the terminal substrate is stable.
+3. Add richer editor ergonomics without turning CrewDock into a full IDE shell.
+4. Expand workspace reordering, keyboard shortcuts, and external-app handoff.
 
 ## Open Source
 
