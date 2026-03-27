@@ -14,6 +14,7 @@ export function createBridge({
   completeMockLauncherInput,
   resolveMockNavigationPath,
   mockListDirectory,
+  mockLoadWorkspaceFileExplorerDirectory,
 } = {}) {
   const tauriApi = window.__TAURI__;
 
@@ -37,16 +38,34 @@ export function createBridge({
         tauriApi.core.invoke("set_codex_cli_path", { codexCliPath }),
       refreshCodexCliCatalog: () =>
         tauriApi.core.invoke("refresh_codex_cli_catalog"),
+      loadWorkspaceCodexSessions: (workspaceId) =>
+        tauriApi.core.invoke("load_workspace_codex_sessions", { workspaceId }),
+      resumeWorkspaceCodexSession: (workspaceId, paneId, sessionId) =>
+        tauriApi.core.invoke("resume_workspace_codex_session", { workspaceId, paneId, sessionId }),
+      startWorkspaceCodexSession: (workspaceId, paneId) =>
+        tauriApi.core.invoke("start_workspace_codex_session", { workspaceId, paneId }),
       loadSystemHealthSnapshot: () =>
         tauriApi.core.invoke("load_system_health_snapshot"),
       createWorkspace: (path, paneCount) =>
         tauriApi.core.invoke("create_workspace", { path, paneCount }),
       renameWorkspace: (workspaceId, name) =>
         tauriApi.core.invoke("rename_workspace", { workspaceId, name }),
+      addWorkspaceTodo: (workspaceId, text) =>
+        tauriApi.core.invoke("add_workspace_todo", { workspaceId, text }),
+      updateWorkspaceTodo: (workspaceId, todoId, text) =>
+        tauriApi.core.invoke("update_workspace_todo", { workspaceId, todoId, text }),
+      setWorkspaceTodoDone: (workspaceId, todoId, done) =>
+        tauriApi.core.invoke("set_workspace_todo_done", { workspaceId, todoId, done }),
+      deleteWorkspaceTodo: (workspaceId, todoId) =>
+        tauriApi.core.invoke("delete_workspace_todo", { workspaceId, todoId }),
+      reorderWorkspace: (workspaceId, targetIndex) =>
+        tauriApi.core.invoke("reorder_workspace", { workspaceId, targetIndex }),
       refreshWorkspaceGitStatus: (workspaceId) =>
         tauriApi.core.invoke("refresh_workspace_git_status", { workspaceId }),
       loadWorkspaceSourceControl: (workspaceId, graphCursor = null) =>
         tauriApi.core.invoke("load_workspace_source_control", { workspaceId, graphCursor }),
+      loadWorkspaceFileExplorerDirectory: (workspaceId, relativePath = "") =>
+        tauriApi.core.invoke("load_workspace_file_explorer_directory", { workspaceId, relativePath }),
       loadWorkspaceGitDiff: (workspaceId, path, mode) =>
         tauriApi.core.invoke("load_workspace_git_diff", { workspaceId, path, mode }),
       loadWorkspaceGitCommitDetail: (workspaceId, oid) =>
@@ -147,6 +166,7 @@ export function createBridge({
     completeMockLauncherInput,
     resolveMockNavigationPath,
     mockListDirectory,
+    mockLoadWorkspaceFileExplorerDirectory,
   });
 }
 
@@ -161,6 +181,7 @@ function createMockBridge({
   completeMockLauncherInput,
   resolveMockNavigationPath,
   mockListDirectory,
+  mockLoadWorkspaceFileExplorerDirectory,
 }) {
   const stateListeners = new Set();
   const terminalListeners = new Set();
@@ -247,6 +268,7 @@ function createMockBridge({
             layout: activeWorkspace.layout,
             panes: activeWorkspace.panes.map((pane) => ({ ...pane })),
             paneLayout: structuredClone(activeWorkspace.paneLayout),
+            todos: activeWorkspace.todos.map((todo) => ({ ...todo })),
             gitDetail: activeWorkspace.gitDetail ? structuredClone(activeWorkspace.gitDetail) : null,
           }
         : null,
@@ -329,6 +351,29 @@ function createMockBridge({
   function workspaceName(path) {
     const parts = path.split("/").filter(Boolean);
     return parts[parts.length - 1] || path;
+  }
+
+  function normalizeMockTodoText(text) {
+    const normalized = String(text || "").trim();
+    if (!normalized) {
+      throw new Error("workspace task cannot be empty");
+    }
+
+    return normalized;
+  }
+
+  function buildMockTodoId() {
+    return `todo-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  function insertOpenMockTodo(workspace, todo) {
+    const insertionIndex = workspace.todos.findIndex((entry) => entry.done);
+    if (insertionIndex === -1) {
+      workspace.todos.push(todo);
+      return;
+    }
+
+    workspace.todos.splice(insertionIndex, 0, todo);
   }
 
   function buildMockGitDetail(path, { branch = "main", upstream } = {}) {
@@ -465,6 +510,36 @@ function createMockBridge({
     };
   }
 
+  function buildMockCodexSessionsSnapshot(workspace) {
+    const rememberedSessionId = workspace?.codexSessionId || null;
+    const sessions = Array.from({ length: 2 }, (_, index) => ({
+      id: `session-${workspace.id}-${index + 1}`,
+      cwd: workspace.path,
+      displayTitle: `${workspace.name}: ${index === 0 ? "Resume recent CrewDock work" : "Review workspace follow-ups"}`,
+      cliVersion: settings.codexCli.effectiveVersion || "0.116.0",
+      source: "cli",
+      originator: "codex_cli_rs",
+      lastActiveAtMs: Date.now() - index * 1000 * 60 * 14,
+      isRemembered: false,
+    })).map((session) => ({
+      ...session,
+      isRemembered: session.id === rememberedSessionId,
+    }));
+
+    return {
+      workspaceId: workspace.id,
+      workspacePath: workspace.path,
+      cliStatus: settings.codexCli.status,
+      cliMessage: settings.codexCli.message,
+      effectiveCliPath: settings.codexCli.effectivePath,
+      effectiveCliVersion: settings.codexCli.effectiveVersion,
+      rememberedSessionId,
+      rememberedSessionMissing: Boolean(rememberedSessionId)
+        && !sessions.some((session) => session.id === rememberedSessionId),
+      sessions,
+    };
+  }
+
   function buildMockSourceControl(workspace, graphCursor = null) {
     const detail = workspace?.gitDetail || buildMockGitDetail(workspace?.path || "");
     const branches = buildMockBranches(workspace);
@@ -579,6 +654,22 @@ function createMockBridge({
     };
   }
 
+  function loadMockWorkspaceFileExplorerDirectory(workspace, relativePath = "") {
+    if (!workspace) {
+      throw new Error("workspace not found");
+    }
+    if (typeof mockLoadWorkspaceFileExplorerDirectory !== "function") {
+      throw new Error("mock file explorer is unavailable");
+    }
+
+    const snapshot = mockLoadWorkspaceFileExplorerDirectory(workspace.path, relativePath);
+    return {
+      workspaceId: workspace.id,
+      relativePath: snapshot?.relativePath ?? String(relativePath || ""),
+      entries: Array.isArray(snapshot?.entries) ? snapshot.entries : [],
+    };
+  }
+
   return {
     getAppSnapshot: async () => emitState(),
     loadSystemHealthSnapshot: async () => buildMockSystemHealthSnapshot(),
@@ -646,6 +737,50 @@ function createMockBridge({
       return emitState();
     },
     refreshCodexCliCatalog: async () => emitState(),
+    loadWorkspaceCodexSessions: async (workspaceId) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      if (!workspace) {
+        throw new Error("workspace not found");
+      }
+
+      return buildMockCodexSessionsSnapshot(workspace);
+    },
+    resumeWorkspaceCodexSession: async (workspaceId, paneId, sessionId) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      if (!workspace) {
+        throw new Error("workspace not found");
+      }
+      const pane = workspace.panes.find((entry) => entry.id === paneId);
+      if (!pane) {
+        throw new Error("pane does not belong to the workspace");
+      }
+
+      workspace.codexSessionId = String(sessionId || "").trim() || null;
+      emitTerminal({
+        paneId,
+        data:
+          `\r\n$ ${settings.codexCli.effectivePath || "codex"} resume ${workspace.codexSessionId} -C ${workspace.path}\r\n`
+          + `Resuming Codex session for ${workspace.name} in the mock bridge.\r\n$ `,
+      });
+      return emitState();
+    },
+    startWorkspaceCodexSession: async (workspaceId, paneId) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      if (!workspace) {
+        throw new Error("workspace not found");
+      }
+      const pane = workspace.panes.find((entry) => entry.id === paneId);
+      if (!pane) {
+        throw new Error("pane does not belong to the workspace");
+      }
+
+      emitTerminal({
+        paneId,
+        data:
+          `\r\n$ ${settings.codexCli.effectivePath || "codex"} -C ${workspace.path}\r\n`
+          + `Starting a fresh Codex session for ${workspace.name} in the mock bridge.\r\n$ `,
+      });
+    },
     openDirectory: async (defaultPath) => {
       const value = window.prompt(
         "Workspace folder",
@@ -672,6 +807,8 @@ function createMockBridge({
         path: normalizedPath,
         layout,
         started: false,
+        codexSessionId: null,
+        todos: [],
         gitDetail: buildMockGitDetail(normalizedPath),
         panes: Array.from({ length: layout.paneCount }, (_, index) => ({
           id: `pane-${workspaceCounter}-${index + 1}`,
@@ -700,6 +837,79 @@ function createMockBridge({
       workspace.name = nextName;
       return emitState();
     },
+    addWorkspaceTodo: async (workspaceId, text) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      if (!workspace) {
+        throw new Error("workspace not found");
+      }
+
+      insertOpenMockTodo(workspace, {
+        id: buildMockTodoId(),
+        text: normalizeMockTodoText(text),
+        done: false,
+      });
+      return emitState();
+    },
+    updateWorkspaceTodo: async (workspaceId, todoId, text) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      if (!workspace) {
+        throw new Error("workspace not found");
+      }
+
+      const todo = workspace.todos.find((entry) => entry.id === todoId);
+      if (!todo) {
+        throw new Error("workspace task not found");
+      }
+
+      todo.text = normalizeMockTodoText(text);
+      return emitState();
+    },
+    setWorkspaceTodoDone: async (workspaceId, todoId, done) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      if (!workspace) {
+        throw new Error("workspace not found");
+      }
+
+      const todoIndex = workspace.todos.findIndex((entry) => entry.id === todoId);
+      if (todoIndex === -1) {
+        throw new Error("workspace task not found");
+      }
+
+      const [todo] = workspace.todos.splice(todoIndex, 1);
+      todo.done = Boolean(done);
+      if (todo.done) {
+        workspace.todos.push(todo);
+      } else {
+        insertOpenMockTodo(workspace, todo);
+      }
+
+      return emitState();
+    },
+    deleteWorkspaceTodo: async (workspaceId, todoId) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      if (!workspace) {
+        throw new Error("workspace not found");
+      }
+
+      const todoIndex = workspace.todos.findIndex((entry) => entry.id === todoId);
+      if (todoIndex === -1) {
+        throw new Error("workspace task not found");
+      }
+
+      workspace.todos.splice(todoIndex, 1);
+      return emitState();
+    },
+    reorderWorkspace: async (workspaceId, targetIndex) => {
+      const sourceIndex = workspaces.findIndex((entry) => entry.id === workspaceId);
+      if (sourceIndex === -1) {
+        return emitState();
+      }
+
+      const [workspace] = workspaces.splice(sourceIndex, 1);
+      const insertionIndex = Math.max(0, Math.min(Number(targetIndex) || 0, workspaces.length));
+      workspaces.splice(insertionIndex, 0, workspace);
+      return emitState();
+    },
     refreshWorkspaceGitStatus: async (workspaceId) => {
       const workspace = workspaces.find((entry) => entry.id === workspaceId);
       if (workspace) {
@@ -713,6 +923,10 @@ function createMockBridge({
         throw new Error("workspace not found");
       }
       return buildMockSourceControl(workspace, graphCursor);
+    },
+    loadWorkspaceFileExplorerDirectory: async (workspaceId, relativePath = "") => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      return loadMockWorkspaceFileExplorerDirectory(workspace, relativePath);
     },
     loadWorkspaceGitDiff: async (_workspaceId, path, mode) => buildMockDiff(path, mode),
     loadWorkspaceGitCommitDetail: async (_workspaceId, oid) => buildMockCommitDetail(oid),

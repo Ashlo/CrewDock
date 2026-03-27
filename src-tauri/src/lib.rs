@@ -4,11 +4,15 @@ mod session_manager;
 mod source_control;
 mod workspace_manager;
 
+#[cfg(unix)]
+use std::os::unix::ffi::OsStringExt;
 use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
-    env, fs,
-    io::Write,
+    env,
+    ffi::{OsStr, OsString},
+    fs,
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
     sync::{Arc, Mutex},
@@ -29,6 +33,26 @@ const MAX_INTERFACE_TEXT_SCALE: f64 = 1.2;
 const DEFAULT_TERMINAL_FONT_SIZE: f64 = 13.5;
 const MIN_TERMINAL_FONT_SIZE: f64 = 11.0;
 const MAX_TERMINAL_FONT_SIZE: f64 = 18.0;
+const MAX_CODEX_SESSION_SCAN_LINES: usize = 80;
+const MAX_CODEX_SESSION_TITLE_CHARS: usize = 72;
+const FILE_EXPLORER_HIDDEN_NAMES: [&str; 14] = [
+    ".git",
+    "node_modules",
+    "dist",
+    "build",
+    ".next",
+    ".nuxt",
+    ".turbo",
+    ".cache",
+    "coverage",
+    "target",
+    "__pycache__",
+    ".pytest_cache",
+    ".venv",
+    "venv",
+];
+const LOGIN_SHELL_PATH_START_MARKER: &[u8] = b"__CREWDOCK_PATH_START__";
+const LOGIN_SHELL_PATH_END_MARKER: &[u8] = b"__CREWDOCK_PATH_END__";
 
 use events::emit_snapshot;
 use persistence::resolve_persistence_path;
@@ -96,8 +120,18 @@ struct WorkspaceRecord {
     layout: LayoutPreset,
     panes: Vec<PaneRecord>,
     pane_layout: PaneLayout,
+    todos: Vec<WorkspaceTodoRecord>,
     started: bool,
     git: Option<GitDetailSnapshot>,
+    codex_session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceTodoRecord {
+    id: String,
+    text: String,
+    done: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -159,6 +193,7 @@ impl RuntimeState {
             layout: workspace.layout.clone(),
             panes: workspace.panes.clone(),
             pane_layout: workspace.pane_layout.clone(),
+            todos: workspace.todos.clone(),
             git_detail: workspace.git.clone(),
         });
         let active_workspace_name = active_workspace_record.map(|workspace| workspace.name.clone());
@@ -225,6 +260,7 @@ impl RuntimeState {
     }
 
     fn refresh_codex_cli(&mut self) {
+        sync_process_path_with_login_shell(&self.shell);
         self.codex_cli = detect_codex_cli_snapshot(self.settings.codex_cli_path.as_deref());
     }
 
@@ -376,6 +412,58 @@ enum CodexCliSource {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkspaceCodexSessionsSnapshot {
+    workspace_id: String,
+    workspace_path: String,
+    cli_status: CodexCliStatus,
+    cli_message: Option<String>,
+    effective_cli_path: Option<String>,
+    effective_cli_version: Option<String>,
+    remembered_session_id: Option<String>,
+    remembered_session_missing: bool,
+    sessions: Vec<CodexSessionMatchSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexSessionMatchSnapshot {
+    id: String,
+    cwd: String,
+    display_title: String,
+    cli_version: Option<String>,
+    source: Option<String>,
+    originator: Option<String>,
+    last_active_at_ms: u64,
+    is_remembered: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexSessionJsonLine {
+    #[serde(rename = "type")]
+    line_type: String,
+    payload: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodexSessionMetaPayload {
+    id: String,
+    cwd: String,
+    #[serde(default)]
+    cli_version: Option<String>,
+    #[serde(default)]
+    source: Option<String>,
+    #[serde(default)]
+    originator: Option<String>,
+}
+
+#[derive(Debug)]
+struct CodexSessionFileSummary {
+    meta: CodexSessionMetaPayload,
+    first_user_prompt: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SystemHealthSnapshot {
     availability: SystemHealthAvailability,
     cpu_percent: f64,
@@ -426,6 +514,31 @@ struct LauncherCompletionResult {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkspaceFileExplorerDirectorySnapshot {
+    workspace_id: String,
+    relative_path: String,
+    entries: Vec<WorkspaceFileExplorerEntrySnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceFileExplorerEntrySnapshot {
+    name: String,
+    relative_path: String,
+    kind: WorkspaceFileExplorerEntryKind,
+    expandable: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+enum WorkspaceFileExplorerEntryKind {
+    Directory,
+    File,
+    Symlink,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct WorkspaceTabSnapshot {
     id: String,
     name: String,
@@ -444,6 +557,7 @@ struct WorkspaceSnapshot {
     layout: LayoutPreset,
     panes: Vec<PaneRecord>,
     pane_layout: PaneLayout,
+    todos: Vec<WorkspaceTodoRecord>,
     git_detail: Option<GitDetailSnapshot>,
 }
 
@@ -671,6 +785,17 @@ fn normalize_optional_codex_cli_path(value: Option<String>) -> Option<String> {
     })
 }
 
+fn normalize_optional_codex_session_id(value: Option<String>) -> Option<String> {
+    value.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
+}
+
 fn detect_codex_cli_snapshot(configured_path: Option<&str>) -> CodexCliSnapshot {
     let configured_path = configured_path
         .map(str::trim)
@@ -693,6 +818,100 @@ fn detect_codex_cli_snapshot(configured_path: Option<&str>) -> CodexCliSnapshot 
         configured_candidate,
         configured_error,
     )
+}
+
+fn sync_process_path_with_login_shell(shell: &str) {
+    let current_path = env::var_os("PATH");
+    let Some(login_shell_path) = read_login_shell_path(shell) else {
+        return;
+    };
+    let Some(merged_path) =
+        merge_path_values(Some(login_shell_path.as_os_str()), current_path.as_deref())
+    else {
+        return;
+    };
+
+    if current_path.as_deref() == Some(merged_path.as_os_str()) {
+        return;
+    }
+
+    env::set_var("PATH", merged_path);
+}
+
+fn read_login_shell_path(shell: &str) -> Option<OsString> {
+    let shell = shell.trim();
+    if shell.is_empty() {
+        return None;
+    }
+
+    let output = ProcessCommand::new(shell)
+        .arg("-l")
+        .arg("-c")
+        .arg("printf '__CREWDOCK_PATH_START__%s__CREWDOCK_PATH_END__' \"$PATH\"")
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    extract_login_shell_path(&output.stdout)
+}
+
+fn extract_login_shell_path(output: &[u8]) -> Option<OsString> {
+    let start = find_subslice(output, LOGIN_SHELL_PATH_START_MARKER)?;
+    let start = start + LOGIN_SHELL_PATH_START_MARKER.len();
+    let end = find_subslice(&output[start..], LOGIN_SHELL_PATH_END_MARKER)?;
+    let path_bytes = &output[start..start + end];
+    if path_bytes.is_empty() {
+        return None;
+    }
+
+    #[cfg(unix)]
+    {
+        Some(OsString::from_vec(path_bytes.to_vec()))
+    }
+
+    #[cfg(not(unix))]
+    {
+        Some(OsString::from(
+            String::from_utf8_lossy(path_bytes).into_owned(),
+        ))
+    }
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return None;
+    }
+
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn merge_path_values(preferred: Option<&OsStr>, fallback: Option<&OsStr>) -> Option<OsString> {
+    let mut merged = Vec::new();
+    let mut seen = HashSet::new();
+
+    for raw_path in [preferred, fallback].into_iter().flatten() {
+        for path in env::split_paths(raw_path) {
+            if path.as_os_str().is_empty() {
+                continue;
+            }
+
+            let key = path.as_os_str().to_os_string();
+            if seen.insert(key) {
+                merged.push(path);
+            }
+        }
+    }
+
+    if merged.is_empty() {
+        return None;
+    }
+
+    env::join_paths(merged).ok()
 }
 
 fn build_codex_cli_snapshot(
@@ -970,6 +1189,563 @@ fn canonical_codex_path_key(path: &Path) -> String {
         .unwrap_or_else(|_| path.to_path_buf())
         .display()
         .to_string()
+}
+
+fn load_workspace_codex_sessions_snapshot(
+    workspace_id: &str,
+    workspace_path: &str,
+    remembered_session_id: Option<&str>,
+    codex_cli: &CodexCliSnapshot,
+) -> WorkspaceCodexSessionsSnapshot {
+    let remembered_session_id = remembered_session_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let sessions =
+        discover_codex_sessions_for_workspace(workspace_path, remembered_session_id.as_deref());
+    let remembered_session_missing = remembered_session_id
+        .as_ref()
+        .map(|session_id| !sessions.iter().any(|session| session.id == *session_id))
+        .unwrap_or(false);
+
+    WorkspaceCodexSessionsSnapshot {
+        workspace_id: workspace_id.to_string(),
+        workspace_path: workspace_path.to_string(),
+        cli_status: codex_cli.status,
+        cli_message: codex_cli.message.clone(),
+        effective_cli_path: codex_cli.effective_path.clone(),
+        effective_cli_version: codex_cli.effective_version.clone(),
+        remembered_session_id,
+        remembered_session_missing,
+        sessions,
+    }
+}
+
+fn discover_codex_sessions_for_workspace(
+    workspace_path: &str,
+    remembered_session_id: Option<&str>,
+) -> Vec<CodexSessionMatchSnapshot> {
+    let Some(root) = codex_sessions_root() else {
+        return Vec::new();
+    };
+    if !root.is_dir() {
+        return Vec::new();
+    }
+
+    let workspace_key = normalize_path_for_comparison(workspace_path);
+    let mut matches = Vec::new();
+
+    for session_file in collect_codex_session_files(&root) {
+        let Some(summary) = read_codex_session_summary(&session_file) else {
+            continue;
+        };
+        if normalize_path_for_comparison(&summary.meta.cwd) != workspace_key {
+            continue;
+        }
+
+        let last_active_at_ms = fs::metadata(&session_file)
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis() as u64)
+            .unwrap_or(0);
+
+        matches.push(CodexSessionMatchSnapshot {
+            id: summary.meta.id.clone(),
+            cwd: summary.meta.cwd.clone(),
+            display_title: build_codex_session_display_title(
+                &summary.meta.cwd,
+                summary.first_user_prompt.as_deref(),
+            ),
+            cli_version: summary.meta.cli_version,
+            source: summary.meta.source,
+            originator: summary.meta.originator,
+            last_active_at_ms,
+            is_remembered: remembered_session_id
+                .map(|session_id| session_id == summary.meta.id.as_str())
+                .unwrap_or(false),
+        });
+    }
+
+    matches.sort_by(|left, right| {
+        right
+            .last_active_at_ms
+            .cmp(&left.last_active_at_ms)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    matches
+}
+
+fn codex_sessions_root() -> Option<PathBuf> {
+    home_dir()
+        .ok()
+        .map(|path| path.join(".codex").join("sessions"))
+}
+
+fn collect_codex_session_files(root: &Path) -> Vec<PathBuf> {
+    let mut stack = vec![root.to_path_buf()];
+    let mut files = Vec::new();
+
+    while let Some(directory) = stack.pop() {
+        let entries = match fs::read_dir(&directory) {
+            Ok(entries) => entries,
+            Err(_) => continue,
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+
+            if path
+                .extension()
+                .and_then(|value| value.to_str())
+                .map(|value| value.eq_ignore_ascii_case("jsonl"))
+                .unwrap_or(false)
+            {
+                files.push(path);
+            }
+        }
+    }
+
+    files
+}
+
+fn read_codex_session_summary(path: &Path) -> Option<CodexSessionFileSummary> {
+    let file = fs::File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    let mut meta = None;
+    let mut first_user_prompt = None;
+    let mut scanned_records = 0usize;
+
+    for line in reader.lines() {
+        if scanned_records >= MAX_CODEX_SESSION_SCAN_LINES {
+            break;
+        }
+
+        let Ok(line) = line else {
+            continue;
+        };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        scanned_records += 1;
+
+        let Ok(record) = serde_json::from_str::<CodexSessionJsonLine>(trimmed) else {
+            continue;
+        };
+
+        if meta.is_none() && record.line_type == "session_meta" {
+            meta = serde_json::from_value(record.payload.clone()).ok();
+        }
+
+        if first_user_prompt.is_none() {
+            if let Some(candidate) = extract_codex_user_prompt_from_record(&record) {
+                if normalize_codex_prompt_for_title(&candidate).is_some() {
+                    first_user_prompt = Some(candidate);
+                }
+            }
+        }
+
+        if meta.is_some() && first_user_prompt.is_some() {
+            break;
+        }
+    }
+
+    meta.map(|meta| CodexSessionFileSummary {
+        meta,
+        first_user_prompt,
+    })
+}
+
+fn extract_codex_user_prompt_from_record(record: &CodexSessionJsonLine) -> Option<String> {
+    match record.line_type.as_str() {
+        "event_msg" => extract_codex_event_user_message(&record.payload),
+        "response_item" => extract_codex_response_item_user_message(&record.payload),
+        _ => None,
+    }
+}
+
+fn extract_codex_event_user_message(payload: &serde_json::Value) -> Option<String> {
+    if payload.get("type").and_then(|value| value.as_str()) != Some("user_message") {
+        return None;
+    }
+
+    payload
+        .get("message")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+}
+
+fn extract_codex_response_item_user_message(payload: &serde_json::Value) -> Option<String> {
+    if payload.get("type").and_then(|value| value.as_str()) != Some("message") {
+        return None;
+    }
+    if payload.get("role").and_then(|value| value.as_str()) != Some("user") {
+        return None;
+    }
+
+    let content = payload.get("content")?.as_array()?;
+    let text = content
+        .iter()
+        .filter_map(|entry| entry.get("text").and_then(|value| value.as_str()))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn build_codex_session_display_title(cwd: &str, first_user_prompt: Option<&str>) -> String {
+    let context_label = codex_session_context_label(cwd);
+    let Some(summary) = first_user_prompt.and_then(normalize_codex_prompt_for_title) else {
+        return format!("{context_label} session");
+    };
+
+    format!("{context_label}: {summary}")
+}
+
+fn codex_session_context_label(cwd: &str) -> String {
+    Path::new(cwd)
+        .file_name()
+        .and_then(OsStr::to_str)
+        .filter(|value| !value.trim().is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| "Workspace".to_string())
+}
+
+fn normalize_codex_prompt_for_title(prompt: &str) -> Option<String> {
+    let stripped = strip_codex_wrapper_blocks(prompt);
+    let without_instruction_headers = strip_codex_instruction_headers(&stripped);
+    let without_images = strip_codex_image_placeholders(&without_instruction_headers);
+    let without_urls = strip_leading_codex_urls(&collapse_whitespace(&without_images));
+    let trimmed = trim_codex_title_leading_phrase(without_urls.trim());
+    if !is_meaningful_codex_prompt(trimmed) {
+        return None;
+    }
+
+    let summary = summarize_codex_prompt(trimmed);
+    if summary.is_empty() {
+        None
+    } else {
+        Some(summary)
+    }
+}
+
+fn strip_codex_wrapper_blocks(prompt: &str) -> String {
+    ["image", "environment_context", "proposed_plan", "INSTRUCTIONS"]
+        .into_iter()
+        .fold(prompt.to_string(), |value, tag| remove_tag_block(&value, tag))
+}
+
+fn strip_codex_instruction_headers(value: &str) -> String {
+    let mut output = Vec::new();
+
+    for line in value.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("# AGENTS.md instructions for ") {
+            continue;
+        }
+        output.push(line);
+    }
+
+    output.join("\n")
+}
+
+fn remove_tag_block(input: &str, tag: &str) -> String {
+    let open_marker = format!("<{tag}");
+    let close_marker = format!("</{tag}>");
+    let mut output = input.to_string();
+
+    loop {
+        let Some(start) = output.find(&open_marker) else {
+            break;
+        };
+        let Some(end_offset) = output[start..].find(&close_marker) else {
+            break;
+        };
+        let end = start + end_offset + close_marker.len();
+        output.replace_range(start..end, " ");
+    }
+
+    output
+}
+
+fn strip_codex_image_placeholders(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut rest = value;
+
+    while let Some(start) = rest.find("[Image #") {
+        output.push_str(&rest[..start]);
+        let placeholder = &rest[start..];
+        let Some(end) = placeholder.find(']') else {
+            rest = &rest[start..];
+            break;
+        };
+        rest = &placeholder[end + 1..];
+    }
+
+    output.push_str(rest);
+    output
+}
+
+fn collapse_whitespace(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn strip_leading_codex_urls(value: &str) -> String {
+    let mut tokens = value.split_whitespace().collect::<Vec<_>>();
+    while tokens.len() > 1
+        && tokens
+            .first()
+            .map(|token| token.starts_with("http://") || token.starts_with("https://"))
+            .unwrap_or(false)
+    {
+        tokens.remove(0);
+    }
+    tokens.join(" ")
+}
+
+fn trim_codex_title_leading_phrase(value: &str) -> &str {
+    let prefixes = [
+        "can you please ",
+        "could you please ",
+        "can you ",
+        "could you ",
+        "would you ",
+        "will you ",
+        "please ",
+        "i want you to ",
+        "i need you to ",
+        "help me ",
+    ];
+    let mut trimmed = value.trim();
+
+    loop {
+        let lower = trimmed.to_ascii_lowercase();
+        let Some(prefix) = prefixes.iter().find(|prefix| lower.starts_with(**prefix)) else {
+            break;
+        };
+        let next = trimmed[prefix.len()..].trim_start();
+        if next.is_empty() {
+            break;
+        }
+        trimmed = next;
+    }
+
+    trimmed
+}
+
+fn is_meaningful_codex_prompt(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.len() < 6 {
+        return false;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    !lower.starts_with("<environment_context>")
+}
+
+fn summarize_codex_prompt(value: &str) -> String {
+    let boundary = value
+        .char_indices()
+        .find_map(|(index, character)| match character {
+            '.' | '!' | '?' | ';' if index >= 24 => Some(index),
+            _ => None,
+        })
+        .unwrap_or(value.len());
+    let summary = value[..boundary]
+        .trim()
+        .trim_end_matches(|character: char| ".!?,;:".contains(character))
+        .trim();
+
+    truncate_chars(summary, MAX_CODEX_SESSION_TITLE_CHARS)
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut characters = value.chars();
+    let truncated = characters.by_ref().take(max_chars).collect::<String>();
+    if characters.next().is_some() {
+        let mut shortened = truncated.trim_end().to_string();
+        shortened.push_str("...");
+        shortened
+    } else {
+        truncated
+    }
+}
+
+fn normalize_path_for_comparison(path: &str) -> String {
+    normalize_workspace_path(path)
+        .unwrap_or_else(|_| PathBuf::from(path))
+        .display()
+        .to_string()
+}
+
+fn load_workspace_file_explorer_directory_snapshot(
+    runtime: &RuntimeState,
+    workspace_id: &str,
+    relative_path: &str,
+) -> Result<WorkspaceFileExplorerDirectorySnapshot, String> {
+    let workspace = runtime
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.id == workspace_id)
+        .ok_or_else(|| "workspace not found".to_string())?;
+    let workspace_root = normalize_workspace_path(&workspace.path)?;
+    let normalized_relative_path = normalize_workspace_relative_path(relative_path)?;
+    let target = resolve_workspace_file_explorer_target(&workspace_root, &normalized_relative_path)?;
+    let entries =
+        list_workspace_file_explorer_entries(&workspace_root, &normalized_relative_path, &target)?;
+
+    Ok(WorkspaceFileExplorerDirectorySnapshot {
+        workspace_id: workspace.id.clone(),
+        relative_path: normalized_relative_path,
+        entries,
+    })
+}
+
+fn normalize_workspace_relative_path(raw: &str) -> Result<String, String> {
+    if Path::new(raw.trim()).is_absolute() {
+        return Err("path must be workspace-relative".to_string());
+    }
+
+    let normalized = raw.replace('\\', "/");
+    let mut parts = Vec::new();
+
+    for part in normalized.split('/') {
+        let segment = part.trim();
+        if segment.is_empty() || segment == "." {
+            continue;
+        }
+        if segment == ".." {
+            return Err("path traversal outside the workspace is not allowed".to_string());
+        }
+        if segment.contains('\0') {
+            return Err("invalid workspace-relative path".to_string());
+        }
+        parts.push(segment);
+    }
+
+    Ok(parts.join("/"))
+}
+
+fn resolve_workspace_file_explorer_target(
+    workspace_root: &Path,
+    relative_path: &str,
+) -> Result<PathBuf, String> {
+    let target = if relative_path.is_empty() {
+        workspace_root.to_path_buf()
+    } else {
+        workspace_root.join(relative_path)
+    };
+
+    let metadata = fs::symlink_metadata(&target)
+        .map_err(|error| format!("failed to access directory: {error}"))?;
+    if metadata.file_type().is_symlink() {
+        return Err("symlinked directories cannot be expanded".to_string());
+    }
+
+    let resolved = fs::canonicalize(&target)
+        .map_err(|error| format!("failed to access directory: {error}"))?;
+    if !resolved.starts_with(workspace_root) {
+        return Err("path escapes the workspace root".to_string());
+    }
+    if !resolved.is_dir() {
+        return Err("path must be a directory".to_string());
+    }
+
+    Ok(resolved)
+}
+
+fn list_workspace_file_explorer_entries(
+    workspace_root: &Path,
+    relative_path: &str,
+    directory: &Path,
+) -> Result<Vec<WorkspaceFileExplorerEntrySnapshot>, String> {
+    let mut entries = fs::read_dir(directory)
+        .map_err(|error| format!("failed to read directory: {error}"))?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.is_empty() || should_hide_workspace_file_explorer_entry(&name) {
+                return None;
+            }
+
+            let file_type = entry.file_type().ok()?;
+            let kind = if file_type.is_symlink() {
+                WorkspaceFileExplorerEntryKind::Symlink
+            } else if file_type.is_dir() {
+                WorkspaceFileExplorerEntryKind::Directory
+            } else {
+                WorkspaceFileExplorerEntryKind::File
+            };
+            let relative_path = join_workspace_relative_path(relative_path, &name);
+            let full_path = workspace_root.join(&relative_path);
+            let expandable = kind == WorkspaceFileExplorerEntryKind::Directory
+                && fs::symlink_metadata(&full_path)
+                    .ok()
+                    .map(|metadata| !metadata.file_type().is_symlink())
+                    .unwrap_or(false);
+
+            Some(WorkspaceFileExplorerEntrySnapshot {
+                name,
+                relative_path,
+                kind,
+                expandable,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    entries.sort_by(compare_workspace_file_explorer_entries);
+    Ok(entries)
+}
+
+fn should_hide_workspace_file_explorer_entry(name: &str) -> bool {
+    FILE_EXPLORER_HIDDEN_NAMES
+        .iter()
+        .any(|hidden| name.eq_ignore_ascii_case(hidden))
+}
+
+fn join_workspace_relative_path(parent: &str, name: &str) -> String {
+    if parent.is_empty() {
+        name.to_string()
+    } else {
+        format!("{parent}/{name}")
+    }
+}
+
+fn compare_workspace_file_explorer_entries(
+    left: &WorkspaceFileExplorerEntrySnapshot,
+    right: &WorkspaceFileExplorerEntrySnapshot,
+) -> Ordering {
+    workspace_file_explorer_sort_bucket(left.kind)
+        .cmp(&workspace_file_explorer_sort_bucket(right.kind))
+        .then_with(|| left.name.to_ascii_lowercase().cmp(&right.name.to_ascii_lowercase()))
+        .then_with(|| left.name.cmp(&right.name))
+}
+
+fn workspace_file_explorer_sort_bucket(kind: WorkspaceFileExplorerEntryKind) -> u8 {
+    match kind {
+        WorkspaceFileExplorerEntryKind::Directory => 0,
+        WorkspaceFileExplorerEntryKind::File => 1,
+        WorkspaceFileExplorerEntryKind::Symlink => 2,
+    }
+}
+
+fn shell_escape(value: &str) -> String {
+    if value.is_empty() {
+        return "''".to_string();
+    }
+
+    let escaped = value.replace('\'', "'\"'\"'");
+    format!("'{escaped}'")
 }
 
 impl SystemHealthSnapshot {
@@ -1287,6 +2063,123 @@ fn rename_workspace(
 }
 
 #[tauri::command]
+fn add_workspace_todo(
+    workspace_id: String,
+    text: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let snapshot = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        workspace_manager::add_workspace_todo_in_runtime(&mut runtime, &workspace_id, &text)?;
+        runtime.build_snapshot()
+    };
+
+    emit_snapshot(&app, &snapshot)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn update_workspace_todo(
+    workspace_id: String,
+    todo_id: String,
+    text: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let snapshot = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        workspace_manager::update_workspace_todo_in_runtime(
+            &mut runtime,
+            &workspace_id,
+            &todo_id,
+            &text,
+        )?;
+        runtime.build_snapshot()
+    };
+
+    emit_snapshot(&app, &snapshot)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn set_workspace_todo_done(
+    workspace_id: String,
+    todo_id: String,
+    done: bool,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let snapshot = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        workspace_manager::set_workspace_todo_done_in_runtime(
+            &mut runtime,
+            &workspace_id,
+            &todo_id,
+            done,
+        )?;
+        runtime.build_snapshot()
+    };
+
+    emit_snapshot(&app, &snapshot)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn delete_workspace_todo(
+    workspace_id: String,
+    todo_id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let snapshot = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        workspace_manager::delete_workspace_todo_in_runtime(&mut runtime, &workspace_id, &todo_id)?;
+        runtime.build_snapshot()
+    };
+
+    emit_snapshot(&app, &snapshot)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn reorder_workspace(
+    workspace_id: String,
+    target_index: usize,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let snapshot = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        workspace_manager::reorder_workspace_in_runtime(&mut runtime, &workspace_id, target_index)?;
+        runtime.build_snapshot()
+    };
+
+    emit_snapshot(&app, &snapshot)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
 fn switch_workspace(
     workspace_id: String,
     state: State<'_, AppState>,
@@ -1588,6 +2481,150 @@ fn refresh_codex_cli_catalog(
 }
 
 #[tauri::command]
+fn load_workspace_codex_sessions(
+    workspace_id: String,
+    state: State<'_, AppState>,
+) -> Result<WorkspaceCodexSessionsSnapshot, String> {
+    let (workspace_path, remembered_session_id, codex_cli) = {
+        let runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+        let workspace = runtime
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == workspace_id)
+            .ok_or_else(|| "workspace not found".to_string())?;
+
+        (
+            workspace.path.clone(),
+            workspace.codex_session_id.clone(),
+            runtime.codex_cli.clone(),
+        )
+    };
+
+    Ok(load_workspace_codex_sessions_snapshot(
+        &workspace_id,
+        &workspace_path,
+        remembered_session_id.as_deref(),
+        &codex_cli,
+    ))
+}
+
+#[tauri::command]
+fn resume_workspace_codex_session(
+    workspace_id: String,
+    pane_id: String,
+    session_id: String,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let session_id = normalize_optional_codex_session_id(Some(session_id))
+        .ok_or_else(|| "session id is required".to_string())?;
+    let (snapshot, writer, command) = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+        let workspace_index = runtime
+            .workspaces
+            .iter()
+            .position(|workspace| workspace.id == workspace_id)
+            .ok_or_else(|| "workspace not found".to_string())?;
+        if !runtime.workspaces[workspace_index]
+            .panes
+            .iter()
+            .any(|pane| pane.id == pane_id)
+        {
+            return Err("pane does not belong to the workspace".to_string());
+        }
+
+        let writer = runtime
+            .sessions
+            .get(&pane_id)
+            .ok_or_else(|| "pane session not ready".to_string())
+            .and_then(|session| {
+                if session.workspace_id != workspace_id {
+                    Err("pane does not belong to the workspace".to_string())
+                } else {
+                    Ok(session.writer.clone())
+                }
+            })?;
+        let codex_binary = runtime.codex_cli.effective_path.clone().ok_or_else(|| {
+            runtime
+                .codex_cli
+                .message
+                .clone()
+                .unwrap_or_else(|| "No Codex CLI is configured.".to_string())
+        })?;
+        let workspace_path = runtime.workspaces[workspace_index].path.clone();
+        runtime.workspaces[workspace_index].codex_session_id = Some(session_id.clone());
+        runtime.persist_to_disk()?;
+        let command = format!(
+            "{} resume {} -C {}\n",
+            shell_escape(&codex_binary),
+            shell_escape(&session_id),
+            shell_escape(&workspace_path),
+        );
+        (runtime.build_snapshot(), writer, command)
+    };
+
+    write_shell_command(&writer, &command)?;
+    emit_snapshot(&app, &snapshot)?;
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn start_workspace_codex_session(
+    workspace_id: String,
+    pane_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let (writer, command) = {
+        let runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+        let workspace = runtime
+            .workspaces
+            .iter()
+            .find(|workspace| workspace.id == workspace_id)
+            .ok_or_else(|| "workspace not found".to_string())?;
+        if !workspace.panes.iter().any(|pane| pane.id == pane_id) {
+            return Err("pane does not belong to the workspace".to_string());
+        }
+
+        let writer = runtime
+            .sessions
+            .get(&pane_id)
+            .ok_or_else(|| "pane session not ready".to_string())
+            .and_then(|session| {
+                if session.workspace_id != workspace_id {
+                    Err("pane does not belong to the workspace".to_string())
+                } else {
+                    Ok(session.writer.clone())
+                }
+            })?;
+        let codex_binary = runtime.codex_cli.effective_path.clone().ok_or_else(|| {
+            runtime
+                .codex_cli
+                .message
+                .clone()
+                .unwrap_or_else(|| "No Codex CLI is configured.".to_string())
+        })?;
+        let command = format!(
+            "{} -C {}\n",
+            shell_escape(&codex_binary),
+            shell_escape(&workspace.path),
+        );
+        (writer, command)
+    };
+
+    write_shell_command(&writer, &command)?;
+    Ok(())
+}
+
+#[tauri::command]
 fn refresh_workspace_git_status(
     workspace_id: String,
     state: State<'_, AppState>,
@@ -1618,6 +2655,19 @@ fn load_workspace_source_control(
         .lock()
         .map_err(|_| "failed to acquire application state".to_string())?;
     build_workspace_source_control(&runtime, &workspace_id, graph_cursor)
+}
+
+#[tauri::command]
+fn load_workspace_file_explorer_directory(
+    workspace_id: String,
+    relative_path: String,
+    state: State<'_, AppState>,
+) -> Result<WorkspaceFileExplorerDirectorySnapshot, String> {
+    let runtime = state
+        .inner
+        .lock()
+        .map_err(|_| "failed to acquire application state".to_string())?;
+    load_workspace_file_explorer_directory_snapshot(&runtime, &workspace_id, &relative_path)
 }
 
 #[tauri::command]
@@ -3085,9 +4135,20 @@ fn short_git_oid(oid: &str) -> &str {
 }
 
 fn home_dir() -> Result<PathBuf, String> {
-    env::var("HOME")
+    env::var_os("HOME")
         .map(PathBuf::from)
-        .map_err(|_| "home directory is not available".to_string())
+        .or_else(|| env::var_os("USERPROFILE").map(PathBuf::from))
+        .or_else(
+            || match (env::var_os("HOMEDRIVE"), env::var_os("HOMEPATH")) {
+                (Some(drive), Some(path)) => {
+                    let mut combined = PathBuf::from(drive);
+                    combined.push(path);
+                    Some(combined)
+                }
+                _ => None,
+            },
+        )
+        .ok_or_else(|| "home directory is not available".to_string())
 }
 
 fn contains_forbidden_navigation_tokens(value: &str) -> bool {
@@ -3108,6 +4169,15 @@ fn normalize_workspace_name(raw: &str) -> Result<String, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return Err("workspace name cannot be empty".to_string());
+    }
+
+    Ok(trimmed.to_string())
+}
+
+fn normalize_workspace_todo_text(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("workspace task cannot be empty".to_string());
     }
 
     Ok(trimmed.to_string())
@@ -3389,6 +4459,11 @@ pub fn run() {
             reset_to_launcher,
             create_workspace,
             rename_workspace,
+            add_workspace_todo,
+            update_workspace_todo,
+            set_workspace_todo_done,
+            delete_workspace_todo,
+            reorder_workspace,
             complete_launcher_input,
             set_settings,
             set_theme,
@@ -3397,8 +4472,12 @@ pub fn run() {
             set_openai_api_key,
             set_codex_cli_path,
             refresh_codex_cli_catalog,
+            load_workspace_codex_sessions,
+            resume_workspace_codex_session,
+            start_workspace_codex_session,
             refresh_workspace_git_status,
             load_workspace_source_control,
+            load_workspace_file_explorer_directory,
             load_workspace_git_diff,
             load_workspace_git_commit_detail,
             git_stage_paths,
@@ -3432,21 +4511,30 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use std::{
-        env, fs,
+        env,
+        ffi::{OsStr, OsString},
+        fs,
         path::{Path, PathBuf},
         process::Command,
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    #[cfg(unix)]
+    use std::os::unix::fs::{symlink, PermissionsExt};
+
     use super::{
-        build_codex_cli_snapshot, collect_git_detail, collect_git_detail_with_binary,
-        compare_codex_cli_versions, complete_launcher_input_for_base, default_launcher_path,
-        execute_launcher_command, extract_navigation_target, layout_for_pane_count, layout_presets,
+        build_codex_cli_snapshot, build_codex_session_display_title, collect_git_detail,
+        collect_git_detail_with_binary, compare_codex_cli_versions,
+        complete_launcher_input_for_base, default_launcher_path, execute_launcher_command,
+        extract_login_shell_path, extract_navigation_target, layout_for_pane_count,
+        layout_presets, load_workspace_file_explorer_directory_snapshot, merge_path_values,
         normalize_workspace_path, parse_battery_snapshot, parse_codex_cli_version,
         parse_git_status_porcelain, persistence::ActivityEventKind, prepare_workspace_launch,
-        resolve_navigation_path, validate_git_cli_arg, BatteryState, CodexCliCandidateSnapshot,
-        CodexCliSelectionMode, CodexCliSource, CodexCliStatus, GitFileKind, GitState, RuntimeState,
-        ThemeId, DEFAULT_INTERFACE_TEXT_SCALE, DEFAULT_TERMINAL_FONT_SIZE,
+        read_codex_session_summary, resolve_navigation_path, validate_git_cli_arg,
+        BatteryState, CodexCliCandidateSnapshot,
+        CodexCliSelectionMode, CodexCliSource, CodexCliStatus, GitFileKind, GitState,
+        RuntimeState, ThemeId, WorkspaceFileExplorerEntryKind, WorkspaceTodoRecord,
+        DEFAULT_INTERFACE_TEXT_SCALE, DEFAULT_TERMINAL_FONT_SIZE,
     };
 
     #[test]
@@ -3485,6 +4573,146 @@ mod tests {
 
         assert_eq!(battery_percent, Some(100.0));
         assert!(matches!(battery_state, Some(BatteryState::Full)));
+    }
+
+    #[test]
+    fn codex_session_title_uses_cleaned_first_prompt() {
+        let title = build_codex_session_display_title(
+            "/tmp/crewdock",
+            Some(
+                "<image name=[Image #1]>preview</image> [Image #1] Can you please fix terminal right-click menu clipping so it stays on-screen?",
+            ),
+        );
+
+        assert_eq!(
+            title,
+            "crewdock: fix terminal right-click menu clipping so it stays on-screen"
+        );
+    }
+
+    #[test]
+    fn codex_session_title_drops_leading_urls() {
+        let title = build_codex_session_display_title(
+            "/tmp/crewdock",
+            Some("https://chatgpt.com/codex?foo=1 Could you review the render scheduler change in CrewDock?"),
+        );
+
+        assert_eq!(title, "crewdock: review the render scheduler change in CrewDock");
+    }
+
+    #[test]
+    fn codex_session_title_falls_back_when_no_prompt_exists() {
+        let title = build_codex_session_display_title("/tmp/crewdock", None);
+        assert_eq!(title, "crewdock session");
+    }
+
+    #[test]
+    fn codex_session_title_strips_instruction_wrapper_but_keeps_real_ask() {
+        let title = build_codex_session_display_title(
+            "/tmp/fastapi-backends",
+            Some(
+                "# AGENTS.md instructions for /tmp/fastapi-backends\n\n<INSTRUCTIONS>\ninternal guidance\n</INSTRUCTIONS>\nCan you inspect the auth flow and explain what is missing?",
+            ),
+        );
+
+        assert_eq!(
+            title,
+            "fastapi-backends: inspect the auth flow and explain what is missing"
+        );
+    }
+
+    #[test]
+    fn codex_session_summary_reads_event_user_message() {
+        let workspace = TestWorkspace::new();
+        let session_file = workspace.root_dir().join("codex-event.jsonl");
+        fs::write(
+            &session_file,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"session-1\",\"cwd\":\"/tmp/crewdock\",\"originator\":\"codex_cli_rs\",\"cli_version\":\"0.116.0\",\"source\":\"cli\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Can you inspect the right click menu clipping?\"}}\n",
+            ),
+        )
+        .unwrap();
+
+        let summary =
+            read_codex_session_summary(&session_file).expect("session summary should load");
+
+        assert_eq!(summary.meta.id, "session-1");
+        assert_eq!(
+            summary.first_user_prompt.as_deref(),
+            Some("Can you inspect the right click menu clipping?")
+        );
+    }
+
+    #[test]
+    fn codex_session_summary_skips_environment_context_and_uses_real_ask() {
+        let workspace = TestWorkspace::new();
+        let session_file = workspace.root_dir().join("codex-environment-context.jsonl");
+        fs::write(
+            &session_file,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"session-ctx\",\"cwd\":\"/tmp/fastapi-backends\",\"originator\":\"codex_cli_rs\",\"cli_version\":\"0.116.0\",\"source\":\"cli\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"<environment_context>\\n  <cwd>/tmp/fastapi-backends</cwd>\\n</environment_context>\"}]}}\n",
+                "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"Can you map the auth endpoints for this backend?\"}}\n",
+            ),
+        )
+        .unwrap();
+
+        let summary =
+            read_codex_session_summary(&session_file).expect("session summary should load");
+
+        assert_eq!(
+            summary.first_user_prompt.as_deref(),
+            Some("Can you map the auth endpoints for this backend?")
+        );
+    }
+
+    #[test]
+    fn codex_session_summary_skips_agents_instructions_blob() {
+        let workspace = TestWorkspace::new();
+        let session_file = workspace.root_dir().join("codex-agents-instructions.jsonl");
+        fs::write(
+            &session_file,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"session-3\",\"cwd\":\"/tmp/fastapi-backends\",\"originator\":\"codex_cli_rs\",\"cli_version\":\"0.116.0\",\"source\":\"cli\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"# AGENTS.md instructions for /tmp/fastapi-backends\\n\\n<INSTRUCTIONS>\\ninternal guidance\\n</INSTRUCTIONS>\"}]}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"Could you explain the current backend structure and what is left to build?\"}]}}\n",
+            ),
+        )
+        .unwrap();
+
+        let summary =
+            read_codex_session_summary(&session_file).expect("session summary should load");
+
+        assert_eq!(
+            summary.first_user_prompt.as_deref(),
+            Some("Could you explain the current backend structure and what is left to build?")
+        );
+    }
+
+    #[test]
+    fn codex_session_summary_falls_back_to_response_item_user_message() {
+        let workspace = TestWorkspace::new();
+        let session_file = workspace.root_dir().join("codex-response-item.jsonl");
+        fs::write(
+            &session_file,
+            concat!(
+                "{\"type\":\"session_meta\",\"payload\":{\"id\":\"session-2\",\"cwd\":\"/tmp/crewdock\",\"originator\":\"codex_cli_rs\",\"cli_version\":\"0.116.0\",\"source\":\"cli\"}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"skip\"}]}}\n",
+                "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_image\"},{\"type\":\"input_text\",\"text\":\"Please audit the render path for perf pitfalls.\"}]}}\n",
+            ),
+        )
+        .unwrap();
+
+        let summary =
+            read_codex_session_summary(&session_file).expect("session summary should load");
+
+        assert_eq!(summary.meta.id, "session-2");
+        assert_eq!(
+            summary.first_user_prompt.as_deref(),
+            Some("Please audit the render path for perf pitfalls.")
+        );
     }
 
     #[test]
@@ -3552,6 +4780,183 @@ mod tests {
         assert_eq!(persisted.settings.interface_text_scale, Some(1.0));
         assert_eq!(persisted.settings.terminal_font_size, Some(13.5));
         assert_eq!(persisted.settings.openai_api_key, None);
+    }
+
+    #[test]
+    fn reordering_workspaces_updates_persisted_order_and_active_index() {
+        let mut runtime = RuntimeState::seeded();
+        let cwd = normalize_workspace_path(".").expect("cwd should resolve");
+
+        let mut first = runtime.build_workspace_record(&cwd, 1, None).unwrap();
+        first.name = "Alpha".to_string();
+        let mut second = runtime.build_workspace_record(&cwd, 2, None).unwrap();
+        second.name = "Beta".to_string();
+        let mut third = runtime.build_workspace_record(&cwd, 4, None).unwrap();
+        third.name = "Gamma".to_string();
+
+        runtime.active_workspace_id = Some(second.id.clone());
+        runtime.workspaces.push(first.clone());
+        runtime.workspaces.push(second.clone());
+        runtime.workspaces.push(third.clone());
+
+        super::workspace_manager::reorder_workspace_in_runtime(&mut runtime, &first.id, 2)
+            .expect("workspace reorder should succeed");
+
+        assert_eq!(
+            runtime
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Beta", "Gamma", "Alpha"]
+        );
+        assert_eq!(
+            runtime.active_workspace_id.as_deref(),
+            Some(second.id.as_str())
+        );
+
+        let persisted = runtime.persisted_state();
+        assert_eq!(persisted.active_workspace_index, Some(0));
+        assert_eq!(
+            persisted
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.name.as_deref().unwrap_or_default())
+                .collect::<Vec<_>>(),
+            vec!["Beta", "Gamma", "Alpha"]
+        );
+    }
+
+    #[test]
+    fn reordering_workspace_to_end_uses_post_removal_insertion_index() {
+        let mut runtime = RuntimeState::seeded();
+        let cwd = normalize_workspace_path(".").expect("cwd should resolve");
+
+        let mut first = runtime.build_workspace_record(&cwd, 1, None).unwrap();
+        first.name = "Alpha".to_string();
+        let mut second = runtime.build_workspace_record(&cwd, 2, None).unwrap();
+        second.name = "Beta".to_string();
+        let mut third = runtime.build_workspace_record(&cwd, 4, None).unwrap();
+        third.name = "Gamma".to_string();
+
+        runtime.workspaces.push(first.clone());
+        runtime.workspaces.push(second.clone());
+        runtime.workspaces.push(third.clone());
+
+        super::workspace_manager::reorder_workspace_in_runtime(&mut runtime, &first.id, 2)
+            .expect("workspace reorder should allow end insertion");
+
+        assert_eq!(
+            runtime
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Beta", "Gamma", "Alpha"]
+        );
+    }
+
+    #[test]
+    fn closing_active_workspace_after_reorder_uses_new_neighbor_order() {
+        let mut runtime = RuntimeState::seeded();
+        let cwd = normalize_workspace_path(".").expect("cwd should resolve");
+
+        let mut first = runtime.build_workspace_record(&cwd, 1, None).unwrap();
+        first.name = "Alpha".to_string();
+        let mut second = runtime.build_workspace_record(&cwd, 2, None).unwrap();
+        second.name = "Beta".to_string();
+        let mut third = runtime.build_workspace_record(&cwd, 4, None).unwrap();
+        third.name = "Gamma".to_string();
+
+        runtime.active_workspace_id = Some(second.id.clone());
+        runtime.workspaces.push(first.clone());
+        runtime.workspaces.push(second.clone());
+        runtime.workspaces.push(third.clone());
+
+        super::workspace_manager::reorder_workspace_in_runtime(&mut runtime, &first.id, 2)
+            .expect("workspace reorder should succeed");
+
+        let _ = super::workspace_manager::close_workspace_in_runtime(&mut runtime, &second.id)
+            .expect("closing the reordered active workspace should succeed");
+
+        assert_eq!(
+            runtime.active_workspace_id.as_deref(),
+            Some(third.id.as_str())
+        );
+        assert_eq!(
+            runtime
+                .workspaces
+                .iter()
+                .map(|workspace| workspace.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Gamma", "Alpha"]
+        );
+    }
+
+    #[test]
+    fn workspace_todos_preserve_open_and_completed_ordering() {
+        let mut runtime = RuntimeState::seeded();
+        let cwd = normalize_workspace_path(".").expect("cwd should resolve");
+        let workspace = runtime.build_workspace_record(&cwd, 1, None).unwrap();
+        let workspace_id = workspace.id.clone();
+        runtime.workspaces.push(workspace);
+
+        super::workspace_manager::add_workspace_todo_in_runtime(
+            &mut runtime,
+            &workspace_id,
+            "Draft changelog",
+        )
+        .expect("should add first todo");
+        super::workspace_manager::add_workspace_todo_in_runtime(
+            &mut runtime,
+            &workspace_id,
+            "Review PR",
+        )
+        .expect("should add second todo");
+
+        let first_todo_id = runtime.workspaces[0].todos[0].id.clone();
+        let second_todo_id = runtime.workspaces[0].todos[1].id.clone();
+
+        super::workspace_manager::set_workspace_todo_done_in_runtime(
+            &mut runtime,
+            &workspace_id,
+            &first_todo_id,
+            true,
+        )
+        .expect("should complete first todo");
+        super::workspace_manager::update_workspace_todo_in_runtime(
+            &mut runtime,
+            &workspace_id,
+            &second_todo_id,
+            "Review PR thoroughly",
+        )
+        .expect("should rename second todo");
+        super::workspace_manager::set_workspace_todo_done_in_runtime(
+            &mut runtime,
+            &workspace_id,
+            &first_todo_id,
+            false,
+        )
+        .expect("should reopen first todo");
+        super::workspace_manager::delete_workspace_todo_in_runtime(
+            &mut runtime,
+            &workspace_id,
+            &second_todo_id,
+        )
+        .expect("should delete second todo");
+
+        assert_eq!(
+            runtime.workspaces[0]
+                .todos
+                .iter()
+                .map(|todo| (todo.text.as_str(), todo.done))
+                .collect::<Vec<_>>(),
+            vec![("Draft changelog", false)]
+        );
+        assert!(
+            super::workspace_manager::add_workspace_todo_in_runtime(&mut runtime, &workspace_id, "   ")
+                .is_err()
+        );
     }
 
     #[test]
@@ -3677,6 +5082,85 @@ mod tests {
     }
 
     #[test]
+    fn persisted_state_keeps_workspace_todos_scoped_per_workspace() {
+        let mut runtime = RuntimeState::seeded();
+        let cwd = normalize_workspace_path(".").expect("cwd should resolve");
+
+        let first = runtime.build_workspace_record(&cwd, 1, None).unwrap();
+        let second = runtime.build_workspace_record(&cwd, 2, None).unwrap();
+
+        runtime.active_workspace_id = Some(first.id.clone());
+        runtime.workspaces.push(first.clone());
+        runtime.workspaces.push(second.clone());
+
+        runtime.workspaces[0].todos = vec![
+            WorkspaceTodoRecord {
+                id: "todo-1".to_string(),
+                text: "Check logs".to_string(),
+                done: false,
+            },
+            WorkspaceTodoRecord {
+                id: "todo-2".to_string(),
+                text: "Archive notes".to_string(),
+                done: true,
+            },
+        ];
+
+        let persisted = runtime.persisted_state();
+        assert_eq!(persisted.workspaces[0].todos.len(), 2);
+        assert!(persisted.workspaces[1].todos.is_empty());
+
+        let snapshot = runtime.build_snapshot();
+        assert_eq!(
+            snapshot
+                .active_workspace
+                .expect("active workspace should exist")
+                .todos
+                .iter()
+                .map(|todo| todo.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Check logs", "Archive notes"]
+        );
+    }
+
+    #[test]
+    fn persisted_workspace_todos_are_restored_from_disk() {
+        let fixture = TestWorkspace::new();
+        let persistence_path = fixture.root_dir().join("workspaces.json");
+        let workspace_path = fixture.project_dir().display().to_string();
+        fs::write(
+            &persistence_path,
+            format!(
+                r#"{{"workspaces":[{{"path":"{workspace_path}","paneCount":1,"todos":[{{"id":"todo-1","text":"Ship release","done":true}},{{"id":"todo-1","text":"Review launch notes","done":false}},{{"text":"  "}},{{"text":"Prep demo","done":false}}]}}]}}"#
+            ),
+        )
+        .expect("should write persisted state");
+
+        let mut runtime = RuntimeState::seeded();
+        runtime
+            .load_persisted_from_disk(persistence_path)
+            .expect("should load persisted state");
+
+        assert_eq!(runtime.workspaces.len(), 1);
+        assert_eq!(
+            runtime.workspaces[0]
+                .todos
+                .iter()
+                .map(|todo| (todo.text.as_str(), todo.done))
+                .collect::<Vec<_>>(),
+            vec![
+                ("Review launch notes", false),
+                ("Prep demo", false),
+                ("Ship release", true),
+            ]
+        );
+        assert_ne!(
+            runtime.workspaces[0].todos[1].id,
+            runtime.workspaces[0].todos[2].id
+        );
+    }
+
+    #[test]
     fn persisted_activity_history_is_restored_from_disk() {
         let fixture = TestWorkspace::new();
         let persistence_path = fixture.root_dir().join("workspaces.json");
@@ -3713,6 +5197,131 @@ mod tests {
         );
         assert_eq!(snapshot.activity.recent_events[0].label, "Shell 01");
         assert_eq!(snapshot.activity.recent_events[0].at, 1_710_000_000_000);
+    }
+
+    #[test]
+    fn workspace_file_explorer_lists_root_entries_with_filters_and_sorting() {
+        let fixture = TestWorkspace::new();
+        fs::create_dir_all(fixture.project_dir().join("Frontend")).unwrap();
+        fs::create_dir_all(fixture.project_dir().join("node_modules")).unwrap();
+        fs::create_dir_all(fixture.project_dir().join(".git")).unwrap();
+        fs::write(fixture.project_dir().join("README.md"), "hello\n").unwrap();
+        fs::write(fixture.project_dir().join("zeta.txt"), "zeta\n").unwrap();
+
+        let (runtime, workspace_id) = runtime_with_workspace(fixture.project_dir());
+        let snapshot = load_workspace_file_explorer_directory_snapshot(&runtime, &workspace_id, "")
+            .expect("root listing should load");
+
+        assert_eq!(snapshot.relative_path, "");
+        assert_eq!(
+            snapshot
+                .entries
+                .iter()
+                .map(|entry| (entry.name.as_str(), entry.kind))
+                .collect::<Vec<_>>(),
+            vec![
+                ("backend", WorkspaceFileExplorerEntryKind::Directory),
+                ("Frontend", WorkspaceFileExplorerEntryKind::Directory),
+                ("README.md", WorkspaceFileExplorerEntryKind::File),
+                ("zeta.txt", WorkspaceFileExplorerEntryKind::File),
+            ]
+        );
+    }
+
+    #[test]
+    fn workspace_file_explorer_loads_nested_relative_directory() {
+        let fixture = TestWorkspace::new();
+        fs::write(fixture.api_dir().join("routes.py"), "print('ok')\n").unwrap();
+        fs::create_dir_all(fixture.api_dir().join("handlers")).unwrap();
+
+        let (runtime, workspace_id) = runtime_with_workspace(fixture.project_dir());
+        let snapshot = load_workspace_file_explorer_directory_snapshot(
+            &runtime,
+            &workspace_id,
+            "backend/api",
+        )
+        .expect("nested listing should load");
+
+        assert_eq!(snapshot.relative_path, "backend/api");
+        assert_eq!(
+            snapshot
+                .entries
+                .iter()
+                .map(|entry| (entry.name.as_str(), entry.relative_path.as_str(), entry.kind))
+                .collect::<Vec<_>>(),
+            vec![
+                (
+                    "handlers",
+                    "backend/api/handlers",
+                    WorkspaceFileExplorerEntryKind::Directory,
+                ),
+                (
+                    "routes.py",
+                    "backend/api/routes.py",
+                    WorkspaceFileExplorerEntryKind::File,
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn workspace_file_explorer_rejects_path_traversal() {
+        let fixture = TestWorkspace::new();
+        let (runtime, workspace_id) = runtime_with_workspace(fixture.project_dir());
+
+        let error = load_workspace_file_explorer_directory_snapshot(&runtime, &workspace_id, "../")
+            .expect_err("path traversal should be rejected");
+
+        assert!(error.contains("path traversal"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_file_explorer_marks_symlink_directories_as_non_expandable() {
+        let fixture = TestWorkspace::new();
+        let target = fixture.root_dir().join("shared");
+        fs::create_dir_all(&target).unwrap();
+        let link = fixture.project_dir().join("linked-shared");
+        symlink(&target, &link).unwrap();
+
+        let (runtime, workspace_id) = runtime_with_workspace(fixture.project_dir());
+        let snapshot = load_workspace_file_explorer_directory_snapshot(&runtime, &workspace_id, "")
+            .expect("root listing should load");
+        let entry = snapshot
+            .entries
+            .iter()
+            .find(|entry| entry.name == "linked-shared")
+            .expect("symlink entry should be present");
+
+        assert_eq!(entry.kind, WorkspaceFileExplorerEntryKind::Symlink);
+        assert!(!entry.expandable);
+        assert!(
+            load_workspace_file_explorer_directory_snapshot(&runtime, &workspace_id, "linked-shared")
+                .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn workspace_file_explorer_returns_error_for_unreadable_directory() {
+        let fixture = TestWorkspace::new();
+        let private_dir = fixture.project_dir().join("private");
+        fs::create_dir_all(&private_dir).unwrap();
+        let original_permissions = fs::metadata(&private_dir).unwrap().permissions();
+        let mut unreadable_permissions = original_permissions.clone();
+        unreadable_permissions.set_mode(0o000);
+        fs::set_permissions(&private_dir, unreadable_permissions).unwrap();
+
+        let (runtime, workspace_id) = runtime_with_workspace(fixture.project_dir());
+        let error = load_workspace_file_explorer_directory_snapshot(&runtime, &workspace_id, "private")
+            .expect_err("unreadable directories should surface an error");
+
+        fs::set_permissions(&private_dir, original_permissions).unwrap();
+
+        assert!(
+            error.contains("failed to read directory") || error.contains("failed to access directory"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
@@ -3839,6 +5448,33 @@ mod tests {
         assert!(compare_codex_cli_versions("0.116.0", "0.42.0").is_gt());
         assert!(compare_codex_cli_versions("0.116.0", "0.116.0").is_eq());
         assert!(compare_codex_cli_versions("0.98.0", "0.116.0").is_lt());
+    }
+
+    #[test]
+    fn login_shell_path_extraction_ignores_shell_noise() {
+        let output = b"shell startup noise\n__CREWDOCK_PATH_START__/usr/local/bin:/opt/homebrew/bin__CREWDOCK_PATH_END__";
+
+        assert_eq!(
+            extract_login_shell_path(output),
+            Some(OsString::from("/usr/local/bin:/opt/homebrew/bin"))
+        );
+    }
+
+    #[test]
+    fn merge_path_values_prefers_login_shell_entries_without_duplicates() {
+        let merged = merge_path_values(
+            Some(OsStr::new("/usr/local/bin:/opt/homebrew/bin")),
+            Some(OsStr::new("/usr/bin:/usr/local/bin")),
+        )
+        .expect("merged PATH should be available");
+
+        let merged_entries = env::split_paths(&merged)
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            merged_entries,
+            vec!["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin"]
+        );
     }
 
     #[test]
@@ -4076,6 +5712,18 @@ src/old name.rs\0\
 
     fn canonical_path(path: &Path) -> PathBuf {
         fs::canonicalize(path).expect("fixture path should be canonicalizable")
+    }
+
+    fn runtime_with_workspace(path: &Path) -> (RuntimeState, String) {
+        let mut runtime = RuntimeState::seeded();
+        let normalized_path = normalize_workspace_path(path.to_str().unwrap()).unwrap();
+        let workspace = runtime
+            .build_workspace_record(&normalized_path, 1, None)
+            .expect("workspace should build");
+        let workspace_id = workspace.id.clone();
+        runtime.active_workspace_id = Some(workspace_id.clone());
+        runtime.workspaces.push(workspace);
+        (runtime, workspace_id)
     }
 
     fn run_git(cwd: &Path, args: &[&str]) {

@@ -3,7 +3,9 @@ use std::{collections::HashSet, fs, path::PathBuf};
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
-use crate::{PersistedPaneLayout, RuntimeState, SettingsRecord, ThemeId};
+use crate::{
+    PersistedPaneLayout, RuntimeState, SettingsRecord, ThemeId, WorkspaceTodoRecord,
+};
 
 const PERSISTENCE_FILE: &str = "workspaces.json";
 const MAX_PERSISTED_ACTIVITY_EVENTS: usize = 80;
@@ -46,11 +48,26 @@ pub(crate) struct PersistedWorkspace {
     #[serde(default)]
     pub(crate) name: Option<String>,
     #[serde(default)]
+    pub(crate) codex_session_id: Option<String>,
+    #[serde(default)]
     pub(crate) pane_count: Option<u8>,
     #[serde(default)]
     pub(crate) layout_id: Option<String>,
     #[serde(default)]
     pub(crate) pane_layout: Option<PersistedPaneLayout>,
+    #[serde(default)]
+    pub(crate) todos: Vec<PersistedWorkspaceTodo>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PersistedWorkspaceTodo {
+    #[serde(default)]
+    pub(crate) id: Option<String>,
+    #[serde(default)]
+    pub(crate) text: String,
+    #[serde(default)]
+    pub(crate) done: bool,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -110,9 +127,19 @@ pub(crate) fn build_persisted_state(runtime: &RuntimeState) -> PersistedWorkspac
             .map(|workspace| PersistedWorkspace {
                 path: workspace.path.clone(),
                 name: Some(workspace.name.clone()),
+                codex_session_id: workspace.codex_session_id.clone(),
                 pane_count: Some(workspace.layout.pane_count),
                 layout_id: None,
                 pane_layout: crate::persist_pane_layout(workspace),
+                todos: workspace
+                    .todos
+                    .iter()
+                    .map(|todo| PersistedWorkspaceTodo {
+                        id: Some(todo.id.clone()),
+                        text: todo.text.clone(),
+                        done: todo.done,
+                    })
+                    .collect(),
             })
             .collect(),
         recent_activity: runtime
@@ -276,6 +303,11 @@ pub(crate) fn load_persisted_from_disk(
                 {
                     workspace.name = name;
                 }
+                workspace.codex_session_id = crate::normalize_optional_codex_session_id(
+                    persisted_workspace.codex_session_id,
+                );
+                workspace.todos =
+                    normalize_persisted_workspace_todos(runtime, persisted_workspace.todos);
                 workspace
             }
             Err(_) => continue,
@@ -338,4 +370,46 @@ fn now_timestamp_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
+}
+
+fn normalize_persisted_workspace_todos(
+    runtime: &mut RuntimeState,
+    todos: Vec<PersistedWorkspaceTodo>,
+) -> Vec<WorkspaceTodoRecord> {
+    let mut seen_ids = HashSet::new();
+    let mut open_todos = Vec::new();
+    let mut completed_todos = Vec::new();
+
+    for todo in todos {
+        let Ok(text) = crate::normalize_workspace_todo_text(&todo.text) else {
+            continue;
+        };
+
+        let mut todo_id = todo
+            .id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| runtime.next_id("todo"));
+
+        while !seen_ids.insert(todo_id.clone()) {
+            todo_id = runtime.next_id("todo");
+        }
+
+        let record = WorkspaceTodoRecord {
+            id: todo_id,
+            text,
+            done: todo.done,
+        };
+
+        if record.done {
+            completed_todos.push(record);
+        } else {
+            open_todos.push(record);
+        }
+    }
+
+    open_todos.extend(completed_todos);
+    open_todos
 }

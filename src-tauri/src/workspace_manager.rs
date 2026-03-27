@@ -4,10 +4,11 @@ use portable_pty::ChildKiller;
 
 use crate::{
     build_balanced_pane_layout, collect_git_detail, layout_for_pane_count,
-    normalize_workspace_name, relabel_panes, remove_pane_from_layout, restore_pane_layout,
+    normalize_workspace_name, normalize_workspace_todo_text, relabel_panes,
+    remove_pane_from_layout, restore_pane_layout,
     session_manager::{prepare_workspace_launch, PaneJob},
     split_pane_layout, workspace_name, PaneRecord, PaneStatus, PersistedPaneLayout, RuntimeState,
-    SplitAxis, WorkspaceRecord,
+    SplitAxis, WorkspaceRecord, WorkspaceTodoRecord,
 };
 
 pub(crate) fn build_workspace_record(
@@ -39,8 +40,10 @@ pub(crate) fn build_workspace_record(
         layout,
         panes,
         pane_layout,
+        todos: Vec::new(),
         started: false,
         git: None,
+        codex_session_id: None,
     })
 }
 
@@ -109,6 +112,111 @@ pub(crate) fn rename_workspace_in_runtime(
         .ok_or_else(|| "workspace not found".to_string())?;
     let next_name = normalize_workspace_name(name)?;
     runtime.workspaces[workspace_index].name = next_name;
+    runtime.persist_to_disk()
+}
+
+fn insert_open_workspace_todo(workspace: &mut WorkspaceRecord, todo: WorkspaceTodoRecord) {
+    let insertion_index = workspace
+        .todos
+        .iter()
+        .position(|entry| entry.done)
+        .unwrap_or(workspace.todos.len());
+    workspace.todos.insert(insertion_index, todo);
+}
+
+pub(crate) fn add_workspace_todo_in_runtime(
+    runtime: &mut RuntimeState,
+    workspace_id: &str,
+    text: &str,
+) -> Result<(), String> {
+    let workspace_index = find_workspace_index_by_id(runtime, workspace_id)
+        .ok_or_else(|| "workspace not found".to_string())?;
+    let text = normalize_workspace_todo_text(text)?;
+    let todo = WorkspaceTodoRecord {
+        id: runtime.next_id("todo"),
+        text,
+        done: false,
+    };
+
+    insert_open_workspace_todo(&mut runtime.workspaces[workspace_index], todo);
+    runtime.persist_to_disk()
+}
+
+pub(crate) fn update_workspace_todo_in_runtime(
+    runtime: &mut RuntimeState,
+    workspace_id: &str,
+    todo_id: &str,
+    text: &str,
+) -> Result<(), String> {
+    let workspace_index = find_workspace_index_by_id(runtime, workspace_id)
+        .ok_or_else(|| "workspace not found".to_string())?;
+    let text = normalize_workspace_todo_text(text)?;
+    let todo_index = runtime.workspaces[workspace_index]
+        .todos
+        .iter()
+        .position(|todo| todo.id == todo_id)
+        .ok_or_else(|| "workspace task not found".to_string())?;
+
+    runtime.workspaces[workspace_index].todos[todo_index].text = text;
+    runtime.persist_to_disk()
+}
+
+pub(crate) fn set_workspace_todo_done_in_runtime(
+    runtime: &mut RuntimeState,
+    workspace_id: &str,
+    todo_id: &str,
+    done: bool,
+) -> Result<(), String> {
+    let workspace_index = find_workspace_index_by_id(runtime, workspace_id)
+        .ok_or_else(|| "workspace not found".to_string())?;
+    let todo_index = runtime.workspaces[workspace_index]
+        .todos
+        .iter()
+        .position(|todo| todo.id == todo_id)
+        .ok_or_else(|| "workspace task not found".to_string())?;
+
+    let workspace = &mut runtime.workspaces[workspace_index];
+    let mut todo = workspace.todos.remove(todo_index);
+    todo.done = done;
+
+    if done {
+        workspace.todos.push(todo);
+    } else {
+        insert_open_workspace_todo(workspace, todo);
+    }
+
+    runtime.persist_to_disk()
+}
+
+pub(crate) fn delete_workspace_todo_in_runtime(
+    runtime: &mut RuntimeState,
+    workspace_id: &str,
+    todo_id: &str,
+) -> Result<(), String> {
+    let workspace_index = find_workspace_index_by_id(runtime, workspace_id)
+        .ok_or_else(|| "workspace not found".to_string())?;
+    let todo_index = runtime.workspaces[workspace_index]
+        .todos
+        .iter()
+        .position(|todo| todo.id == todo_id)
+        .ok_or_else(|| "workspace task not found".to_string())?;
+
+    runtime.workspaces[workspace_index].todos.remove(todo_index);
+    runtime.persist_to_disk()
+}
+
+pub(crate) fn reorder_workspace_in_runtime(
+    runtime: &mut RuntimeState,
+    workspace_id: &str,
+    target_index: usize,
+) -> Result<(), String> {
+    let Some(source_index) = find_workspace_index_by_id(runtime, workspace_id) else {
+        return Err("workspace not found".to_string());
+    };
+
+    let workspace = runtime.workspaces.remove(source_index);
+    let insertion_index = target_index.min(runtime.workspaces.len());
+    runtime.workspaces.insert(insertion_index, workspace);
     runtime.persist_to_disk()
 }
 

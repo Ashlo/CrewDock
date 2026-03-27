@@ -29,22 +29,19 @@ export function renderWorkspaceStrip({
           <div class="workspace-tabs" data-workspace-tabs data-tauri-drag-region>
             ${
               workspaces.length
-                ? workspaces
-                    .map((workspace) =>
-                      renderWorkspaceTab({
-                        workspace,
-                        activeWorkspaceId,
-                        label: tabLabels.get(workspace.id) || workspace.name,
-                        workspaceRenameDraft,
-                        attention: getWorkspaceAttention(workspace.id),
-                        escapeHtml,
-                        getGitTone,
-                        formatGitBadgeTitle,
-                      }),
-                    )
-                    .join("")
+                ? renderWorkspaceTabs({
+                    workspaces,
+                    activeWorkspaceId,
+                    workspaceRenameDraft,
+                    tabLabels,
+                    getWorkspaceAttention,
+                    escapeHtml,
+                    getGitTone,
+                    formatGitBadgeTitle,
+                  })
                 : '<span class="workspace-tabs-empty" data-tauri-drag-region="true">No workspaces open</span>'
             }
+            <div class="workspace-tab-drop-indicator" data-workspace-tab-drop-indicator aria-hidden="true"></div>
           </div>
         </div>
         <button
@@ -81,6 +78,32 @@ export function renderWorkspaceStrip({
       </div>
     </div>
   `;
+}
+
+function renderWorkspaceTabs({
+  workspaces,
+  activeWorkspaceId,
+  workspaceRenameDraft,
+  tabLabels,
+  getWorkspaceAttention,
+  escapeHtml,
+  getGitTone,
+  formatGitBadgeTitle,
+}) {
+  return workspaces
+    .map((workspace, index) =>
+      renderWorkspaceTab({
+        workspace,
+        activeWorkspaceId,
+        label: tabLabels.get(workspace.id) || workspace.name,
+        workspaceRenameDraft,
+        attention: getWorkspaceAttention(workspace.id),
+        renderIndex: index,
+        escapeHtml,
+        getGitTone,
+        formatGitBadgeTitle,
+      }))
+    .join("");
 }
 
 function renderWindowSummary(windowSummary, workspaceCount, escapeHtml) {
@@ -134,6 +157,7 @@ function renderWorkspaceTab({
   label,
   workspaceRenameDraft,
   attention,
+  renderIndex,
   escapeHtml,
   getGitTone,
   formatGitBadgeTitle,
@@ -148,6 +172,10 @@ function renderWorkspaceTab({
   return `
     <div
       class="workspace-tab-shell ${activeClass} ${isRenaming ? "is-renaming" : ""} ${attention?.unreadCount ? "has-attention" : ""}"
+      data-tauri-drag-region="false"
+      data-workspace-tab-shell
+      data-workspace-id="${escapeHtml(workspace.id)}"
+      data-workspace-index="${escapeHtml(String(renderIndex ?? 0))}"
       ${attentionTone ? `data-attention-tone="${escapeHtml(attentionTone)}"` : ""}
     >
       ${

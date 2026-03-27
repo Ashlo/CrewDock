@@ -31,8 +31,34 @@ const DEFAULT_TERMINAL_FONT_SIZE = 13.5;
 const MIN_TERMINAL_FONT_SIZE = 11;
 const MAX_TERMINAL_FONT_SIZE = 18;
 const COMPACT_PANE_HEIGHT = 420;
+const WORKSPACE_TAB_DRAG_THRESHOLD_PX = 6;
+const WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX = 32;
+const WORKSPACE_TAB_EDGE_SCROLL_MAX_PX_PER_FRAME = 18;
+const WORKSPACE_TAB_CLICK_SUPPRESS_MS = 250;
 const LAUNCHER_COMMANDS = Object.freeze(["help", "pwd", "ls", "cd", "open", "clear"]);
 const PATH_AWARE_LAUNCHER_COMMANDS = new Set(["ls", "cd", "open"]);
+const RENDER_STRIP = 1 << 0;
+const RENDER_STAGE = 1 << 1;
+const RENDER_STATUS = 1 << 2;
+const RENDER_ACTIVITY = 1 << 3;
+const RENDER_MODAL = 1 << 4;
+const RENDER_CONTEXT = 1 << 5;
+const RENDER_TERMINALS = 1 << 6;
+const RENDER_EXPLORER = 1 << 7;
+const RENDER_ALL = RENDER_STRIP
+  | RENDER_STAGE
+  | RENDER_STATUS
+  | RENDER_ACTIVITY
+  | RENDER_MODAL
+  | RENDER_CONTEXT
+  | RENDER_TERMINALS
+  | RENDER_EXPLORER;
+const RENDER_PANEL_SURFACES = RENDER_STATUS | RENDER_ACTIVITY | RENDER_MODAL | RENDER_CONTEXT;
+const RENDER_ACTIVITY_SURFACES = RENDER_STRIP | RENDER_STATUS | RENDER_ACTIVITY;
+const RENDER_TODO_SURFACES = RENDER_STATUS | RENDER_MODAL;
+const RENDER_SOURCE_CONTROL_SURFACES = RENDER_STRIP | RENDER_STATUS | RENDER_MODAL;
+const RENDER_CODEX_SURFACES = RENDER_STATUS | RENDER_MODAL;
+const RENDER_FILE_EXPLORER_SURFACES = RENDER_STATUS | RENDER_EXPLORER;
 
 const THEME_REGISTRY = Object.freeze({
   "one-dark": {
@@ -574,6 +600,7 @@ const bridge = createBridge({
   completeMockLauncherInput,
   resolveMockNavigationPath,
   mockListDirectory,
+  mockLoadWorkspaceFileExplorerDirectory,
 });
 
 const uiState = createUiState();
@@ -585,20 +612,23 @@ const {
   workspaceScreens,
   terminalViewportLines,
 } = runtimeStore;
+window.__crewdockRenderDebug = runtimeStore.renderMetrics;
 
 void init();
 
 async function init() {
   document.body.dataset.platform = detectPlatform();
   uiState.snapshot = await bridge.getAppSnapshot();
+  pruneWorkspaceFileExplorerState(uiState.snapshot);
   hydrateRuntimeActivityFromSnapshot(uiState.snapshot);
   applySnapshotSettings(uiState.snapshot);
 
   if (bridge.listenState) {
     await bridge.listenState((snapshot) => {
       uiState.snapshot = snapshot;
+      pruneWorkspaceFileExplorerState(snapshot);
       applySnapshotSettings(snapshot);
-      render();
+      requestRender(RENDER_ALL);
     });
   }
 
@@ -611,8 +641,13 @@ async function init() {
   if (bridge.listenRuntimeEvents) {
     await bridge.listenRuntimeEvents((event) => {
       const handledSourceControl = handleSourceControlRuntimeEvent(event);
-      recordRuntimeEvent(event);
-      render();
+      const handledActivity = recordRuntimeEvent(event);
+      if (handledSourceControl) {
+        requestSourceControlRender();
+      }
+      if (handledActivity) {
+        requestActivityRender();
+      }
       if (
         handledSourceControl
         && event?.kind === "gitTaskSnapshot"
@@ -643,6 +678,9 @@ async function init() {
   document.addEventListener("paste", handlePaste, true);
   document.addEventListener("focusout", handleFocusOut, true);
   document.addEventListener("pointerdown", handlePointerDown, true);
+  document.addEventListener("pointermove", handlePointerMove, true);
+  document.addEventListener("pointerup", handlePointerUp, true);
+  document.addEventListener("pointercancel", handlePointerCancel, true);
   document.addEventListener("scroll", handleScroll, true);
   document.addEventListener("wheel", handleWheel, { passive: false });
   window.addEventListener("focus", handleWindowFocus);
@@ -676,6 +714,263 @@ function supportsSystemHealth() {
 
 function getActiveWorkspace() {
   return uiState.snapshot?.activeWorkspace || null;
+}
+
+function getWorkspaceTodoState(workspace = getActiveWorkspace()) {
+  const todos = Array.isArray(workspace?.todos) ? workspace.todos : [];
+  const openTodos = todos.filter((todo) => !todo.done);
+  const completedTodos = todos.filter((todo) => todo.done);
+
+  return {
+    todos,
+    openTodos,
+    completedTodos,
+    openCount: openTodos.length,
+    completedCount: completedTodos.length,
+  };
+}
+
+function createWorkspaceFileExplorerState() {
+  return {
+    visible: false,
+    selectedPath: "",
+    expandedDirectories: new Set(),
+    directories: new Map(),
+    loadingPaths: new Set(),
+    errorByPath: new Map(),
+    version: 0,
+  };
+}
+
+function getWorkspaceFileExplorerState(workspaceId, { create = true } = {}) {
+  if (!workspaceId) {
+    return null;
+  }
+
+  let state = uiState.workspaceFileExplorer.get(workspaceId) || null;
+  if (!state && create) {
+    state = createWorkspaceFileExplorerState();
+    uiState.workspaceFileExplorer.set(workspaceId, state);
+  }
+
+  return state;
+}
+
+function pruneWorkspaceFileExplorerState(snapshot = uiState.snapshot) {
+  const workspaceIds = new Set((snapshot?.workspaces || []).map((workspace) => workspace.id));
+  for (const workspaceId of uiState.workspaceFileExplorer.keys()) {
+    if (!workspaceIds.has(workspaceId)) {
+      uiState.workspaceFileExplorer.delete(workspaceId);
+    }
+  }
+}
+
+function normalizeWorkspaceFileExplorerRelativePath(value) {
+  if (!value) {
+    return "";
+  }
+
+  return String(value)
+    .replaceAll("\\", "/")
+    .split("/")
+    .map((segment) => segment.trim())
+    .filter((segment) => segment && segment !== ".")
+    .join("/");
+}
+
+function isWorkspaceFileExplorerVisible(workspaceId = getActiveWorkspace()?.id || "") {
+  return Boolean(getWorkspaceFileExplorerState(workspaceId, { create: false })?.visible);
+}
+
+function requestWorkspaceFileExplorerRender(mask = RENDER_FILE_EXPLORER_SURFACES) {
+  requestRender(mask);
+}
+
+function clearWorkspaceFileExplorerCache(workspaceId) {
+  const state = getWorkspaceFileExplorerState(workspaceId);
+  if (!state) {
+    return;
+  }
+
+  state.version += 1;
+  state.selectedPath = "";
+  state.expandedDirectories.clear();
+  state.directories.clear();
+  state.loadingPaths.clear();
+  state.errorByPath.clear();
+}
+
+async function loadWorkspaceFileExplorerDirectory(workspaceId, relativePath = "", { force = false } = {}) {
+  const workspace = getWorkspaceById(workspaceId);
+  const explorerState = getWorkspaceFileExplorerState(workspaceId);
+  if (!workspace || !explorerState || typeof bridge.loadWorkspaceFileExplorerDirectory !== "function") {
+    return null;
+  }
+
+  const normalizedPath = normalizeWorkspaceFileExplorerRelativePath(relativePath);
+  if (!force && explorerState.directories.has(normalizedPath)) {
+    explorerState.errorByPath.delete(normalizedPath);
+    return explorerState.directories.get(normalizedPath);
+  }
+  if (explorerState.loadingPaths.has(normalizedPath)) {
+    return explorerState.directories.get(normalizedPath) || null;
+  }
+
+  const requestVersion = explorerState.version;
+  explorerState.loadingPaths.add(normalizedPath);
+  explorerState.errorByPath.delete(normalizedPath);
+  if (force) {
+    explorerState.directories.delete(normalizedPath);
+  }
+  requestRender(RENDER_EXPLORER);
+
+  try {
+    const snapshot = await bridge.loadWorkspaceFileExplorerDirectory(workspaceId, normalizedPath);
+    if (explorerState.version !== requestVersion) {
+      return null;
+    }
+
+    const entries = Array.isArray(snapshot?.entries)
+      ? snapshot.entries.map((entry) => ({
+          name: String(entry?.name || basename(entry?.relativePath || "")),
+          relativePath: normalizeWorkspaceFileExplorerRelativePath(entry?.relativePath || ""),
+          kind: entry?.kind === "directory" || entry?.kind === "symlink" ? entry.kind : "file",
+          expandable: entry?.kind === "directory" && entry?.expandable !== false,
+        }))
+      : [];
+    const normalizedSnapshot = {
+      workspaceId,
+      relativePath: normalizedPath,
+      entries,
+    };
+
+    explorerState.directories.set(normalizedPath, normalizedSnapshot);
+    explorerState.errorByPath.delete(normalizedPath);
+    return normalizedSnapshot;
+  } catch (error) {
+    if (explorerState.version === requestVersion) {
+      explorerState.errorByPath.set(
+        normalizedPath,
+        error instanceof Error ? error.message : String(error || "Failed to load directory."),
+      );
+    }
+    return null;
+  } finally {
+    if (explorerState.version === requestVersion) {
+      explorerState.loadingPaths.delete(normalizedPath);
+    }
+    requestRender(RENDER_EXPLORER);
+  }
+}
+
+function ensureWorkspaceFileExplorerRootLoaded(workspaceId = getActiveWorkspace()?.id || "") {
+  const explorerState = getWorkspaceFileExplorerState(workspaceId, { create: false });
+  if (!explorerState?.visible || explorerState.directories.has("") || explorerState.loadingPaths.has("")) {
+    return;
+  }
+
+  void loadWorkspaceFileExplorerDirectory(workspaceId, "");
+}
+
+function closeWorkspaceFileExplorer(workspaceId = getActiveWorkspace()?.id || "") {
+  const explorerState = getWorkspaceFileExplorerState(workspaceId, { create: false });
+  if (!explorerState?.visible) {
+    return false;
+  }
+
+  explorerState.visible = false;
+  return true;
+}
+
+function openWorkspaceFileExplorer(workspaceId = getActiveWorkspace()?.id || "") {
+  const explorerState = getWorkspaceFileExplorerState(workspaceId);
+  if (!explorerState) {
+    return false;
+  }
+
+  explorerState.visible = true;
+  ensureWorkspaceFileExplorerRootLoaded(workspaceId);
+  return true;
+}
+
+async function toggleWorkspaceFileExplorer(forceVisible = !isWorkspaceFileExplorerVisible()) {
+  const workspace = getActiveWorkspace();
+  if (!workspace) {
+    return;
+  }
+
+  if (!forceVisible) {
+    if (closeWorkspaceFileExplorer(workspace.id)) {
+      requestWorkspaceFileExplorerRender(RENDER_FILE_EXPLORER_SURFACES | RENDER_TERMINALS);
+    }
+    return;
+  }
+
+  if (openWorkspaceFileExplorer(workspace.id)) {
+    requestWorkspaceFileExplorerRender(RENDER_FILE_EXPLORER_SURFACES | RENDER_TERMINALS);
+  }
+}
+
+async function refreshWorkspaceFileExplorer() {
+  const workspace = getActiveWorkspace();
+  if (!workspace) {
+    return;
+  }
+
+  clearWorkspaceFileExplorerCache(workspace.id);
+  requestRender(RENDER_EXPLORER);
+  await loadWorkspaceFileExplorerDirectory(workspace.id, "", { force: true });
+}
+
+function selectWorkspaceFileExplorerEntry(relativePath) {
+  const workspace = getActiveWorkspace();
+  const explorerState = getWorkspaceFileExplorerState(workspace?.id, { create: false });
+  if (!workspace || !explorerState) {
+    return;
+  }
+
+  explorerState.selectedPath = normalizeWorkspaceFileExplorerRelativePath(relativePath);
+}
+
+function toggleWorkspaceFileExplorerDirectory(relativePath) {
+  const workspace = getActiveWorkspace();
+  const explorerState = getWorkspaceFileExplorerState(workspace?.id, { create: false });
+  if (!workspace || !explorerState) {
+    return;
+  }
+
+  const normalizedPath = normalizeWorkspaceFileExplorerRelativePath(relativePath);
+  if (!normalizedPath) {
+    return;
+  }
+
+  if (explorerState.expandedDirectories.has(normalizedPath)) {
+    explorerState.expandedDirectories.delete(normalizedPath);
+    requestRender(RENDER_EXPLORER);
+    return;
+  }
+
+  explorerState.expandedDirectories.add(normalizedPath);
+  requestRender(RENDER_EXPLORER);
+  if (!explorerState.directories.has(normalizedPath) && !explorerState.loadingPaths.has(normalizedPath)) {
+    void loadWorkspaceFileExplorerDirectory(workspace.id, normalizedPath);
+  }
+}
+
+function formatWorkspaceTodoSummary({ openCount, completedCount }) {
+  if (openCount > 0 && completedCount > 0) {
+    return `${openCount} open • ${completedCount} completed`;
+  }
+
+  if (openCount > 0) {
+    return `${openCount} open ${openCount === 1 ? "task" : "tasks"}`;
+  }
+
+  if (completedCount > 0) {
+    return `${completedCount} completed`;
+  }
+
+  return "No tasks yet";
 }
 
 function resolveActivePaneId(workspace = getActiveWorkspace()) {
@@ -1217,7 +1512,7 @@ function closeSettingsSheet({ restoreSnapshot = true } = {}) {
   }
 
   hideSettingsSheet({ restoreSnapshot });
-  render();
+  requestPanelSurfacesRender();
 }
 
 function hasSettingsAppearanceChanges(snapshot = uiState.snapshot) {
@@ -1744,7 +2039,7 @@ function bindModalLayerControls(root = document) {
       event.preventDefault();
       event.stopPropagation();
       closeSourceControlPanel();
-      render();
+      requestSourceControlRender();
       return;
     }
 
@@ -1752,7 +2047,7 @@ function bindModalLayerControls(root = document) {
       event.preventDefault();
       event.stopPropagation();
       closeSourceControlPanel();
-      render();
+      requestSourceControlRender();
       return;
     }
 
@@ -1761,7 +2056,7 @@ function bindModalLayerControls(root = document) {
       event.preventDefault();
       event.stopPropagation();
       closeQuickSwitcher();
-      render();
+      requestRender(RENDER_MODAL);
       return;
     }
 
@@ -1769,7 +2064,7 @@ function bindModalLayerControls(root = document) {
       event.preventDefault();
       event.stopPropagation();
       closeQuickSwitcher();
-      render();
+      requestRender(RENDER_MODAL);
     }
   });
 }
@@ -1816,6 +2111,16 @@ async function handleClick(event) {
   }
 
   if (
+    target.dataset.action === "switch-workspace"
+    && shouldSuppressWorkspaceTabClick(target.dataset.workspaceId || "")
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    clearWorkspaceTabClickSuppression();
+    return;
+  }
+
+  if (
     target.dataset.action === "close-settings"
     && target.classList.contains("settings-sheet-backdrop")
     && clickedElement?.closest(".settings-sheet")
@@ -1827,6 +2132,14 @@ async function handleClick(event) {
     target.dataset.action === "close-git-panel"
     && target.classList.contains("workspace-git-backdrop")
     && clickedElement?.closest(".workspace-git-panel")
+  ) {
+    return;
+  }
+
+  if (
+    target.dataset.action === "close-todo-panel"
+    && target.classList.contains("workspace-todo-backdrop")
+    && clickedElement?.closest(".workspace-todo-panel")
   ) {
     return;
   }
@@ -1863,13 +2176,15 @@ async function handleClick(event) {
   if (target.dataset.action === "show-settings") {
     uiState.settingsVisible = true;
     uiState.settingsSection = "workbench";
+    closeTodoPanel();
+    closeCodexModal();
     closeSystemHealthPanel();
     closeSourceControlPanel();
     uiState.activityRailVisible = false;
     closeQuickSwitcher();
     uiState.pendingWorkspaceDraft = null;
     uiState.contextMenu = null;
-    render();
+    requestPanelSurfacesRender();
     return;
   }
 
@@ -1882,7 +2197,7 @@ async function handleClick(event) {
     const nextSection = normalizeSettingsSection(target.dataset.settingsSection);
     if (uiState.settingsSection !== nextSection) {
       uiState.settingsSection = nextSection;
-      render();
+      requestRender(RENDER_MODAL);
     }
     return;
   }
@@ -1890,6 +2205,8 @@ async function handleClick(event) {
   if (target.dataset.action === "show-launcher") {
     uiState.launcherVisible = true;
     hideSettingsSheet();
+    closeTodoPanel();
+    closeCodexModal();
     closeSystemHealthPanel();
     closeSourceControlPanel();
     uiState.activityRailVisible = false;
@@ -1906,9 +2223,97 @@ async function handleClick(event) {
     return;
   }
 
+  if (target.dataset.action === "toggle-file-explorer") {
+    await toggleWorkspaceFileExplorer();
+    return;
+  }
+
+  if (target.dataset.action === "collapse-file-explorer") {
+    if (closeWorkspaceFileExplorer()) {
+      requestWorkspaceFileExplorerRender(RENDER_FILE_EXPLORER_SURFACES | RENDER_TERMINALS);
+    }
+    return;
+  }
+
+  if (target.dataset.action === "refresh-file-explorer") {
+    await refreshWorkspaceFileExplorer();
+    return;
+  }
+
+  if (target.dataset.action === "toggle-file-explorer-directory") {
+    toggleWorkspaceFileExplorerDirectory(target.dataset.relativePath || "");
+    return;
+  }
+
+  if (target.dataset.action === "select-file-explorer-entry") {
+    selectWorkspaceFileExplorerEntry(target.dataset.relativePath || "");
+    requestRender(RENDER_EXPLORER);
+    return;
+  }
+
+  if (target.dataset.action === "toggle-todo-panel") {
+    toggleTodoPanel();
+    requestPanelSurfacesRender();
+    return;
+  }
+
+  if (target.dataset.action === "close-todo-panel") {
+    if (closeTodoPanel()) {
+      requestTodoRender();
+    }
+    return;
+  }
+
+  if (target.dataset.action === "show-codex-modal") {
+    await openCodexModal();
+    return;
+  }
+
+  if (target.dataset.action === "close-codex-modal") {
+    if (closeCodexModal()) {
+      requestCodexRender();
+    }
+    return;
+  }
+
+  if (target.dataset.action === "refresh-codex-sessions") {
+    await loadActiveWorkspaceCodexSessions({ force: true });
+    return;
+  }
+
+  if (target.dataset.action === "select-codex-session") {
+    const sessionId = String(target.dataset.sessionId || "");
+    if (sessionId && uiState.codexSelectedSessionId !== sessionId) {
+      uiState.codexSelectedSessionId = sessionId;
+      requestRender(RENDER_MODAL);
+    }
+    return;
+  }
+
+  if (target.dataset.action === "select-codex-target-pane") {
+    const workspace = getActiveWorkspace();
+    const paneId = String(target.dataset.paneId || "");
+    const pane = workspace?.panes?.find((entry) => entry.id === paneId) || null;
+    if (paneId && isCodexPaneReady(pane) && uiState.codexTargetPaneId !== paneId) {
+      uiState.codexTargetPaneId = paneId;
+      requestRender(RENDER_MODAL);
+    }
+    return;
+  }
+
+  if (target.dataset.action === "resume-codex-session") {
+    await resumeSelectedCodexSession();
+    return;
+  }
+
+  if (target.dataset.action === "start-codex-session") {
+    await startNewCodexSession();
+    return;
+  }
+
   if (target.dataset.action === "toggle-system-health-panel") {
     toggleSystemHealthPanel();
-    render({ refreshVisibleTerminals: false });
+    requestPanelSurfacesRender();
     if (uiState.systemHealthPanelVisible) {
       void loadSystemHealthSnapshot({ force: true });
     }
@@ -1917,7 +2322,7 @@ async function handleClick(event) {
 
   if (target.dataset.action === "close-system-health-panel") {
     if (closeSystemHealthPanel()) {
-      render({ refreshVisibleTerminals: false });
+      requestRender(RENDER_STATUS);
     }
     return;
   }
@@ -1929,13 +2334,13 @@ async function handleClick(event) {
 
   if (target.dataset.action === "toggle-activity-rail") {
     toggleActivityRail();
-    render();
+    requestPanelSurfacesRender();
     return;
   }
 
   if (target.dataset.action === "close-activity-rail") {
     uiState.activityRailVisible = false;
-    render();
+    requestRender(RENDER_STATUS | RENDER_ACTIVITY);
     return;
   }
 
@@ -1943,14 +2348,14 @@ async function handleClick(event) {
     const nextScope = normalizeActivityScope(target.dataset.activityScope, uiState.snapshot);
     if (uiState.activityRailScope !== nextScope) {
       uiState.activityRailScope = nextScope;
-      render();
+      requestRender(RENDER_ACTIVITY);
     }
     return;
   }
 
   if (target.dataset.action === "mark-all-activity-seen") {
     if (clearAllActivityAttention()) {
-      render();
+      requestActivityRender();
     }
     return;
   }
@@ -1974,13 +2379,45 @@ async function handleClick(event) {
 
   if (target.dataset.action === "close-git-panel") {
     closeSourceControlPanel();
-    render();
+    requestSourceControlRender();
     return;
   }
 
   if (target.dataset.action === "close-quick-switcher") {
     closeQuickSwitcher();
-    render();
+    requestRender(RENDER_MODAL);
+    return;
+  }
+
+  if (target.dataset.action === "toggle-workspace-todo-completed") {
+    uiState.workspaceTodos.completedCollapsed = !uiState.workspaceTodos.completedCollapsed;
+    requestRender(RENDER_MODAL);
+    return;
+  }
+
+  if (target.dataset.action === "start-workspace-todo-edit") {
+    const todoId = String(target.dataset.todoId || "");
+    startWorkspaceTodoEdit(todoId);
+    requestRender(RENDER_MODAL);
+    return;
+  }
+
+  if (target.dataset.action === "cancel-workspace-todo-edit") {
+    cancelWorkspaceTodoEdit();
+    requestRender(RENDER_MODAL);
+    return;
+  }
+
+  if (target.dataset.action === "toggle-workspace-todo-done") {
+    const todoId = String(target.dataset.todoId || "");
+    const done = String(target.dataset.done || "") === "true";
+    await setWorkspaceTodoDone(todoId, done);
+    return;
+  }
+
+  if (target.dataset.action === "delete-workspace-todo") {
+    const todoId = String(target.dataset.todoId || "");
+    await deleteWorkspaceTodo(todoId);
     return;
   }
 
@@ -2004,6 +2441,8 @@ async function handleClick(event) {
 
   if (target.dataset.action === "open-workspace") {
     hideSettingsSheet();
+    closeTodoPanel();
+    closeCodexModal();
     closeSystemHealthPanel();
     closeSourceControlPanel();
     uiState.activityRailVisible = false;
@@ -2020,7 +2459,7 @@ async function handleClick(event) {
 
     closeQuickSwitcher();
     startWorkspaceRename(workspaceId);
-    render();
+    requestRender(RENDER_STRIP);
     return;
   }
 
@@ -2031,7 +2470,7 @@ async function handleClick(event) {
 
   if (target.dataset.action === "cancel-layout-picker") {
     uiState.pendingWorkspaceDraft = null;
-    render();
+    requestRender(RENDER_MODAL);
     return;
   }
 
@@ -2075,7 +2514,7 @@ async function handleClick(event) {
       ...uiState.pendingWorkspaceDraft,
       paneCount: clampPaneCount(uiState.pendingWorkspaceDraft.paneCount + delta),
     };
-    render();
+    requestRender(RENDER_MODAL);
     return;
   }
 
@@ -2088,7 +2527,7 @@ async function handleClick(event) {
       ...uiState.pendingWorkspaceDraft,
       paneCount: clampPaneCount(Number(target.dataset.paneCount || uiState.pendingWorkspaceDraft.paneCount)),
     };
-    render();
+    requestRender(RENDER_MODAL);
     return;
   }
 
@@ -2104,6 +2543,7 @@ async function handleClick(event) {
     uiState.launcherVisible = false;
     hideSettingsSheet();
     uiState.gitPanelVisible = false;
+    closeTodoPanel();
     closeQuickSwitcher();
     uiState.pendingWorkspaceDraft = null;
     clearLauncherCommandState();
@@ -2156,7 +2596,7 @@ function handleContextMenu(event) {
   const pane = event.target.closest("[data-pane-id]");
   if (!pane || !uiState.snapshot?.activeWorkspace) {
     uiState.contextMenu = null;
-    render();
+    requestRender(RENDER_CONTEXT);
     return;
   }
 
@@ -2172,7 +2612,7 @@ function handleContextMenu(event) {
     x: event.clientX,
     y: event.clientY,
   };
-  render();
+  requestRender(RENDER_CONTEXT);
 }
 
 function handleMouseDown(event) {
@@ -2196,6 +2636,7 @@ function handleMouseDown(event) {
 
 function handlePointerDown(event) {
   const target = event.target instanceof Element ? event.target : null;
+  maybeBeginWorkspaceTabDrag(event, target);
   const paneId = target?.closest("[data-pane-id]")?.dataset?.paneId || null;
   if (paneId) {
     if (event.button === 0) {
@@ -2205,16 +2646,16 @@ function handlePointerDown(event) {
     }
   }
 
-  let shouldRender = false;
+  let renderMask = 0;
 
   if (uiState.sourceControl.activeRowMenuKey && !target?.closest("[data-scm-row-menu-shell]")) {
     closeSourceControlRowMenu();
-    shouldRender = true;
+    renderMask |= RENDER_MODAL;
   }
 
   if (uiState.contextMenu && !target?.closest(".terminal-context-menu")) {
     uiState.contextMenu = null;
-    shouldRender = true;
+    renderMask |= RENDER_CONTEXT;
   }
 
   if (
@@ -2223,12 +2664,609 @@ function handlePointerDown(event) {
     && target?.closest('[data-action="toggle-system-health-panel"]') == null
   ) {
     closeSystemHealthPanel();
-    shouldRender = true;
+    renderMask |= RENDER_STATUS;
   }
 
-  if (shouldRender) {
-    render({ refreshVisibleTerminals: false });
+  if (renderMask) {
+    requestRender(renderMask);
   }
+}
+
+function handlePointerMove(event) {
+  const drag = uiState.workspaceTabDrag;
+  if (!drag || event.pointerId !== drag.pointerId) {
+    return;
+  }
+
+  if (drag.status === "pending") {
+    maybeActivateWorkspaceTabDrag(event);
+    return;
+  }
+
+  if (drag.status !== "dragging") {
+    return;
+  }
+
+  event.preventDefault();
+  updateWorkspaceTabDrag(event.clientX, event.clientY);
+}
+
+async function handlePointerUp(event) {
+  const drag = uiState.workspaceTabDrag;
+  if (!drag || event.pointerId !== drag.pointerId) {
+    return;
+  }
+
+  if (drag.status === "dragging") {
+    event.preventDefault();
+    await completeWorkspaceTabDrag();
+    return;
+  }
+
+  clearWorkspaceTabDrag();
+}
+
+function handlePointerCancel(event) {
+  const drag = uiState.workspaceTabDrag;
+  if (!drag || event.pointerId !== drag.pointerId) {
+    return;
+  }
+
+  cancelWorkspaceTabDrag();
+}
+
+function maybeBeginWorkspaceTabDrag(event, target) {
+  if (
+    event.button !== 0
+    || event.ctrlKey
+    || event.metaKey
+    || event.altKey
+    || event.shiftKey
+    || uiState.workspaceRenameDraft
+  ) {
+    return;
+  }
+
+  const tabButton = target?.closest('.workspace-tab-main[data-action="switch-workspace"]');
+  if (!tabButton) {
+    return;
+  }
+
+  const workspaceId = tabButton.dataset.workspaceId || "";
+  const tabs = tabButton.closest("[data-workspace-tabs]");
+  const tabShell = tabButton.closest("[data-workspace-tab-shell]");
+  const sourceIndex = uiState.snapshot?.workspaces?.findIndex((workspace) => workspace.id === workspaceId) ?? -1;
+  if (!workspaceId || !tabs || !tabShell || sourceIndex < 0 || uiState.snapshot?.workspaces?.length <= 1) {
+    return;
+  }
+
+  const rect = tabShell.getBoundingClientRect();
+  clearWorkspaceTabClickSuppression();
+  rememberWorkspaceTabsScroll(tabs);
+  stopWorkspaceTabAutoScroll();
+  let captureEl = null;
+  if (typeof tabButton.setPointerCapture === "function") {
+    try {
+      tabButton.setPointerCapture(event.pointerId);
+      captureEl = tabButton;
+    } catch {
+      captureEl = null;
+    }
+  }
+  uiState.workspaceTabDrag = {
+    status: "pending",
+    workspaceId,
+    pointerId: event.pointerId,
+    sourceIndex,
+    targetIndex: sourceIndex,
+    startX: event.clientX,
+    startY: event.clientY,
+    currentX: event.clientX,
+    currentY: event.clientY,
+    pointerOffsetX: event.clientX - rect.left,
+    pointerOffsetY: event.clientY - rect.top,
+    ghostLeft: rect.left,
+    ghostTop: rect.top,
+    tabWidth: rect.width,
+    tabHeight: rect.height,
+    captureEl,
+    tabsEl: tabs,
+    tabShellEl: tabShell,
+    stripShellEl: tabs.closest("[data-workspace-tabs-shell]"),
+    indicatorEl: tabs.querySelector("[data-workspace-tab-drop-indicator]"),
+    dropSlotEl: null,
+  };
+}
+
+function maybeActivateWorkspaceTabDrag(event) {
+  const drag = uiState.workspaceTabDrag;
+  if (!drag || drag.status !== "pending") {
+    return;
+  }
+
+  const distance = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY);
+  if (distance < WORKSPACE_TAB_DRAG_THRESHOLD_PX) {
+    return;
+  }
+
+  drag.status = "dragging";
+  if (!mountWorkspaceTabDragChrome()) {
+    clearWorkspaceTabDrag();
+    return;
+  }
+  event.preventDefault();
+  updateWorkspaceTabDrag(event.clientX, event.clientY);
+}
+
+function updateWorkspaceTabDrag(clientX, clientY) {
+  const drag = uiState.workspaceTabDrag;
+  if (!drag || drag.status !== "dragging") {
+    return;
+  }
+
+  if (
+    !(drag.tabShellEl instanceof HTMLElement)
+    || !drag.tabShellEl.isConnected
+    || !(drag.tabsEl instanceof HTMLElement)
+    || !drag.tabsEl.isConnected
+  ) {
+    clearWorkspaceTabDrag();
+    return;
+  }
+
+  drag.currentX = clientX;
+  drag.currentY = clientY;
+  drag.ghostLeft = clientX - drag.pointerOffsetX;
+  drag.ghostTop = clientY - drag.pointerOffsetY;
+
+  syncWorkspaceTabDraggedShellPosition();
+
+  const nextTargetIndex = resolveWorkspaceTabTargetIndex(drag.tabsEl, drag.workspaceId, clientX);
+  if (nextTargetIndex !== drag.targetIndex) {
+    moveWorkspaceTabDropSlot(nextTargetIndex);
+  } else {
+    syncWorkspaceTabDropIndicator();
+  }
+  rememberWorkspaceTabsScroll(drag.tabsEl);
+  syncWorkspaceTabAutoScroll();
+}
+
+async function completeWorkspaceTabDrag() {
+  const drag = uiState.workspaceTabDrag;
+  const previousSnapshot = uiState.snapshot;
+  if (!drag || drag.status !== "dragging") {
+    clearWorkspaceTabDrag();
+    return;
+  }
+
+  const workspaceId = drag.workspaceId;
+  const targetIndex = drag.targetIndex;
+  const reorderedWorkspaces = reorderWorkspaceTabs(previousSnapshot?.workspaces || [], workspaceId, targetIndex);
+  const didChange = workspaceOrderDidChange(previousSnapshot?.workspaces || [], reorderedWorkspaces);
+
+  clearWorkspaceTabDrag();
+  suppressWorkspaceTabClick(workspaceId);
+
+  if (!didChange || !previousSnapshot || typeof bridge.reorderWorkspace !== "function") {
+    return;
+  }
+
+  uiState.snapshot = {
+    ...previousSnapshot,
+    workspaces: reorderedWorkspaces,
+  };
+  render();
+
+  try {
+    uiState.snapshot = await bridge.reorderWorkspace(workspaceId, targetIndex);
+    render();
+  } catch (error) {
+    console.error(error);
+    uiState.snapshot = previousSnapshot;
+    render();
+  }
+}
+
+function cancelWorkspaceTabDrag() {
+  if (!uiState.workspaceTabDrag) {
+    return;
+  }
+
+  clearWorkspaceTabDrag();
+}
+
+function clearWorkspaceTabDrag() {
+  const drag = uiState.workspaceTabDrag;
+  if (drag) {
+    cleanupWorkspaceTabDragChrome(drag);
+    releaseWorkspaceTabPointerCapture(drag);
+  }
+  uiState.workspaceTabDrag = null;
+  stopWorkspaceTabAutoScroll();
+}
+
+function isWorkspaceTabDragActive() {
+  return uiState.workspaceTabDrag?.status === "dragging";
+}
+
+function suppressWorkspaceTabClick(workspaceId) {
+  uiState.workspaceTabSuppressClickWorkspaceId = workspaceId || "";
+  uiState.workspaceTabSuppressClickUntil = workspaceId
+    ? Date.now() + WORKSPACE_TAB_CLICK_SUPPRESS_MS
+    : 0;
+}
+
+function clearWorkspaceTabClickSuppression() {
+  uiState.workspaceTabSuppressClickWorkspaceId = "";
+  uiState.workspaceTabSuppressClickUntil = 0;
+}
+
+function shouldSuppressWorkspaceTabClick(workspaceId) {
+  if (!workspaceId) {
+    return false;
+  }
+
+  if (
+    !uiState.workspaceTabSuppressClickWorkspaceId
+    || Date.now() > uiState.workspaceTabSuppressClickUntil
+  ) {
+    clearWorkspaceTabClickSuppression();
+    return false;
+  }
+
+  return uiState.workspaceTabSuppressClickWorkspaceId === workspaceId;
+}
+
+function renderWorkspaceStripRegion(
+  stripRegion = app.querySelector('[data-region="strip"]'),
+  snapshot = uiState.snapshot,
+) {
+  if (!stripRegion || !snapshot) {
+    return;
+  }
+
+  if (uiState.workspaceTabDrag) {
+    clearWorkspaceTabDrag();
+  }
+
+  stripRegion.innerHTML = renderWorkspaceStrip({
+    windowSummary: snapshot.window,
+    workspaces: snapshot.workspaces,
+    activeWorkspaceId: snapshot.activeWorkspaceId,
+    workspaceRenameDraft: uiState.workspaceRenameDraft,
+    getWorkspaceAttention,
+    escapeHtml,
+    getGitTone,
+    formatGitBadgeTitle,
+  });
+  syncWorkspaceTabRail(snapshot.activeWorkspaceId, snapshot.workspaces.length);
+  if (
+    uiState.workspaceRenameDraft
+    && uiState.workspaceRenameShouldFocus
+    && !isWorkspaceTabDragActive()
+  ) {
+    focusWorkspaceRenameInput();
+  }
+}
+
+function mountWorkspaceTabDragChrome() {
+  const drag = uiState.workspaceTabDrag;
+  if (
+    !drag
+    || drag.status !== "dragging"
+    || !(drag.tabShellEl instanceof HTMLElement)
+    || !drag.tabShellEl.isConnected
+    || !(drag.tabsEl instanceof HTMLElement)
+    || !drag.tabsEl.isConnected
+  ) {
+    return false;
+  }
+
+  const dropSlot = document.createElement("div");
+  dropSlot.className = "workspace-tab-drop-slot";
+  dropSlot.setAttribute("aria-hidden", "true");
+  dropSlot.style.width = `${Math.round(drag.tabWidth)}px`;
+  dropSlot.style.height = `${Math.round(drag.tabHeight)}px`;
+  drag.tabsEl.insertBefore(dropSlot, drag.tabShellEl);
+
+  drag.dropSlotEl = dropSlot;
+  drag.stripShellEl?.classList?.add("is-reordering");
+  drag.tabShellEl.classList.add("is-dragging-origin");
+  drag.tabShellEl.style.width = `${Math.round(drag.tabWidth)}px`;
+  drag.tabShellEl.style.height = `${Math.round(drag.tabHeight)}px`;
+  drag.tabShellEl.style.left = "0";
+  drag.tabShellEl.style.top = "0";
+  syncWorkspaceTabDraggedShellPosition();
+  syncWorkspaceTabDropIndicator({ immediate: true });
+  syncWorkspaceTabsOverflow(drag.tabsEl, drag.stripShellEl || drag.tabsEl.closest("[data-workspace-tabs-shell]"));
+  return true;
+}
+
+function cleanupWorkspaceTabDragChrome(drag) {
+  if (!drag) {
+    return;
+  }
+
+  if (drag.dropSlotEl instanceof HTMLElement) {
+    drag.dropSlotEl.remove();
+  }
+
+  if (drag.indicatorEl instanceof HTMLElement) {
+    drag.indicatorEl.classList.remove("is-active", "is-immediate");
+    drag.indicatorEl.style.left = "";
+  }
+
+  if (drag.tabShellEl instanceof HTMLElement) {
+    drag.tabShellEl.classList.remove("is-dragging-origin");
+    drag.tabShellEl.style.width = "";
+    drag.tabShellEl.style.height = "";
+    drag.tabShellEl.style.left = "";
+    drag.tabShellEl.style.top = "";
+    drag.tabShellEl.style.transform = "";
+  }
+
+  drag.stripShellEl?.classList?.remove("is-reordering");
+  if (drag.tabsEl instanceof HTMLElement) {
+    syncWorkspaceTabsOverflow(drag.tabsEl, drag.stripShellEl || drag.tabsEl.closest("[data-workspace-tabs-shell]"));
+  }
+}
+
+function releaseWorkspaceTabPointerCapture(drag) {
+  const captureEl = drag?.captureEl;
+  if (!(captureEl instanceof Element) || typeof captureEl.releasePointerCapture !== "function") {
+    return;
+  }
+
+  try {
+    if (!captureEl.isConnected || captureEl.hasPointerCapture(drag.pointerId)) {
+      captureEl.releasePointerCapture(drag.pointerId);
+    }
+  } catch {
+    // Ignore stale pointer capture handles during strip rerenders.
+  }
+}
+
+function syncWorkspaceTabDraggedShellPosition() {
+  const drag = uiState.workspaceTabDrag;
+  if (
+    !drag
+    || drag.status !== "dragging"
+    || !(drag.tabShellEl instanceof HTMLElement)
+  ) {
+    return;
+  }
+
+  drag.tabShellEl.style.transform = `translate3d(${drag.ghostLeft.toFixed(2)}px, ${drag.ghostTop.toFixed(2)}px, 0)`;
+}
+
+function moveWorkspaceTabDropSlot(nextTargetIndex) {
+  const drag = uiState.workspaceTabDrag;
+  if (
+    !drag
+    || drag.status !== "dragging"
+    || !(drag.tabsEl instanceof HTMLElement)
+    || !(drag.dropSlotEl instanceof HTMLElement)
+  ) {
+    return;
+  }
+
+  const shells = getWorkspaceTabDragSiblingShells(drag.tabsEl, drag.workspaceId);
+  const previousRects = captureWorkspaceTabShellRects(shells);
+  const nextReferenceShell = shells[nextTargetIndex] || null;
+  const tailAnchor = drag.indicatorEl instanceof HTMLElement && drag.indicatorEl.parentElement === drag.tabsEl
+    ? drag.indicatorEl
+    : null;
+
+  if (nextReferenceShell) {
+    drag.tabsEl.insertBefore(drag.dropSlotEl, nextReferenceShell);
+  } else if (tailAnchor) {
+    drag.tabsEl.insertBefore(drag.dropSlotEl, tailAnchor);
+  } else {
+    drag.tabsEl.appendChild(drag.dropSlotEl);
+  }
+
+  drag.targetIndex = nextTargetIndex;
+  animateWorkspaceTabShellReflow(previousRects, getWorkspaceTabDragSiblingShells(drag.tabsEl, drag.workspaceId));
+  syncWorkspaceTabDropIndicator();
+}
+
+function syncWorkspaceTabDropIndicator({ immediate = false } = {}) {
+  const drag = uiState.workspaceTabDrag;
+  if (
+    !drag
+    || drag.status !== "dragging"
+    || !(drag.indicatorEl instanceof HTMLElement)
+    || !(drag.dropSlotEl instanceof HTMLElement)
+  ) {
+    return;
+  }
+
+  if (immediate) {
+    drag.indicatorEl.classList.add("is-immediate");
+  }
+
+  drag.indicatorEl.style.left = `${(drag.dropSlotEl.offsetLeft + drag.dropSlotEl.offsetWidth / 2).toFixed(2)}px`;
+  drag.indicatorEl.classList.add("is-active");
+
+  if (immediate) {
+    requestAnimationFrame(() => {
+      if (drag.indicatorEl instanceof HTMLElement) {
+        drag.indicatorEl.classList.remove("is-immediate");
+      }
+    });
+  }
+}
+
+function getWorkspaceTabDragSiblingShells(tabs, draggedWorkspaceId) {
+  return Array.from(tabs.querySelectorAll("[data-workspace-tab-shell]"))
+    .filter((element) => element instanceof HTMLElement)
+    .filter((element) => element.dataset.workspaceId !== draggedWorkspaceId);
+}
+
+function captureWorkspaceTabShellRects(shells) {
+  const rects = new Map();
+  for (const shell of shells) {
+    rects.set(shell.dataset.workspaceId || "", shell.getBoundingClientRect());
+  }
+  return rects;
+}
+
+function animateWorkspaceTabShellReflow(previousRects, shells) {
+  const animatedShells = [];
+  for (const shell of shells) {
+    const workspaceId = shell.dataset.workspaceId || "";
+    const previousRect = previousRects.get(workspaceId);
+    if (!previousRect) {
+      continue;
+    }
+
+    const nextRect = shell.getBoundingClientRect();
+    const deltaX = previousRect.left - nextRect.left;
+    if (Math.abs(deltaX) <= 0.5) {
+      continue;
+    }
+
+    shell.style.transition = "none";
+    shell.style.transform = `translate3d(${deltaX}px, 0, 0)`;
+    animatedShells.push(shell);
+  }
+
+  if (!animatedShells.length) {
+    return;
+  }
+
+  requestAnimationFrame(() => {
+    for (const shell of animatedShells) {
+      shell.style.transition = "";
+      shell.style.transform = "";
+    }
+  });
+}
+
+function resolveWorkspaceTabTargetIndex(tabs, draggedWorkspaceId, clientX) {
+  if (!tabs) {
+    return 0;
+  }
+
+  const tabShells = Array.from(tabs.querySelectorAll("[data-workspace-tab-shell]"))
+    .filter((element) => element instanceof HTMLElement)
+    .filter((element) => element.dataset.workspaceId !== draggedWorkspaceId);
+  for (let index = 0; index < tabShells.length; index += 1) {
+    const rect = tabShells[index].getBoundingClientRect();
+    if (clientX < rect.left + rect.width / 2) {
+      return index;
+    }
+  }
+
+  return tabShells.length;
+}
+
+function reorderWorkspaceTabs(workspaces, workspaceId, targetIndex) {
+  const nextWorkspaces = [...workspaces];
+  const sourceIndex = nextWorkspaces.findIndex((workspace) => workspace.id === workspaceId);
+  if (sourceIndex === -1) {
+    return nextWorkspaces;
+  }
+
+  const [workspace] = nextWorkspaces.splice(sourceIndex, 1);
+  const insertionIndex = Math.max(0, Math.min(Number(targetIndex) || 0, nextWorkspaces.length));
+  nextWorkspaces.splice(insertionIndex, 0, workspace);
+  return nextWorkspaces;
+}
+
+function workspaceOrderDidChange(previousWorkspaces, nextWorkspaces) {
+  if (previousWorkspaces.length !== nextWorkspaces.length) {
+    return true;
+  }
+
+  return previousWorkspaces.some((workspace, index) => workspace.id !== nextWorkspaces[index]?.id);
+}
+
+function syncWorkspaceTabAutoScroll() {
+  if (!isWorkspaceTabDragActive()) {
+    stopWorkspaceTabAutoScroll();
+    return;
+  }
+
+  const viewport = uiState.workspaceTabDrag?.tabsEl?.closest?.("[data-workspace-tabs-viewport]")
+    || document.querySelector("[data-workspace-tabs-viewport]");
+  const delta = getWorkspaceTabAutoScrollDelta(viewport, uiState.workspaceTabDrag?.currentX || 0);
+  if (!delta) {
+    stopWorkspaceTabAutoScroll();
+    return;
+  }
+
+  if (!runtimeStore.workspaceTabAutoScrollFrame) {
+    runtimeStore.workspaceTabAutoScrollFrame = requestAnimationFrame(stepWorkspaceTabAutoScroll);
+  }
+}
+
+function stepWorkspaceTabAutoScroll() {
+  runtimeStore.workspaceTabAutoScrollFrame = 0;
+
+  const drag = uiState.workspaceTabDrag;
+  const tabs = drag?.tabsEl || document.querySelector("[data-workspace-tabs]");
+  const viewport = tabs?.closest?.("[data-workspace-tabs-viewport]")
+    || document.querySelector("[data-workspace-tabs-viewport]");
+  if (!drag || drag.status !== "dragging" || !tabs || !viewport) {
+    return;
+  }
+
+  const delta = getWorkspaceTabAutoScrollDelta(viewport, drag.currentX);
+  if (!delta) {
+    return;
+  }
+
+  const maxScrollLeft = Math.max(0, tabs.scrollWidth - tabs.clientWidth);
+  const nextLeft = Math.max(0, Math.min(maxScrollLeft, tabs.scrollLeft + delta));
+  if (Math.abs(nextLeft - tabs.scrollLeft) <= 0.5) {
+    return;
+  }
+
+  tabs.scrollLeft = nextLeft;
+  rememberWorkspaceTabsScroll(tabs);
+  syncWorkspaceTabsOverflow(tabs, drag.stripShellEl || tabs.closest("[data-workspace-tabs-shell]"));
+  const nextTargetIndex = resolveWorkspaceTabTargetIndex(tabs, drag.workspaceId, drag.currentX);
+  if (nextTargetIndex !== drag.targetIndex) {
+    moveWorkspaceTabDropSlot(nextTargetIndex);
+  } else {
+    syncWorkspaceTabDropIndicator();
+  }
+  syncWorkspaceTabAutoScroll();
+}
+
+function stopWorkspaceTabAutoScroll() {
+  if (runtimeStore.workspaceTabAutoScrollFrame) {
+    cancelAnimationFrame(runtimeStore.workspaceTabAutoScrollFrame);
+    runtimeStore.workspaceTabAutoScrollFrame = 0;
+  }
+}
+
+function getWorkspaceTabAutoScrollDelta(viewport, clientX) {
+  if (!(viewport instanceof HTMLElement)) {
+    return 0;
+  }
+
+  const rect = viewport.getBoundingClientRect();
+  if (rect.width <= 0) {
+    return 0;
+  }
+
+  if (clientX < rect.left + WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX) {
+    const strength = (rect.left + WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX - clientX)
+      / WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX;
+    const easedStrength = Math.min(1, strength) ** 1.35;
+    return -(1.5 + WORKSPACE_TAB_EDGE_SCROLL_MAX_PX_PER_FRAME * easedStrength);
+  }
+
+  if (clientX > rect.right - WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX) {
+    const strength = (clientX - (rect.right - WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX))
+      / WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX;
+    const easedStrength = Math.min(1, strength) ** 1.35;
+    return 1.5 + WORKSPACE_TAB_EDGE_SCROLL_MAX_PX_PER_FRAME * easedStrength;
+  }
+
+  return 0;
 }
 
 function handlePaste(event) {
@@ -2373,6 +3411,7 @@ function handleWindowResize() {
     uiState.snapshot?.activeWorkspaceId || null,
     uiState.snapshot?.workspaces?.length || 0,
   );
+  syncContextMenuPosition();
 }
 
 function handleWindowFocus() {
@@ -2382,12 +3421,15 @@ function handleWindowFocus() {
   const activeWorkspaceId = uiState.snapshot?.activeWorkspaceId || null;
   const didClearAttention = markWorkspaceAttentionSeen(activeWorkspaceId);
   if (didClearAttention && activeWorkspaceId) {
-    render();
+    requestActivityRender();
   }
   scheduleVisibleTerminalRefresh();
 }
 
 function handleWindowBlur() {
+  if (isWorkspaceTabDragActive()) {
+    cancelWorkspaceTabDrag();
+  }
   syncGitRefreshLoop();
   syncSystemHealthLoop();
 }
@@ -2411,6 +3453,19 @@ async function handleSubmit(event) {
   if (renameForm) {
     event.preventDefault();
     await commitWorkspaceRename();
+    return;
+  }
+
+  const todoForm = event.target.closest("[data-action]");
+  if (todoForm?.dataset.action === "workspace-todo-create") {
+    event.preventDefault();
+    await submitWorkspaceTodoCreate();
+    return;
+  }
+
+  if (todoForm?.dataset.action === "workspace-todo-edit") {
+    event.preventDefault();
+    await submitWorkspaceTodoEdit(todoForm.dataset.todoId || "");
     return;
   }
 
@@ -2440,6 +3495,18 @@ async function handleSubmit(event) {
 }
 
 function handleInput(event) {
+  const workspaceTodoInput = event.target.closest("[data-workspace-todo-input]");
+  if (workspaceTodoInput) {
+    uiState.workspaceTodos.draft = workspaceTodoInput.value;
+    return;
+  }
+
+  const workspaceTodoEditInput = event.target.closest("[data-workspace-todo-edit-input]");
+  if (workspaceTodoEditInput) {
+    uiState.workspaceTodos.editDraft = workspaceTodoEditInput.value;
+    return;
+  }
+
   const commitInput = event.target.closest("[data-scm-commit-input]");
   if (commitInput) {
     uiState.sourceControl.commitMessage = commitInput.value;
@@ -2449,7 +3516,7 @@ function handleInput(event) {
   const branchSearchInput = event.target.closest("[data-scm-branch-search]");
   if (branchSearchInput) {
     uiState.sourceControl.branchSearch = branchSearchInput.value;
-    render();
+    requestSourceControlRender();
     return;
   }
 
@@ -2476,7 +3543,7 @@ function handleInput(event) {
     uiState.quickSwitcherQuery = quickSwitcherInput.value;
     syncQuickSwitcherCursor();
     uiState.quickSwitcherShouldFocus = true;
-    render();
+    requestRender(RENDER_MODAL);
     return;
   }
 
@@ -2519,10 +3586,32 @@ async function handleChange(event) {
     ...uiState.pendingWorkspaceDraft,
     paneCount: clampPaneCount(Number(countInput.value || uiState.pendingWorkspaceDraft.paneCount)),
   };
-  render();
+  requestRender(RENDER_MODAL);
 }
 
 async function handleKeyDown(event) {
+  if (isWorkspaceTabDragActive() && event.key === "Escape") {
+    event.preventDefault();
+    cancelWorkspaceTabDrag();
+    return;
+  }
+
+  const workspaceTodoEditInput = event.target.closest("[data-workspace-todo-edit-input]");
+  if (workspaceTodoEditInput && event.key === "Escape") {
+    event.preventDefault();
+    cancelWorkspaceTodoEdit();
+    requestTodoRender();
+    return;
+  }
+
+  const workspaceTodoInput = event.target.closest("[data-workspace-todo-input]");
+  if (workspaceTodoInput && event.key === "Escape") {
+    event.preventDefault();
+    closeTodoPanel();
+    requestTodoRender();
+    return;
+  }
+
   const quickSwitcherInput = event.target.closest("[data-quick-switcher-input]");
   if (quickSwitcherInput) {
     const items = getQuickSwitcherItems();
@@ -2530,7 +3619,7 @@ async function handleKeyDown(event) {
     if (event.key === "Escape") {
       event.preventDefault();
       closeQuickSwitcher();
-      render();
+      requestPanelSurfacesRender();
       return;
     }
 
@@ -2538,7 +3627,7 @@ async function handleKeyDown(event) {
       event.preventDefault();
       moveQuickSwitcherCursor(1, items.length);
       uiState.quickSwitcherShouldFocus = true;
-      render();
+      requestRender(RENDER_MODAL);
       return;
     }
 
@@ -2546,7 +3635,7 @@ async function handleKeyDown(event) {
       event.preventDefault();
       moveQuickSwitcherCursor(-1, items.length);
       uiState.quickSwitcherShouldFocus = true;
-      render();
+      requestRender(RENDER_MODAL);
       return;
     }
 
@@ -2566,7 +3655,7 @@ async function handleKeyDown(event) {
     if (event.key === "Escape") {
       event.preventDefault();
       cancelWorkspaceRename();
-      render();
+      requestRender(RENDER_STRIP);
     }
     return;
   }
@@ -2575,27 +3664,28 @@ async function handleKeyDown(event) {
     event.preventDefault();
     uiState.settingsVisible = true;
     uiState.settingsSection = "workbench";
+    closeTodoPanel();
     closeSystemHealthPanel();
     closeSourceControlPanel();
     uiState.activityRailVisible = false;
     closeQuickSwitcher();
     uiState.pendingWorkspaceDraft = null;
     uiState.contextMenu = null;
-    render();
+    requestPanelSurfacesRender();
     return;
   }
 
   if ((event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === "k") {
     event.preventDefault();
     openQuickSwitcher();
-    render();
+    requestPanelSurfacesRender();
     return;
   }
 
   if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "a") {
     event.preventDefault();
     toggleActivityRail();
-    render();
+    requestPanelSurfacesRender();
     return;
   }
 
@@ -2603,24 +3693,39 @@ async function handleKeyDown(event) {
     event.preventDefault();
     if (uiState.gitPanelVisible) {
       closeSourceControlPanel();
+      requestSourceControlRender();
     } else {
       await openSourceControlPanel({ force: true });
+      return;
     }
-    render();
+    return;
+  }
+
+  if (uiState.codexModalVisible && event.key === "Escape") {
+    event.preventDefault();
+    closeCodexModal();
+    requestCodexRender();
+    return;
+  }
+
+  if (uiState.todoPanelVisible && event.key === "Escape") {
+    event.preventDefault();
+    closeTodoPanel();
+    requestTodoRender();
     return;
   }
 
   if (uiState.systemHealthPanelVisible && event.key === "Escape") {
     event.preventDefault();
     closeSystemHealthPanel();
-    render({ refreshVisibleTerminals: false });
+    requestRender(RENDER_STATUS);
     return;
   }
 
   if (uiState.quickSwitcherVisible && event.key === "Escape") {
     event.preventDefault();
     closeQuickSwitcher();
-    render();
+    requestRender(RENDER_MODAL);
     return;
   }
 
@@ -2633,15 +3738,15 @@ async function handleKeyDown(event) {
   if (uiState.gitPanelVisible && event.key === "Escape") {
     event.preventDefault();
     if (closeSourceControlPublishModal()) {
-      render();
+      requestRender(RENDER_MODAL);
       return;
     }
     if (closeSourceControlRowMenu()) {
-      render();
+      requestRender(RENDER_MODAL);
       return;
     }
     closeSourceControlPanel();
-    render();
+    requestSourceControlRender();
     return;
   }
 
@@ -2660,7 +3765,7 @@ async function handleKeyDown(event) {
   if (uiState.activityRailVisible && event.key === "Escape") {
     event.preventDefault();
     uiState.activityRailVisible = false;
-    render();
+    requestRender(RENDER_STATUS | RENDER_ACTIVITY);
     return;
   }
 
@@ -2697,13 +3802,14 @@ async function handleKeyDown(event) {
   if (countInput && event.key === "Escape") {
     event.preventDefault();
     uiState.pendingWorkspaceDraft = null;
-    render();
+    requestRender(RENDER_MODAL);
     return;
   }
 
   if (
     uiState.quickSwitcherVisible
     || uiState.settingsVisible
+    || uiState.todoPanelVisible
     || uiState.gitPanelVisible
     || uiState.systemHealthPanelVisible
     || uiState.pendingWorkspaceDraft
@@ -2761,7 +3867,9 @@ async function beginWorkspaceCreation() {
     snapshot?.launcher?.presets,
   );
   uiState.launcherVisible = true;
+  closeTodoPanel();
   closeQuickSwitcher();
+  closeCodexModal();
   render();
 }
 
@@ -2771,6 +3879,7 @@ async function activateWorkspace(workspaceId) {
   }
 
   const keepSourceControlOpen = uiState.gitPanelVisible;
+  const keepTodoPanelOpen = uiState.todoPanelVisible;
 
   if (workspaceId !== uiState.snapshot?.activeWorkspaceId) {
     uiState.snapshot = await bridge.switchWorkspace(workspaceId);
@@ -2778,6 +3887,9 @@ async function activateWorkspace(workspaceId) {
 
   uiState.launcherVisible = false;
   hideSettingsSheet();
+  closeCodexModal();
+  uiState.todoPanelVisible = keepTodoPanelOpen;
+  resetWorkspaceTodoState({ keepCollapsed: true });
   uiState.gitPanelVisible = keepSourceControlOpen;
   uiState.pendingWorkspaceDraft = null;
   uiState.contextMenu = null;
@@ -2797,6 +3909,8 @@ function openQuickSwitcher() {
   uiState.quickSwitcherVisible = true;
   uiState.launcherVisible = false;
   uiState.activityRailVisible = false;
+  closeTodoPanel();
+  closeCodexModal();
   closeSystemHealthPanel();
   uiState.quickSwitcherQuery = "";
   uiState.quickSwitcherCursor = Math.max(
@@ -2815,6 +3929,292 @@ function closeQuickSwitcher() {
   uiState.quickSwitcherQuery = "";
   uiState.quickSwitcherCursor = 0;
   uiState.quickSwitcherShouldFocus = false;
+}
+
+function resetWorkspaceTodoState({ keepCollapsed = true } = {}) {
+  uiState.workspaceTodos.draft = "";
+  uiState.workspaceTodos.editTodoId = "";
+  uiState.workspaceTodos.editDraft = "";
+  uiState.workspaceTodos.shouldFocusCreate = false;
+  uiState.workspaceTodos.shouldFocusEditTodoId = "";
+  uiState.workspaceTodos.submitting = false;
+  if (!keepCollapsed) {
+    uiState.workspaceTodos.completedCollapsed = true;
+  }
+}
+
+function closeTodoPanel() {
+  if (!uiState.todoPanelVisible) {
+    return false;
+  }
+
+  uiState.todoPanelVisible = false;
+  resetWorkspaceTodoState({ keepCollapsed: false });
+  return true;
+}
+
+function openTodoPanel() {
+  if (!getActiveWorkspace()) {
+    return false;
+  }
+
+  uiState.todoPanelVisible = true;
+  resetWorkspaceTodoState({ keepCollapsed: false });
+  uiState.workspaceTodos.shouldFocusCreate = true;
+  hideSettingsSheet();
+  closeCodexModal();
+  closeSystemHealthPanel();
+  closeSourceControlPanel();
+  uiState.activityRailVisible = false;
+  closeQuickSwitcher();
+  uiState.pendingWorkspaceDraft = null;
+  uiState.contextMenu = null;
+  cancelWorkspaceRename();
+  return true;
+}
+
+function toggleTodoPanel(forceVisible = !uiState.todoPanelVisible) {
+  if (!forceVisible) {
+    closeTodoPanel();
+    return;
+  }
+
+  openTodoPanel();
+}
+
+function startWorkspaceTodoEdit(todoId) {
+  const todo = getActiveWorkspace()?.todos?.find((entry) => entry.id === todoId);
+  if (!todo) {
+    return;
+  }
+
+  uiState.workspaceTodos.editTodoId = todo.id;
+  uiState.workspaceTodos.editDraft = todo.text;
+  uiState.workspaceTodos.shouldFocusEditTodoId = todo.id;
+  uiState.workspaceTodos.shouldFocusCreate = false;
+}
+
+function cancelWorkspaceTodoEdit() {
+  uiState.workspaceTodos.editTodoId = "";
+  uiState.workspaceTodos.editDraft = "";
+  uiState.workspaceTodos.shouldFocusEditTodoId = "";
+}
+
+async function submitWorkspaceTodoCreate() {
+  const workspace = getActiveWorkspace();
+  if (!workspace || !bridge.addWorkspaceTodo) {
+    return;
+  }
+
+  uiState.workspaceTodos.submitting = true;
+  requestTodoRender();
+
+  try {
+    uiState.snapshot = await bridge.addWorkspaceTodo(workspace.id, uiState.workspaceTodos.draft);
+    uiState.workspaceTodos.draft = "";
+    uiState.workspaceTodos.shouldFocusCreate = true;
+  } catch (error) {
+    uiState.workspaceTodos.shouldFocusCreate = true;
+    reportSourceControlError(error);
+  } finally {
+    uiState.workspaceTodos.submitting = false;
+    requestTodoRender();
+  }
+}
+
+async function submitWorkspaceTodoEdit(todoId) {
+  const workspace = getActiveWorkspace();
+  if (!workspace || !todoId || !bridge.updateWorkspaceTodo) {
+    return;
+  }
+
+  uiState.workspaceTodos.submitting = true;
+  requestTodoRender();
+
+  try {
+    uiState.snapshot = await bridge.updateWorkspaceTodo(
+      workspace.id,
+      todoId,
+      uiState.workspaceTodos.editDraft,
+    );
+    cancelWorkspaceTodoEdit();
+  } catch (error) {
+    uiState.workspaceTodos.shouldFocusEditTodoId = todoId;
+    reportSourceControlError(error);
+  } finally {
+    uiState.workspaceTodos.submitting = false;
+    requestTodoRender();
+  }
+}
+
+async function setWorkspaceTodoDone(todoId, done) {
+  const workspace = getActiveWorkspace();
+  if (!workspace || !todoId || !bridge.setWorkspaceTodoDone) {
+    return;
+  }
+
+  uiState.workspaceTodos.submitting = true;
+  requestTodoRender();
+
+  try {
+    uiState.snapshot = await bridge.setWorkspaceTodoDone(workspace.id, todoId, done);
+  } catch (error) {
+    reportSourceControlError(error);
+  } finally {
+    uiState.workspaceTodos.submitting = false;
+    requestTodoRender();
+  }
+}
+
+async function deleteWorkspaceTodo(todoId) {
+  const workspace = getActiveWorkspace();
+  if (!workspace || !todoId || !bridge.deleteWorkspaceTodo) {
+    return;
+  }
+
+  uiState.workspaceTodos.submitting = true;
+  requestTodoRender();
+
+  try {
+    uiState.snapshot = await bridge.deleteWorkspaceTodo(workspace.id, todoId);
+    if (uiState.workspaceTodos.editTodoId === todoId) {
+      cancelWorkspaceTodoEdit();
+    }
+  } catch (error) {
+    reportSourceControlError(error);
+  } finally {
+    uiState.workspaceTodos.submitting = false;
+    requestTodoRender();
+  }
+}
+
+function closeCodexModal() {
+  if (!uiState.codexModalVisible) {
+    return false;
+  }
+
+  uiState.codexModalVisible = false;
+  uiState.codexSessionsLoading = false;
+  uiState.codexSessionsError = "";
+  uiState.codexSubmitting = false;
+  uiState.codexTargetPaneId = null;
+  uiState.codexShouldFocus = false;
+  return true;
+}
+
+async function openCodexModal() {
+  const workspace = getActiveWorkspace();
+  if (!workspace) {
+    return;
+  }
+
+  uiState.codexModalVisible = true;
+  uiState.codexSessionsError = "";
+  uiState.codexSubmitting = false;
+  uiState.codexTargetPaneId = resolveActivePaneId(workspace);
+  uiState.codexShouldFocus = false;
+  hideSettingsSheet();
+  closeTodoPanel();
+  closeSystemHealthPanel();
+  closeSourceControlPanel();
+  uiState.activityRailVisible = false;
+  closeQuickSwitcher();
+  uiState.pendingWorkspaceDraft = null;
+  uiState.contextMenu = null;
+  cancelWorkspaceRename();
+  requestCodexRender();
+  await loadActiveWorkspaceCodexSessions({ force: true });
+}
+
+async function loadActiveWorkspaceCodexSessions({ force = false } = {}) {
+  const workspace = getActiveWorkspace();
+  if (!workspace || !bridge.loadWorkspaceCodexSessions) {
+    return null;
+  }
+
+  if (uiState.codexSessionsLoading && !force) {
+    return uiState.codexSessionsSnapshot;
+  }
+
+  uiState.codexSessionsLoading = true;
+  uiState.codexSessionsError = "";
+  if (uiState.codexModalVisible) {
+    requestRender(RENDER_MODAL);
+  }
+
+  try {
+    const snapshot = await bridge.loadWorkspaceCodexSessions(workspace.id);
+    const matchingSelection = snapshot.sessions?.some(
+      (session) => session.id === uiState.codexSelectedSessionId,
+    );
+    uiState.codexSessionsSnapshot = snapshot;
+    uiState.codexSelectedSessionId = matchingSelection
+      ? uiState.codexSelectedSessionId
+      : snapshot.rememberedSessionId && snapshot.sessions?.some((session) => session.id === snapshot.rememberedSessionId)
+        ? snapshot.rememberedSessionId
+        : snapshot.sessions?.[0]?.id || "";
+    uiState.codexShouldFocus = true;
+    return snapshot;
+  } catch (error) {
+    uiState.codexSessionsError = error instanceof Error ? error.message : String(error || "Failed to load Codex sessions");
+    return null;
+  } finally {
+    uiState.codexSessionsLoading = false;
+    if (uiState.codexModalVisible) {
+      requestRender(RENDER_MODAL);
+    }
+  }
+}
+
+async function resumeSelectedCodexSession() {
+  const workspace = getActiveWorkspace();
+  const paneId = resolveCodexTargetPaneId(workspace);
+  const sessionId = String(uiState.codexSelectedSessionId || "");
+  if (!workspace || !paneId || !bridge.resumeWorkspaceCodexSession) {
+    return;
+  }
+  if (!sessionId) {
+    window.alert("Choose a Codex session to resume first.");
+    return;
+  }
+
+  uiState.codexSubmitting = true;
+  requestRender(RENDER_MODAL);
+
+  try {
+    uiState.snapshot = await bridge.resumeWorkspaceCodexSession(workspace.id, paneId, sessionId);
+    setActivePaneId(paneId, workspace);
+    closeCodexModal();
+    requestRender(RENDER_ALL);
+    focusPaneTerminal(paneId);
+  } catch (error) {
+    reportSourceControlError(error);
+    uiState.codexSubmitting = false;
+    requestRender(RENDER_MODAL);
+  }
+}
+
+async function startNewCodexSession() {
+  const workspace = getActiveWorkspace();
+  const paneId = resolveCodexTargetPaneId(workspace);
+  if (!workspace || !paneId || !bridge.startWorkspaceCodexSession) {
+    return;
+  }
+
+  uiState.codexSubmitting = true;
+  requestRender(RENDER_MODAL);
+
+  try {
+    await bridge.startWorkspaceCodexSession(workspace.id, paneId);
+    setActivePaneId(paneId, workspace);
+    closeCodexModal();
+    requestRender(RENDER_ALL);
+    focusPaneTerminal(paneId);
+  } catch (error) {
+    reportSourceControlError(error);
+    uiState.codexSubmitting = false;
+    requestRender(RENDER_MODAL);
+  }
 }
 
 function closeSystemHealthPanel() {
@@ -2839,6 +4239,7 @@ function toggleSystemHealthPanel(forceVisible = !uiState.systemHealthPanelVisibl
 
   uiState.systemHealthPanelVisible = true;
   hideSettingsSheet();
+  closeTodoPanel();
   closeSourceControlPanel();
   uiState.activityRailVisible = false;
   closeQuickSwitcher();
@@ -2875,7 +4276,7 @@ function syncSourceControlTaskTray(task, previousTask = null) {
   }
 
   const isNewTask = !previousTask || previousTask.id !== task.id;
-  if (task.canWriteInput || task.status === "failed") {
+  if (task.status === "running" || task.canWriteInput || task.status === "failed") {
     uiState.sourceControl.taskTrayExpanded = true;
     return;
   }
@@ -3050,6 +4451,33 @@ function captureSourceControlFocusState(root = document) {
   };
 }
 
+function captureTodoFocusState(root = document) {
+  const activeElement = document.activeElement;
+  if (!(activeElement instanceof HTMLInputElement || activeElement instanceof HTMLTextAreaElement)) {
+    return null;
+  }
+
+  if (!root.contains(activeElement) || !activeElement.closest(".workspace-todo-panel")) {
+    return null;
+  }
+
+  const selector = [
+    "[data-workspace-todo-input]",
+    "[data-workspace-todo-edit-input]",
+  ].find((candidate) => activeElement.matches(candidate));
+
+  if (!selector) {
+    return null;
+  }
+
+  return {
+    selector,
+    selectionStart: typeof activeElement.selectionStart === "number" ? activeElement.selectionStart : null,
+    selectionEnd: typeof activeElement.selectionEnd === "number" ? activeElement.selectionEnd : null,
+    scrollTop: "scrollTop" in activeElement ? activeElement.scrollTop : null,
+  };
+}
+
 function captureSourceControlScrollState(root = document) {
   const panel = root.querySelector(".workspace-git-panel");
   if (!(panel instanceof HTMLElement)) {
@@ -3087,7 +4515,63 @@ function captureSourceControlScrollState(root = document) {
     .filter(Boolean));
 }
 
+function captureTodoScrollState(root = document) {
+  const panel = root.querySelector(".workspace-todo-panel");
+  if (!(panel instanceof HTMLElement)) {
+    return [];
+  }
+
+  const selectors = [
+    ".workspace-todo-panel-body",
+  ];
+
+  return selectors.flatMap((selector) => Array
+    .from(panel.querySelectorAll(selector))
+    .map((element, index) => {
+      if (!(element instanceof HTMLElement)) {
+        return null;
+      }
+
+      return {
+        selector,
+        index,
+        scrollTop: element.scrollTop,
+        scrollLeft: element.scrollLeft,
+      };
+    })
+    .filter(Boolean));
+}
+
 function restoreSourceControlFocusState(state, root = document) {
+  if (!state?.selector) {
+    return;
+  }
+
+  const input = root.querySelector(state.selector);
+  if (!(input instanceof HTMLInputElement || input instanceof HTMLTextAreaElement)) {
+    return;
+  }
+
+  input.focus({ preventScroll: true });
+
+  if (
+    typeof state.selectionStart === "number"
+    && typeof state.selectionEnd === "number"
+    && typeof input.setSelectionRange === "function"
+  ) {
+    try {
+      input.setSelectionRange(state.selectionStart, state.selectionEnd);
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
+  if (typeof state.scrollTop === "number" && "scrollTop" in input) {
+    input.scrollTop = state.scrollTop;
+  }
+}
+
+function restoreTodoFocusState(state, root = document) {
   if (!state?.selector) {
     return;
   }
@@ -3198,6 +4682,35 @@ function restoreSettingsScrollState(states, root = document) {
   }
 }
 
+function restoreTodoScrollState(states, root = document) {
+  if (!Array.isArray(states) || states.length === 0) {
+    return;
+  }
+
+  const panel = root.querySelector(".workspace-todo-panel");
+  if (!(panel instanceof HTMLElement)) {
+    return;
+  }
+
+  for (const state of states) {
+    if (!state?.selector) {
+      continue;
+    }
+
+    const element = panel.querySelectorAll(state.selector)[state.index];
+    if (!(element instanceof HTMLElement)) {
+      continue;
+    }
+
+    if (typeof state.scrollTop === "number") {
+      element.scrollTop = state.scrollTop;
+    }
+    if (typeof state.scrollLeft === "number") {
+      element.scrollLeft = state.scrollLeft;
+    }
+  }
+}
+
 async function openSourceControlPanel({ force = false } = {}) {
   if (!uiState.snapshot?.activeWorkspaceId) {
     return;
@@ -3210,6 +4723,8 @@ async function openSourceControlPanel({ force = false } = {}) {
   uiState.gitPanelVisible = true;
   closeSourceControlRowMenu();
   hideSettingsSheet();
+  closeTodoPanel();
+  closeCodexModal();
   closeSystemHealthPanel();
   uiState.activityRailVisible = false;
   closeQuickSwitcher();
@@ -3218,7 +4733,7 @@ async function openSourceControlPanel({ force = false } = {}) {
   if (!alreadyLoaded) {
     resetSourceControlState();
   }
-  render();
+  requestPanelSurfacesRender();
   await refreshActiveWorkspaceGitStatus({ force: true });
   await loadActiveWorkspaceSourceControl({ force: force || !alreadyLoaded });
 }
@@ -3310,6 +4825,7 @@ function applySourceControlSnapshot(snapshot, { appendGraph = false } = {}) {
     void loadSourceControlDiff(firstFile.path, uiState.sourceControl.selectedDiffMode);
   }
 
+  requestSourceControlRender();
   return nextSnapshot;
 }
 
@@ -3393,7 +4909,7 @@ async function selectSourceControlPath(path, mode = null) {
   uiState.sourceControl.selectedDiffMode = mode || preferredDiffModeForFile(file);
   uiState.sourceControl.diff = null;
   uiState.sourceControl.diffLoading = true;
-  render();
+  requestRender(RENDER_MODAL);
   await loadSourceControlDiff(path, uiState.sourceControl.selectedDiffMode);
 }
 
@@ -3405,7 +4921,7 @@ async function loadSourceControlDiff(path, mode = "working-tree") {
   }
 
   uiState.sourceControl.diffLoading = true;
-  render();
+  requestRender(RENDER_MODAL);
 
   try {
     const diff = await bridge.loadWorkspaceGitDiff(workspaceId, path, mode);
@@ -3418,7 +4934,7 @@ async function loadSourceControlDiff(path, mode = "working-tree") {
     return diff;
   } finally {
     uiState.sourceControl.diffLoading = false;
-    render();
+    requestRender(RENDER_MODAL);
   }
 }
 
@@ -3428,7 +4944,7 @@ async function selectSourceControlCommit(oid) {
   uiState.sourceControl.diff = null;
   uiState.sourceControl.commitDetail = null;
   uiState.sourceControl.commitDetailLoading = true;
-  render();
+  requestRender(RENDER_MODAL);
   await loadSourceControlCommitDetail(oid);
 }
 
@@ -3447,7 +4963,7 @@ async function loadSourceControlCommitDetail(oid) {
     return detail;
   } finally {
     uiState.sourceControl.commitDetailLoading = false;
-    render();
+    requestRender(RENDER_MODAL);
   }
 }
 
@@ -3574,7 +5090,7 @@ async function beginSourceControlPublish(
     remotes: remoteOptions.remotes,
     defaultRemote: remoteOptions.defaultRemote,
   });
-  render();
+  requestRender(RENDER_MODAL);
   return null;
 }
 
@@ -3608,7 +5124,7 @@ async function submitSourceControlTaskRecovery() {
 
 async function runSourceControlMutation(runner, { resetGraphSelection = false } = {}) {
   uiState.sourceControl.submitting = true;
-  render();
+  requestSourceControlRender();
 
   try {
     const snapshot = await runner();
@@ -3625,14 +5141,14 @@ async function runSourceControlMutation(runner, { resetGraphSelection = false } 
         );
       }
     }
-    render();
+    requestSourceControlRender();
     return snapshot;
   } catch (error) {
     reportSourceControlError(error);
     return null;
   } finally {
     uiState.sourceControl.submitting = false;
-    render();
+    requestSourceControlRender();
   }
 }
 
@@ -3659,7 +5175,7 @@ async function submitSourceControlCommit({ commitAll = false } = {}) {
   });
   if (snapshot) {
     uiState.sourceControl.commitMessage = "";
-    render();
+    requestRender(RENDER_MODAL);
   }
 }
 
@@ -3679,7 +5195,7 @@ async function generateSourceControlCommitMessage() {
 
   const initialMessage = uiState.sourceControl.commitMessage;
   uiState.sourceControl.generatingCommitMessage = true;
-  render();
+  requestRender(RENDER_MODAL);
 
   try {
     const suggestion = await bridge.generateGitCommitMessage(workspaceId);
@@ -3697,7 +5213,7 @@ async function generateSourceControlCommitMessage() {
     reportSourceControlError(error);
   } finally {
     uiState.sourceControl.generatingCommitMessage = false;
-    render();
+    requestRender(RENDER_MODAL);
   }
 }
 
@@ -3721,7 +5237,7 @@ async function submitSourceControlCreateBranch() {
   if (snapshot) {
     uiState.sourceControl.createBranchName = "";
     uiState.sourceControl.createBranchStartPoint = "";
-    render();
+    requestRender(RENDER_MODAL);
   }
 }
 
@@ -3741,7 +5257,7 @@ async function submitSourceControlTaskInput() {
     const payload = rawValue.endsWith("\n") ? rawValue : `${rawValue}\n`;
     await bridge.gitTaskWriteStdin(workspaceId, payload);
     uiState.sourceControl.taskInput = "";
-    render();
+    requestRender(RENDER_MODAL);
   } catch (error) {
     reportSourceControlError(error);
   }
@@ -3761,7 +5277,7 @@ async function handleSourceControlAction(target) {
 
   if (action === "close-scm-publish-modal") {
     if (closeSourceControlPublishModal()) {
-      render();
+      requestRender(RENDER_MODAL);
     }
     return;
   }
@@ -3789,21 +5305,20 @@ async function handleSourceControlAction(target) {
         ) {
           void selectSourceControlCommit(uiState.sourceControl.snapshot.graph.commits[0].oid);
         }
-        render();
+        requestRender(RENDER_MODAL);
       }
       return;
     }
     case "scm-toggle-row-menu":
       toggleSourceControlRowMenu(target.dataset.scmMenuKind || "file", target.dataset.scmMenuKey || "");
-      render();
+      requestRender(RENDER_MODAL);
       return;
     case "scm-toggle-task-tray":
       uiState.sourceControl.taskTrayExpanded = !uiState.sourceControl.taskTrayExpanded;
-      render();
+      requestRender(RENDER_MODAL);
       return;
     case "scm-select-path":
       await selectSourceControlPath(path, target.dataset.diffMode || null);
-      render();
       return;
     case "scm-set-diff-mode":
       if (path) {
@@ -3943,19 +5458,19 @@ async function handleSourceControlAction(target) {
     case "scm-branch-from-commit":
       uiState.sourceControl.activeTab = "branches";
       uiState.sourceControl.createBranchStartPoint = commitOid;
-      render();
+      requestRender(RENDER_MODAL);
       return;
     case "scm-load-more-graph":
       if (!target.dataset.cursor || uiState.sourceControl.graphLoadingMore) {
         return;
       }
       uiState.sourceControl.graphLoadingMore = true;
-      render();
+      requestRender(RENDER_MODAL);
       await loadActiveWorkspaceSourceControl({
         graphCursor: target.dataset.cursor,
         appendGraph: true,
       });
-      render();
+      requestRender(RENDER_MODAL);
       return;
     default:
       return;
@@ -4064,6 +5579,8 @@ function toggleActivityRail(forceVisible = !uiState.activityRailVisible) {
   uiState.activityRailVisible = true;
   uiState.activityRailScope = normalizeActivityScope(uiState.activityRailScope);
   hideSettingsSheet();
+  closeTodoPanel();
+  closeCodexModal();
   closeSystemHealthPanel();
   uiState.gitPanelVisible = false;
   closeQuickSwitcher();
@@ -4074,12 +5591,12 @@ function toggleActivityRail(forceVisible = !uiState.activityRailVisible) {
 function recordRuntimeEvent(event) {
   const normalizedEvent = normalizeRuntimeEvent(event);
   if (!normalizedEvent) {
-    return;
+    return false;
   }
 
   const workspace = getWorkspaceById(normalizedEvent.workspaceId);
   if (!workspace) {
-    return;
+    return false;
   }
 
   const nextEvent = {
@@ -4109,6 +5626,7 @@ function recordRuntimeEvent(event) {
   if (uiState.runtimeActivity.length > MAX_RUNTIME_ACTIVITY_ITEMS) {
     uiState.runtimeActivity.length = MAX_RUNTIME_ACTIVITY_ITEMS;
   }
+  return true;
 }
 
 function normalizeRuntimeEvent(event) {
@@ -4207,12 +5725,19 @@ function buildActivityWorkspaceSummaries(snapshot = uiState.snapshot) {
   const labels = buildWorkspaceTabLabels(workspaces);
   const activeWorkspaceId = snapshot?.activeWorkspaceId || null;
   const scope = normalizeActivityScope(uiState.activityRailScope, snapshot);
+  const latestEventByWorkspace = new Map();
+
+  for (const entry of uiState.runtimeActivity) {
+    if (!latestEventByWorkspace.has(entry.workspaceId)) {
+      latestEventByWorkspace.set(entry.workspaceId, entry);
+    }
+  }
 
   return workspaces
     .filter((workspace) => scope === "all" || workspace.id === activeWorkspaceId)
     .map((workspace) => {
       const attention = getWorkspaceAttention(workspace.id);
-      const latestEvent = attention?.lastEvent || uiState.runtimeActivity.find((entry) => entry.workspaceId === workspace.id) || null;
+      const latestEvent = attention?.lastEvent || latestEventByWorkspace.get(workspace.id) || null;
       return {
         workspaceId: workspace.id,
         label: labels.get(workspace.id) || workspace.name,
@@ -4403,10 +5928,68 @@ function stashMountedWorkspaceScreen(stageRegion) {
   uiState.mountedLayoutSignature = null;
 }
 
-function render({ refreshVisibleTerminals = true } = {}) {
+function renderMaskIncludes(mask, flag) {
+  return (mask & flag) === flag;
+}
+
+function renderMaskIntersects(mask, flags) {
+  return (mask & flags) !== 0;
+}
+
+function recordRenderMetric(region) {
+  const metrics = runtimeStore.renderMetrics;
+  if (region && metrics.regionFlushCounts[region] !== undefined) {
+    metrics.regionFlushCounts[region] += 1;
+  }
+}
+
+function requestRender(mask = RENDER_ALL) {
+  runtimeStore.pendingRenderMask |= mask;
+  if (runtimeStore.pendingRenderFrame) {
+    return;
+  }
+
+  runtimeStore.pendingRenderFrame = requestAnimationFrame(() => {
+    const pendingMask = runtimeStore.pendingRenderMask || RENDER_ALL;
+    runtimeStore.pendingRenderFrame = 0;
+    runtimeStore.pendingRenderMask = 0;
+    render({ mask: pendingMask });
+  });
+}
+
+function requestPanelSurfacesRender() {
+  requestRender(RENDER_PANEL_SURFACES);
+}
+
+function requestActivityRender() {
+  requestRender(RENDER_ACTIVITY_SURFACES);
+}
+
+function requestTodoRender() {
+  requestRender(RENDER_TODO_SURFACES);
+}
+
+function requestSourceControlRender() {
+  requestRender(RENDER_SOURCE_CONTROL_SURFACES);
+}
+
+function requestCodexRender() {
+  requestRender(RENDER_CODEX_SURFACES);
+}
+
+function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskIntersects(mask, RENDER_STAGE | RENDER_TERMINALS) } = {}) {
   if (!uiState.snapshot) {
     return;
   }
+
+  if (runtimeStore.pendingRenderFrame) {
+    cancelAnimationFrame(runtimeStore.pendingRenderFrame);
+    runtimeStore.pendingRenderFrame = 0;
+    runtimeStore.pendingRenderMask = 0;
+  }
+
+  runtimeStore.renderMetrics.flushCount += 1;
+  runtimeStore.renderMetrics.lastMask = mask;
 
   const snapshot = uiState.snapshot;
   if (!uiState.settingsVisible && uiState.settingsDraft) {
@@ -4417,6 +6000,7 @@ function render({ refreshVisibleTerminals = true } = {}) {
 
   applyRenderedSettings(snapshot);
   syncRuntimeActivityState(snapshot);
+  pruneWorkspaceFileExplorerState(snapshot);
   ensureFrame();
 
   const activeWorkspace = snapshot.activeWorkspace;
@@ -4433,6 +6017,13 @@ function render({ refreshVisibleTerminals = true } = {}) {
     !snapshot.workspaces.some((workspace) => workspace.id === uiState.workspaceRenameDraft.workspaceId)
   ) {
     cancelWorkspaceRename();
+  }
+
+  if (
+    uiState.workspaceTabDrag &&
+    !snapshot.workspaces.some((workspace) => workspace.id === uiState.workspaceTabDrag.workspaceId)
+  ) {
+    clearWorkspaceTabDrag();
   }
 
   if (
@@ -4453,6 +6044,14 @@ function render({ refreshVisibleTerminals = true } = {}) {
     uiState.gitPanelVisible = false;
   }
 
+  if (uiState.codexModalVisible && !activeWorkspace) {
+    closeCodexModal();
+  }
+
+  if (uiState.todoPanelVisible && !activeWorkspace) {
+    closeTodoPanel();
+  }
+
   if (uiState.quickSwitcherVisible && snapshot.workspaces.length === 0) {
     closeQuickSwitcher();
   }
@@ -4463,125 +6062,153 @@ function render({ refreshVisibleTerminals = true } = {}) {
   const activityRegion = app.querySelector('[data-region="activity"]');
   const contextRegion = app.querySelector('[data-region="context"]');
   const modalRegion = app.querySelector('[data-region="modal"]');
-  bindModalLayerControls(modalRegion);
-  const settingsFocusState = uiState.settingsVisible
-    ? captureSettingsFocusState(modalRegion)
-    : null;
-  const settingsScrollState = uiState.settingsVisible
-    ? captureSettingsScrollState(modalRegion)
-    : null;
-  const sourceControlFocusState = uiState.gitPanelVisible
-    ? captureSourceControlFocusState(modalRegion)
-    : null;
-  const sourceControlScrollState = uiState.gitPanelVisible
-    ? captureSourceControlScrollState(modalRegion)
-    : null;
+  if (renderMaskIncludes(mask, RENDER_STRIP)) {
+    renderWorkspaceStripRegion(stripRegion, snapshot);
+    recordRenderMetric("strip");
+  }
+  if (renderMaskIncludes(mask, RENDER_STATUS)) {
+    statusRegion.innerHTML = renderWorkspaceStatusBar(snapshot, activeWorkspace);
+    recordRenderMetric("status");
+  }
+  if (renderMaskIncludes(mask, RENDER_ACTIVITY)) {
+    const activityVisible = uiState.activityRailVisible;
+    activityRegion.innerHTML = renderActivityRail({
+      visible: activityVisible,
+      scope: normalizeActivityScope(uiState.activityRailScope, snapshot),
+      hasActiveWorkspace: Boolean(snapshot.activeWorkspaceId),
+      ...getRuntimeActivitySummary(snapshot),
+      workspaceSummaries: activityVisible ? buildActivityWorkspaceSummaries(snapshot) : [],
+      items: activityVisible ? buildActivityFeedItems(snapshot) : [],
+      escapeHtml,
+    });
+    recordRenderMetric("activity");
+  }
+  if (renderMaskIncludes(mask, RENDER_MODAL)) {
+    bindModalLayerControls(modalRegion);
+    const settingsFocusState = uiState.settingsVisible
+      ? captureSettingsFocusState(modalRegion)
+      : null;
+    const settingsScrollState = uiState.settingsVisible
+      ? captureSettingsScrollState(modalRegion)
+      : null;
+    const todoFocusState = uiState.todoPanelVisible
+      ? captureTodoFocusState(modalRegion)
+      : null;
+    const todoScrollState = uiState.todoPanelVisible
+      ? captureTodoScrollState(modalRegion)
+      : null;
+    const sourceControlFocusState = uiState.gitPanelVisible
+      ? captureSourceControlFocusState(modalRegion)
+      : null;
+    const sourceControlScrollState = uiState.gitPanelVisible
+      ? captureSourceControlScrollState(modalRegion)
+      : null;
 
-  stripRegion.innerHTML = renderWorkspaceStrip({
-    windowSummary: snapshot.window,
-    workspaces: snapshot.workspaces,
-    activeWorkspaceId: snapshot.activeWorkspaceId,
-    workspaceRenameDraft: uiState.workspaceRenameDraft,
-    getWorkspaceAttention,
-    escapeHtml,
-    getGitTone,
-    formatGitBadgeTitle,
-  });
-  statusRegion.innerHTML = renderWorkspaceStatusBar(snapshot, activeWorkspace);
-  activityRegion.innerHTML = renderActivityRail({
-    visible: uiState.activityRailVisible,
-    scope: normalizeActivityScope(uiState.activityRailScope, snapshot),
-    hasActiveWorkspace: Boolean(snapshot.activeWorkspaceId),
-    ...getRuntimeActivitySummary(snapshot),
-    workspaceSummaries: buildActivityWorkspaceSummaries(snapshot),
-    items: buildActivityFeedItems(snapshot),
-    escapeHtml,
-  });
-  syncWorkspaceTabRail(snapshot.activeWorkspaceId, snapshot.workspaces.length);
-  if (uiState.workspaceRenameDraft && uiState.workspaceRenameShouldFocus) {
-    focusWorkspaceRenameInput();
+    modalRegion.innerHTML = uiState.quickSwitcherVisible
+      ? renderQuickSwitcher(snapshot)
+      : uiState.settingsVisible
+        ? renderSettingsSheet(snapshot)
+        : uiState.pendingWorkspaceDraft
+          ? renderLayoutPicker({
+              presets: snapshot.launcher.presets,
+              draft: uiState.pendingWorkspaceDraft,
+              basename,
+              escapeHtml,
+            })
+          : uiState.codexModalVisible && activeWorkspace
+            ? renderCodexModal(activeWorkspace)
+            : uiState.todoPanelVisible && activeWorkspace
+              ? renderTodoPanel(activeWorkspace)
+              : uiState.gitPanelVisible && activeWorkspace
+                ? renderGitPanel(activeWorkspace)
+                : "";
+    modalRegion.classList.toggle(
+      "is-active",
+      Boolean(
+        uiState.quickSwitcherVisible
+        || uiState.settingsVisible
+        || uiState.pendingWorkspaceDraft
+        || (uiState.codexModalVisible && activeWorkspace)
+        || (uiState.todoPanelVisible && activeWorkspace)
+        || (uiState.gitPanelVisible && activeWorkspace),
+      ),
+    );
+    if (uiState.settingsVisible) {
+      syncSettingsPreviewDom(modalRegion);
+      bindSettingsSheetControls(modalRegion);
+      syncSettingsActionDom(modalRegion);
+    }
+    if (settingsScrollState && uiState.settingsVisible) {
+      restoreSettingsScrollState(settingsScrollState, modalRegion);
+    }
+    if (settingsFocusState && uiState.settingsVisible) {
+      restoreSettingsFocusState(settingsFocusState, modalRegion);
+    }
+    if (todoScrollState && uiState.todoPanelVisible) {
+      restoreTodoScrollState(todoScrollState, modalRegion);
+    }
+    if (todoFocusState && uiState.todoPanelVisible) {
+      restoreTodoFocusState(todoFocusState, modalRegion);
+    }
+    if (sourceControlScrollState && uiState.gitPanelVisible) {
+      restoreSourceControlScrollState(sourceControlScrollState, modalRegion);
+    }
+    if (sourceControlFocusState && uiState.gitPanelVisible) {
+      restoreSourceControlFocusState(sourceControlFocusState, modalRegion);
+    }
+    if (uiState.codexModalVisible) {
+      focusCodexModal(modalRegion);
+    }
+    if (uiState.todoPanelVisible) {
+      focusTodoPanel(modalRegion);
+    }
+    if (uiState.gitPanelVisible && uiState.sourceControl.publishModalVisible) {
+      focusSourceControlPublishModal(modalRegion);
+    }
+    recordRenderMetric("modal");
   }
-  modalRegion.innerHTML = uiState.quickSwitcherVisible
-    ? renderQuickSwitcher(snapshot)
-    : uiState.settingsVisible
-      ? renderSettingsSheet(snapshot)
-      : uiState.pendingWorkspaceDraft
-        ? renderLayoutPicker({
-            presets: snapshot.launcher.presets,
-            draft: uiState.pendingWorkspaceDraft,
-            basename,
-            escapeHtml,
-          })
-        : uiState.gitPanelVisible && activeWorkspace
-          ? renderGitPanel(activeWorkspace)
-          : "";
-  modalRegion.classList.toggle(
-    "is-active",
-    Boolean(
-      uiState.quickSwitcherVisible
-      || uiState.settingsVisible
-      || uiState.pendingWorkspaceDraft
-      || (uiState.gitPanelVisible && activeWorkspace),
-    ),
-  );
-  if (uiState.settingsVisible) {
-    syncSettingsPreviewDom(modalRegion);
-    bindSettingsSheetControls(modalRegion);
-    syncSettingsActionDom(modalRegion);
+  if (renderMaskIncludes(mask, RENDER_CONTEXT)) {
+    contextRegion.innerHTML =
+      uiState.contextMenu && activeWorkspace
+        ? renderContextMenu(uiState.contextMenu, activeWorkspace, snapshot)
+        : "";
+    syncContextMenuPosition(contextRegion);
+    recordRenderMetric("context");
   }
-  if (settingsScrollState && uiState.settingsVisible) {
-    restoreSettingsScrollState(settingsScrollState, modalRegion);
-  }
-  if (settingsFocusState && uiState.settingsVisible) {
-    restoreSettingsFocusState(settingsFocusState, modalRegion);
-  }
-  if (sourceControlScrollState && uiState.gitPanelVisible) {
-    restoreSourceControlScrollState(sourceControlScrollState, modalRegion);
-  }
-  if (sourceControlFocusState && uiState.gitPanelVisible) {
-    restoreSourceControlFocusState(sourceControlFocusState, modalRegion);
-  }
-  if (uiState.gitPanelVisible && uiState.sourceControl.publishModalVisible) {
-    focusSourceControlPublishModal(modalRegion);
-  }
-  contextRegion.innerHTML =
-    uiState.contextMenu && activeWorkspace
-      ? renderContextMenu(uiState.contextMenu, activeWorkspace, snapshot)
-      : "";
   if (uiState.quickSwitcherVisible && uiState.quickSwitcherShouldFocus) {
     focusQuickSwitcherInput();
   }
   syncGitRefreshLoop();
   syncSystemHealthLoop();
 
+  if (!renderMaskIntersects(mask, RENDER_STAGE | RENDER_EXPLORER)) {
+    if (refreshVisibleTerminals) {
+      scheduleVisibleTerminalRefresh(activeWorkspace);
+      recordRenderMetric("terminals");
+    }
+    return;
+  }
+
   if (shouldShowLauncher) {
     if (uiState.mountedWorkspaceId) {
       stashMountedWorkspaceScreen(stageRegion);
     }
 
-    const preservedLauncherInputState = captureLauncherInputState(stageRegion);
     const nextLauncherSignature = launcherStageSignature(snapshot.launcher.basePath, uiState);
     const shouldRemountLauncher =
       stageRegion.dataset.stageMode !== "launcher"
       || stageRegion.dataset.stageSignature !== nextLauncherSignature;
 
     if (shouldRemountLauncher) {
-      stageRegion.innerHTML = renderEmptyState({
-        basePath: snapshot.launcher.basePath,
-        launcherCommandValue: uiState.launcherCommandValue,
-        launcherLatestCard: uiState.launcherLatestCard,
-        escapeHtml,
-      });
+      stageRegion.innerHTML = renderEmptyState();
       stageRegion.dataset.stageMode = "launcher";
       stageRegion.dataset.stageSignature = nextLauncherSignature;
     }
 
-    if (!uiState.settingsVisible) {
-      if (shouldRemountLauncher && preservedLauncherInputState?.wasFocused) {
-        restoreLauncherInputState(preservedLauncherInputState);
-      } else {
-        focusLauncherInput();
-      }
+    recordRenderMetric("stage");
+    if (refreshVisibleTerminals) {
+      scheduleVisibleTerminalRefresh(activeWorkspace);
+      recordRenderMetric("terminals");
     }
     return;
   }
@@ -4633,10 +6260,23 @@ function render({ refreshVisibleTerminals = true } = {}) {
     stageRegion.dataset.stageSignature = nextLayoutSignature;
   }
 
+  if (!renderMaskIncludes(mask, RENDER_STAGE)) {
+    syncWorkspaceFileExplorerSurface(activeWorkspace);
+    recordRenderMetric("explorer");
+    if (refreshVisibleTerminals) {
+      scheduleVisibleTerminalRefresh(activeWorkspace);
+      recordRenderMetric("terminals");
+    }
+    return;
+  }
+
   syncWorkspace(activeWorkspace);
+  recordRenderMetric("explorer");
   if (refreshVisibleTerminals) {
     scheduleVisibleTerminalRefresh(activeWorkspace);
+    recordRenderMetric("terminals");
   }
+  recordRenderMetric("stage");
 }
 
 function renderBranchIcon() {
@@ -4663,10 +6303,34 @@ function renderActivityIcon() {
   `;
 }
 
+function renderCodexIcon() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M7 6h10v2H7V6Zm0 5h10v2H7v-2Zm0 5h6v2H7v-2Zm11.2-6.8L20 11l-1.8 1.8-1.4-1.4 1-1-1-1 1.4-1.4Z" fill="currentColor"></path>
+    </svg>
+  `;
+}
+
+function renderTasksIcon() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M8 6h11v2H8V6Zm0 5h11v2H8v-2Zm0 5h11v2H8v-2ZM5.1 7.7 3.7 6.3l1.4-1.4 1 1 2-2 1.4 1.4L5.1 9.7Zm0 5-1.4-1.4 1.4-1.4 1 1 2-2 1.4 1.4-3.4 3.4Zm0 5-1.4-1.4 1.4-1.4 1 1 2-2 1.4 1.4-3.4 3.4Z" fill="currentColor"></path>
+    </svg>
+  `;
+}
+
 function renderSystemIcon() {
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
       <path d="M12 4a8 8 0 1 1-8 8 8 8 0 0 1 8-8Zm0 3.2a1 1 0 0 0-1 1V12c0 .3.13.58.36.77l2.7 2.18 1.25-1.55L13 11.52V8.2a1 1 0 0 0-1-1Z" fill="currentColor"></path>
+    </svg>
+  `;
+}
+
+function renderFolderIcon() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M4.5 7.5A2.5 2.5 0 0 1 7 5h3l1.6 1.8H17A2.5 2.5 0 0 1 19.5 9.3v6.2A2.5 2.5 0 0 1 17 18H7a2.5 2.5 0 0 1-2.5-2.5V7.5Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></path>
     </svg>
   `;
 }
@@ -4688,7 +6352,11 @@ function renderMoreIcon() {
 }
 
 function renderChevronIcon(direction = "down") {
-  const rotation = direction === "up" ? "rotate(180 12 12)" : "rotate(0 12 12)";
+  const rotation = direction === "up"
+    ? "rotate(180 12 12)"
+    : direction === "right"
+      ? "rotate(-90 12 12)"
+      : "rotate(0 12 12)";
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
       <path d="M7 10.2 12 15l5-4.8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" transform="${rotation}"></path>
@@ -4726,7 +6394,10 @@ function renderWorkspaceStatusBar(snapshot, activeWorkspace) {
     const pathLabel = compactWorkspacePath(activeWorkspace.path);
 
     leftItems.push(renderStatusBarItem(pathLabel, activeWorkspace.path, "is-path is-primary"));
+    leftItems.push(renderStatusBarFilesButton(activeWorkspace));
+    leftItems.push(renderStatusBarCodexButton(activeWorkspace));
     leftItems.push(renderStatusBarGitButton(summary));
+    leftItems.push(renderStatusBarTodoButton(activeWorkspace));
     if (shouldShowSystemHealth) {
       leftItems.push(renderStatusBarSystemHealthButton());
     }
@@ -4785,6 +6456,73 @@ function renderStatusBarGitButton(summary) {
       aria-label="${escapeHtml(formatGitBadgeTitle(summary))}"
     >
       <span class="workspace-statusbar-icon" aria-hidden="true">${renderBranchIcon()}</span>
+      <span>${escapeHtml(label)}</span>
+    </button>
+  `;
+}
+
+function renderStatusBarFilesButton(activeWorkspace) {
+  const isOpen = isWorkspaceFileExplorerVisible(activeWorkspace.id);
+  const title = isOpen
+    ? `Hide the file explorer for ${activeWorkspace.name}`
+    : `Show the file explorer for ${activeWorkspace.name}`;
+  return `
+    <button
+      class="workspace-statusbar-item workspace-statusbar-button is-neutral ${isOpen ? "is-panel-open" : ""}"
+      type="button"
+      data-action="toggle-file-explorer"
+      title="${escapeHtml(title)}"
+      aria-label="${escapeHtml(title)}"
+      aria-pressed="${isOpen ? "true" : "false"}"
+    >
+      <span class="workspace-statusbar-icon" aria-hidden="true">${renderFolderIcon()}</span>
+      <span>Files</span>
+    </button>
+  `;
+}
+
+function renderStatusBarCodexButton(activeWorkspace) {
+  const codexSnapshot = getCodexCliSnapshot();
+  const tone = codexSnapshot.effectivePath ? "clean" : "error";
+  const title = codexSnapshot.effectivePath
+    ? `Resume Codex in ${activeWorkspace.name}`
+    : codexSnapshot.message || "Codex CLI is not configured";
+  const label = codexSnapshot.effectivePath ? "Codex" : "Codex unavailable";
+  return `
+    <button
+      class="workspace-statusbar-item workspace-statusbar-button is-${tone} ${uiState.codexModalVisible ? "is-panel-open" : ""}"
+      type="button"
+      data-action="show-codex-modal"
+      title="${escapeHtml(title)}"
+      aria-label="${escapeHtml(title)}"
+      aria-pressed="${uiState.codexModalVisible ? "true" : "false"}"
+    >
+      <span class="workspace-statusbar-icon" aria-hidden="true">${renderCodexIcon()}</span>
+      <span>${escapeHtml(label)}</span>
+    </button>
+  `;
+}
+
+function renderStatusBarTodoButton(activeWorkspace) {
+  const summary = getWorkspaceTodoState(activeWorkspace);
+  const tone = summary.openCount > 0 ? "dirty" : "clean";
+  const label = summary.openCount > 0 ? `Tasks ${summary.openCount}` : "Tasks";
+  const title = summary.openCount > 0
+    ? `${summary.openCount} open ${summary.openCount === 1 ? "task" : "tasks"} in ${activeWorkspace.name}`
+    : summary.completedCount > 0
+      ? `All open tasks complete in ${activeWorkspace.name}`
+      : `No tasks yet in ${activeWorkspace.name}`;
+
+  return `
+    <button
+      class="workspace-statusbar-item workspace-statusbar-button is-${tone} ${uiState.todoPanelVisible ? "is-panel-open" : ""}"
+      type="button"
+      data-action="toggle-todo-panel"
+      title="${escapeHtml(title)}"
+      aria-label="${escapeHtml(title)}"
+      aria-pressed="${uiState.todoPanelVisible ? "true" : "false"}"
+    >
+      <span class="workspace-statusbar-icon" aria-hidden="true">${renderTasksIcon()}</span>
       <span>${escapeHtml(label)}</span>
     </button>
   `;
@@ -5052,6 +6790,546 @@ function formatRelativeTime(timestampMs) {
   return `${deltaDays}d ago`;
 }
 
+function formatCodexSessionShortId(sessionId) {
+  if (typeof sessionId !== "string" || !sessionId.trim()) {
+    return "";
+  }
+  if (sessionId.length <= 16) {
+    return sessionId;
+  }
+  return `${sessionId.slice(0, 8)}...${sessionId.slice(-4)}`;
+}
+
+function isCodexPaneReady(pane) {
+  return pane?.status === "ready";
+}
+
+function resolveCodexTargetPaneId(workspace = getActiveWorkspace()) {
+  if (!workspace?.panes?.length) {
+    return null;
+  }
+
+  const preferredIds = [
+    uiState.codexTargetPaneId,
+    uiState.activePaneId,
+  ].filter(Boolean);
+
+  for (const paneId of preferredIds) {
+    const pane = workspace.panes.find((entry) => entry.id === paneId);
+    if (isCodexPaneReady(pane)) {
+      return paneId;
+    }
+  }
+
+  return workspace.panes.find(isCodexPaneReady)?.id || null;
+}
+
+function getCodexTargetPane(workspace = getActiveWorkspace()) {
+  const targetPaneId = resolveCodexTargetPaneId(workspace);
+  return workspace?.panes?.find((pane) => pane.id === targetPaneId) || null;
+}
+
+function formatPaneStatusLabel(status) {
+  switch (status) {
+    case "ready":
+      return "Ready";
+    case "booting":
+      return "Booting";
+    case "failed":
+      return "Failed";
+    case "closed":
+      return "Closed";
+    default:
+      return "Unavailable";
+  }
+}
+
+function renderCodexModal(workspace) {
+  const snapshot = uiState.codexSessionsSnapshot?.workspaceId === workspace.id
+    ? uiState.codexSessionsSnapshot
+    : null;
+  const codexCli = getCodexCliSnapshot();
+  const errorMessage = uiState.codexSessionsError || "";
+  const isUnavailable = !codexCli?.effectivePath;
+  const sessions = snapshot?.sessions || [];
+  const hasSelection = sessions.some((session) => session.id === uiState.codexSelectedSessionId);
+  const selectedSessionId = hasSelection ? uiState.codexSelectedSessionId : sessions[0]?.id || "";
+  const rememberedSessionId = snapshot?.rememberedSessionId || null;
+  const selectedSession = sessions.find((session) => session.id === selectedSessionId) || null;
+  const activePaneId = resolveActivePaneId(workspace);
+  const targetPane = getCodexTargetPane(workspace);
+  const targetPaneId = targetPane?.id || null;
+  const canTargetPane = Boolean(targetPaneId);
+  const canResume = Boolean(selectedSessionId)
+    && canTargetPane
+    && !uiState.codexSubmitting
+    && !uiState.codexSessionsLoading
+    && !isUnavailable;
+  const canStart = canTargetPane && !uiState.codexSubmitting && !isUnavailable;
+  const refreshedLabel = snapshot
+    ? `${sessions.length} ${sessions.length === 1 ? "matching session" : "matching sessions"} found`
+    : uiState.codexSessionsLoading
+      ? "Scanning local Codex sessions"
+      : "Waiting for the first session scan";
+
+  return `
+    <div class="workspace-modal-backdrop" data-action="close-codex-modal">
+      <section class="workspace-modal workspace-codex-modal" role="dialog" aria-modal="true" aria-labelledby="codex-modal-title">
+        <header class="workspace-modal-header workspace-codex-modal-header">
+          <div>
+            <p class="workspace-modal-mark">Codex</p>
+            <h2 id="codex-modal-title">Resume Codex</h2>
+            <p class="workspace-modal-path">${escapeHtml(workspace.path)}</p>
+            <p class="workspace-codex-modal-copy">${escapeHtml(refreshedLabel)}</p>
+          </div>
+          <div class="workspace-codex-modal-actions">
+            <button
+              class="workspace-activity-action"
+              type="button"
+              data-action="refresh-codex-sessions"
+              ${uiState.codexSessionsLoading || uiState.codexSubmitting ? "disabled" : ""}
+            >
+              <span aria-hidden="true">${renderRefreshIcon()}</span>
+              <span>${uiState.codexSessionsLoading ? "Scanning..." : "Refresh"}</span>
+            </button>
+            <button
+              class="workspace-activity-close"
+              type="button"
+              data-action="close-codex-modal"
+              aria-label="Close Codex session picker"
+              title="Close Codex session picker"
+            >
+              ${renderCloseIcon()}
+            </button>
+          </div>
+        </header>
+        ${
+          isUnavailable
+            ? `
+              <div class="workspace-codex-modal-empty is-error">
+                <strong>Codex CLI is not ready</strong>
+                <span>${escapeHtml(codexCli?.message || "CrewDock could not find a working Codex CLI.")}</span>
+                <div class="workspace-codex-modal-footer">
+                  <button class="settings-ai-button settings-ai-button-primary" type="button" data-action="show-settings">
+                    Open settings
+                  </button>
+                </div>
+              </div>
+            `
+            : errorMessage
+              ? `
+                <div class="workspace-codex-modal-empty is-error">
+                  <strong>Could not load local Codex sessions</strong>
+                  <span>${escapeHtml(errorMessage)}</span>
+                </div>
+              `
+              : uiState.codexSessionsLoading && !snapshot
+                ? `
+                  <div class="workspace-codex-modal-empty">
+                    <strong>Scanning local Codex sessions</strong>
+                    <span>CrewDock is reading local session metadata from your Codex history.</span>
+                  </div>
+                `
+                : `
+                  <div class="workspace-codex-modal-grid">
+                    <div class="workspace-codex-modal-list" role="listbox" aria-label="Matching Codex sessions">
+                      ${
+                        sessions.length
+                          ? sessions.map((session) => renderCodexSessionRow(session, {
+                              isSelected: session.id === selectedSessionId,
+                              isRemembered: session.id === rememberedSessionId,
+                            })).join("")
+                          : `
+                            <div class="workspace-codex-modal-empty">
+                              <strong>No saved Codex session matches this workspace yet.</strong>
+                              <span>Start a fresh Codex session in a ready pane, then come back here to resume it later.</span>
+                            </div>
+                          `
+                      }
+                    </div>
+                    <div class="workspace-codex-modal-detail">
+                      ${
+                        selectedSession
+                          ? `
+                            <div class="workspace-codex-modal-detail-card">
+                              <span class="workspace-codex-meta-label">Selected session</span>
+                              <strong>${escapeHtml(selectedSession.displayTitle || selectedSession.id)}</strong>
+                              <span class="workspace-codex-session-id-full">${escapeHtml(selectedSession.id)}</span>
+                              <span>${escapeHtml(selectedSession.cliVersion ? `CLI ${selectedSession.cliVersion}` : "CLI version unavailable")}</span>
+                              <span>${escapeHtml(formatRelativeTime(selectedSession.lastActiveAtMs))}</span>
+                            </div>
+                          `
+                          : `
+                            <div class="workspace-codex-modal-detail-card is-empty">
+                              <span class="workspace-codex-meta-label">Selected session</span>
+                              <strong>Start new session</strong>
+                              <span>No saved session is selected for this workspace yet.</span>
+                            </div>
+                          `
+                      }
+                      <div class="workspace-codex-modal-detail-card">
+                        <span class="workspace-codex-meta-label">Command target</span>
+                        <div class="workspace-codex-pane-picker" role="list" aria-label="Choose target terminal pane">
+                          ${workspace.panes.map((pane) => renderCodexTargetPaneButton(pane, {
+                              isSelected: pane.id === targetPaneId,
+                              isActive: pane.id === activePaneId,
+                            })).join("")}
+                        </div>
+                        <span>
+                          ${targetPane
+                            ? escapeHtml(`CrewDock will send the Codex command to ${targetPane.label}.`)
+                            : "No ready pane is available yet. Wait for a shell to finish booting before starting or resuming Codex."}
+                        </span>
+                      </div>
+                      ${snapshot?.rememberedSessionMissing
+                        ? `
+                          <div class="workspace-codex-modal-inline-note">
+                            CrewDock had a remembered session for this workspace, but it is no longer present in local Codex history.
+                          </div>
+                        `
+                        : ""}
+                      <div class="workspace-codex-modal-footer">
+                        <button
+                          class="settings-ai-button settings-ai-button-primary"
+                          type="button"
+                          data-action="resume-codex-session"
+                          ${canResume ? "" : "disabled"}
+                        >
+                          ${uiState.codexSubmitting ? "Starting..." : "Resume selected"}
+                        </button>
+                        <button
+                          class="settings-ai-button"
+                          type="button"
+                          data-action="start-codex-session"
+                          ${canStart ? "" : "disabled"}
+                        >
+                          ${uiState.codexSubmitting ? "Starting..." : "Start new session"}
+                        </button>
+                      </div>
+                      <p class="workspace-codex-modal-note">
+                        The command goes to the selected pane, not whichever terminal happened to keep focus behind the modal.
+                      </p>
+                    </div>
+                  </div>
+                `
+        }
+      </section>
+    </div>
+  `;
+}
+
+function renderCodexTargetPaneButton(pane, { isSelected = false, isActive = false } = {}) {
+  const isReady = isCodexPaneReady(pane);
+  const statusParts = [formatPaneStatusLabel(pane.status)];
+  if (isActive) {
+    statusParts.unshift("Active");
+  }
+
+  return `
+    <button
+      class="workspace-codex-pane-button ${isSelected ? "is-selected" : ""}"
+      type="button"
+      role="listitem"
+      data-action="select-codex-target-pane"
+      data-pane-id="${escapeHtml(pane.id)}"
+      ${isReady ? "" : "disabled"}
+      aria-pressed="${isSelected ? "true" : "false"}"
+      title="${escapeHtml(isReady ? `Send Codex commands to ${pane.label}` : `${pane.label} is ${formatPaneStatusLabel(pane.status).toLowerCase()}`)}"
+    >
+      <strong>${escapeHtml(pane.label)}</strong>
+      <span>${escapeHtml(statusParts.join(" · "))}</span>
+    </button>
+  `;
+}
+
+function renderCodexSessionRow(session, { isSelected = false, isRemembered = false } = {}) {
+  const primaryLabel = session.displayTitle || session.id;
+  const secondaryLabel = session.originator || session.source || "Codex CLI";
+  const badges = [
+    isRemembered ? '<span class="workspace-codex-session-badge is-active">Remembered</span>' : "",
+    session.cliVersion ? `<span class="workspace-codex-session-badge">CLI ${escapeHtml(session.cliVersion)}</span>` : "",
+  ].filter(Boolean).join("");
+
+  return `
+    <button
+      class="workspace-codex-session-row ${isSelected ? "is-selected" : ""}"
+      type="button"
+      role="option"
+      aria-selected="${isSelected ? "true" : "false"}"
+      data-action="select-codex-session"
+      data-session-id="${escapeHtml(session.id)}"
+    >
+      <div class="workspace-codex-session-row-top">
+        <strong title="${escapeHtml(primaryLabel)}">${escapeHtml(primaryLabel)}</strong>
+        <span>${escapeHtml(formatRelativeTime(session.lastActiveAtMs))}</span>
+      </div>
+      <div class="workspace-codex-session-row-meta">
+        <span>${escapeHtml(formatCodexSessionShortId(session.id))}</span>
+        <span>${escapeHtml(secondaryLabel)}</span>
+        ${badges}
+      </div>
+    </button>
+  `;
+}
+
+function focusCodexModal(root = document) {
+  if (!uiState.codexModalVisible || !uiState.codexShouldFocus) {
+    return;
+  }
+
+  const target =
+    root.querySelector(".workspace-codex-session-row.is-selected")
+    || root.querySelector('[data-action="resume-codex-session"]')
+    || root.querySelector('[data-action="start-codex-session"]');
+  if (target instanceof HTMLElement) {
+    target.focus({ preventScroll: true });
+  }
+  uiState.codexShouldFocus = false;
+}
+
+function focusTodoPanel(root = document) {
+  if (!uiState.todoPanelVisible) {
+    return;
+  }
+
+  const shouldFocusEdit = Boolean(uiState.workspaceTodos.shouldFocusEditTodoId);
+  const target = shouldFocusEdit
+    ? root.querySelector("[data-workspace-todo-edit-input]")
+    : uiState.workspaceTodos.shouldFocusCreate
+      ? root.querySelector("[data-workspace-todo-input]")
+      : null;
+
+  if (target instanceof HTMLElement) {
+    target.focus({ preventScroll: true });
+    if ("select" in target && typeof target.select === "function") {
+      target.select();
+    }
+  }
+
+  uiState.workspaceTodos.shouldFocusEditTodoId = "";
+  uiState.workspaceTodos.shouldFocusCreate = false;
+}
+
+function renderTodoStatusIcon(done) {
+  if (done) {
+    return `
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M12 3.5a8.5 8.5 0 1 1-8.5 8.5A8.5 8.5 0 0 1 12 3.5Zm3.9 5.8-4.8 5.4-2.9-2.8-1.4 1.4 4.4 4.3 6.2-7-1.5-1.3Z" fill="currentColor"></path>
+      </svg>
+    `;
+  }
+
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M12 4a8 8 0 1 1-8 8 8 8 0 0 1 8-8Zm0 2a6 6 0 1 0 6 6 6 6 0 0 0-6-6Z" fill="currentColor"></path>
+    </svg>
+  `;
+}
+
+function renderTodoEmpty(title, copy) {
+  return `
+    <div class="workspace-todo-empty">
+      <strong>${escapeHtml(title)}</strong>
+      <span>${escapeHtml(copy)}</span>
+    </div>
+  `;
+}
+
+function renderTodoItem(todo) {
+  const isEditing = uiState.workspaceTodos.editTodoId === todo.id;
+  const isBusy = uiState.workspaceTodos.submitting;
+
+  if (isEditing) {
+    return `
+      <article class="workspace-todo-item is-editing ${todo.done ? "is-done" : ""}">
+        <div class="workspace-todo-item-main">
+          <button
+            type="button"
+            class="workspace-todo-toggle ${todo.done ? "is-done" : ""}"
+            data-action="toggle-workspace-todo-done"
+            data-todo-id="${escapeHtml(todo.id)}"
+            data-done="${todo.done ? "false" : "true"}"
+            aria-label="${todo.done ? "Mark task as open" : "Mark task as done"}"
+            ${isBusy ? "disabled" : ""}
+          >
+            ${renderTodoStatusIcon(todo.done)}
+          </button>
+          <form class="workspace-todo-edit-form" data-action="workspace-todo-edit" data-todo-id="${escapeHtml(todo.id)}">
+            <input
+              class="workspace-scm-input"
+              type="text"
+              value="${escapeHtml(uiState.workspaceTodos.editDraft)}"
+              data-workspace-todo-edit-input
+              spellcheck="false"
+              autocomplete="off"
+              placeholder="Update task"
+              ${isBusy ? "disabled" : ""}
+            />
+            <button type="submit" class="workspace-scm-primary-button" ${isBusy ? "disabled" : ""}>
+              Save
+            </button>
+            <button
+              type="button"
+              class="workspace-scm-ghost-button"
+              data-action="cancel-workspace-todo-edit"
+              ${isBusy ? "disabled" : ""}
+            >
+              Cancel
+            </button>
+          </form>
+        </div>
+      </article>
+    `;
+  }
+
+  return `
+    <article class="workspace-todo-item ${todo.done ? "is-done" : ""}">
+      <div class="workspace-todo-item-main">
+        <button
+          type="button"
+          class="workspace-todo-toggle ${todo.done ? "is-done" : ""}"
+          data-action="toggle-workspace-todo-done"
+          data-todo-id="${escapeHtml(todo.id)}"
+          data-done="${todo.done ? "false" : "true"}"
+          aria-label="${todo.done ? "Mark task as open" : "Mark task as done"}"
+          ${uiState.workspaceTodos.submitting ? "disabled" : ""}
+        >
+          ${renderTodoStatusIcon(todo.done)}
+        </button>
+        <div class="workspace-todo-copy">
+          <strong>${escapeHtml(todo.text)}</strong>
+          <span>${todo.done ? "Completed" : "Next up"}</span>
+        </div>
+        <div class="workspace-todo-actions">
+          <button
+            type="button"
+            class="workspace-scm-inline-action"
+            data-action="start-workspace-todo-edit"
+            data-todo-id="${escapeHtml(todo.id)}"
+            ${uiState.workspaceTodos.submitting ? "disabled" : ""}
+          >
+            Edit
+          </button>
+          <button
+            type="button"
+            class="workspace-scm-inline-action is-danger"
+            data-action="delete-workspace-todo"
+            data-todo-id="${escapeHtml(todo.id)}"
+            ${uiState.workspaceTodos.submitting ? "disabled" : ""}
+          >
+            Delete
+          </button>
+        </div>
+      </div>
+    </article>
+  `;
+}
+
+function renderTodoPanel(workspace) {
+  const summary = getWorkspaceTodoState(workspace);
+  const createDisabled = uiState.workspaceTodos.submitting;
+  const completedExpanded = !uiState.workspaceTodos.completedCollapsed;
+
+  return `
+    <div class="workspace-todo-backdrop" data-action="close-todo-panel">
+      <section class="workspace-todo-panel" role="dialog" aria-modal="true" aria-labelledby="todo-panel-title">
+        <header class="workspace-todo-panel-header">
+          <div class="workspace-todo-panel-heading">
+            <p class="workspace-todo-panel-mark">Tasks</p>
+            <div class="workspace-todo-panel-title-row">
+              <h2 id="todo-panel-title">${escapeHtml(workspace.name)}</h2>
+              <span class="workspace-todo-panel-state ${summary.openCount > 0 ? "is-dirty" : "is-clean"}">
+                ${escapeHtml(summary.openCount > 0 ? `${summary.openCount} open` : "All clear")}
+              </span>
+            </div>
+            <p class="workspace-todo-panel-copy">${escapeHtml(formatWorkspaceTodoSummary(summary))}</p>
+          </div>
+          <div class="workspace-todo-panel-actions">
+            <button
+              class="workspace-git-panel-button"
+              type="button"
+              data-action="close-todo-panel"
+              aria-label="Close tasks panel"
+              title="Close tasks panel"
+            >
+              ${renderCloseIcon()}
+            </button>
+          </div>
+        </header>
+        <div class="workspace-todo-panel-body">
+          <form class="workspace-todo-form" data-action="workspace-todo-create">
+            <input
+              class="workspace-scm-input"
+              type="text"
+              value="${escapeHtml(uiState.workspaceTodos.draft)}"
+              data-workspace-todo-input
+              spellcheck="false"
+              autocomplete="off"
+              placeholder="Add a task for this workspace"
+              ${createDisabled ? "disabled" : ""}
+            />
+            <button type="submit" class="workspace-scm-primary-button" ${createDisabled ? "disabled" : ""}>
+              ${createDisabled ? "Saving..." : "Add task"}
+            </button>
+          </form>
+
+          <section class="workspace-todo-section">
+            <header class="workspace-todo-section-header">
+              <div class="workspace-todo-section-title">
+                <strong>Open</strong>
+                <span>${summary.openCount}</span>
+              </div>
+            </header>
+            <div class="workspace-todo-list">
+              ${
+                summary.openTodos.length
+                  ? summary.openTodos.map((todo) => renderTodoItem(todo)).join("")
+                  : renderTodoEmpty(
+                      "Nothing queued",
+                      "Add a few next steps here so each workspace carries its own working context.",
+                    )
+              }
+            </div>
+          </section>
+
+          <section class="workspace-todo-section">
+            <button
+              type="button"
+              class="workspace-todo-section-toggle"
+              data-action="toggle-workspace-todo-completed"
+              aria-expanded="${completedExpanded ? "true" : "false"}"
+            >
+              <span class="workspace-todo-section-toggle-copy">
+                <strong>Completed</strong>
+                <span>${summary.completedCount} ${summary.completedCount === 1 ? "task" : "tasks"}</span>
+              </span>
+              <span class="workspace-todo-section-toggle-icon" aria-hidden="true">
+                ${renderChevronIcon(completedExpanded ? "up" : "down")}
+              </span>
+            </button>
+            ${
+              completedExpanded
+                ? `
+                  <div class="workspace-todo-list">
+                    ${
+                      summary.completedTodos.length
+                        ? summary.completedTodos.map((todo) => renderTodoItem(todo)).join("")
+                        : renderTodoEmpty(
+                            "No completed tasks yet",
+                            "Finished tasks stay here once you start checking things off.",
+                          )
+                    }
+                  </div>
+                `
+                : ""
+            }
+          </section>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
 function renderQuickSwitcher(snapshot) {
   const items = getQuickSwitcherItems(snapshot);
   const activeItem = items[uiState.quickSwitcherCursor] || items[0] || null;
@@ -5193,6 +7471,17 @@ function syncWorkspaceTabRail(activeWorkspaceId, workspaceCount) {
   const shell = document.querySelector("[data-workspace-tabs-shell]");
   const tabs = shell?.querySelector("[data-workspace-tabs]");
   if (!shell || !tabs) {
+    uiState.workspaceTabsLastActiveWorkspaceId = activeWorkspaceId;
+    uiState.workspaceTabsLastCount = workspaceCount;
+    return;
+  }
+
+  if (isWorkspaceTabDragActive()) {
+    if (Math.abs(tabs.scrollLeft - uiState.workspaceTabsScrollLeft) > 1) {
+      tabs.scrollLeft = uiState.workspaceTabsScrollLeft;
+    }
+    rememberWorkspaceTabsScroll(tabs);
+    syncWorkspaceTabsOverflow(tabs, shell);
     uiState.workspaceTabsLastActiveWorkspaceId = activeWorkspaceId;
     uiState.workspaceTabsLastCount = workspaceCount;
     return;
@@ -6775,7 +9064,9 @@ function renderSourceControlTaskPanel(task) {
       ? "Needs attention"
       : task.status === "succeeded"
         ? "Finished successfully"
-        : "Running";
+        : task.output?.trim()
+          ? "Running"
+          : "Starting task";
 
   return `
     <section class="workspace-scm-task-tray is-${tone} ${isExpanded ? "is-expanded" : ""}">
@@ -6802,7 +9093,7 @@ function renderSourceControlTaskPanel(task) {
         isExpanded
           ? `
             <div class="workspace-scm-task-tray-body">
-              <pre class="workspace-scm-task-output workspace-scm-task-tray-output">${escapeHtml(task.output || "Waiting for task output…")}</pre>
+              <pre class="workspace-scm-task-output workspace-scm-task-tray-output">${escapeHtml(formatSourceControlTaskOutput(task))}</pre>
           `
           : ""
       }
@@ -6945,6 +9236,27 @@ function formatSourceControlTaskStatus(task) {
     default:
       return "Running";
   }
+}
+
+function formatSourceControlTaskOutput(task) {
+  if (!task) {
+    return "";
+  }
+
+  const output = typeof task.output === "string" ? task.output : "";
+  if (output.trim()) {
+    return output;
+  }
+
+  if (task.status === "failed") {
+    return "Task failed before producing output.";
+  }
+
+  if (task.status === "succeeded") {
+    return "Task completed.";
+  }
+
+  return `Running ${task.command}...`;
 }
 
 function queryableEmptyCopy(title, remote) {
@@ -7248,7 +9560,7 @@ async function loadSystemHealthSnapshot({ force = false, silent = false } = {}) 
 
   if (!silent || !uiState.systemHealthSnapshot) {
     uiState.systemHealthLoading = true;
-    render({ refreshVisibleTerminals: false });
+    requestRender(RENDER_STATUS);
   }
 
   runtimeStore.systemHealthRefreshInFlight = (async () => {
@@ -7268,7 +9580,7 @@ async function loadSystemHealthSnapshot({ force = false, silent = false } = {}) 
     } finally {
       uiState.systemHealthLoading = false;
       runtimeStore.systemHealthRefreshInFlight = null;
-      render({ refreshVisibleTerminals: false });
+      requestRender(RENDER_STATUS);
     }
   })();
 
@@ -7290,7 +9602,11 @@ async function refreshActiveWorkspaceGitStatus({ force = false } = {}) {
     try {
       const snapshot = await bridge.refreshWorkspaceGitStatus(workspaceId);
       uiState.snapshot = snapshot;
-      render();
+      requestRender(
+        uiState.gitPanelVisible
+          ? RENDER_SOURCE_CONTROL_SURFACES
+          : (RENDER_STRIP | RENDER_STATUS),
+      );
       if (uiState.gitPanelVisible && uiState.sourceControl.lastLoadedWorkspaceId === workspaceId) {
         void loadActiveWorkspaceSourceControl({ force: true });
       }
@@ -7412,8 +9728,10 @@ function renderWorkspace(workspace) {
     ? workspace.panes.find((pane) => pane.id === uiState.maximizedPaneId) || null
     : null;
   const paneIndexById = new Map(workspace.panes.map((pane, index) => [pane.id, index]));
+  const fileExplorerVisible = isWorkspaceFileExplorerVisible(workspace.id);
   return `
-    <main class="workspace-screen ${maximizedPane ? "is-maximized" : ""}">
+    <main class="workspace-screen ${maximizedPane ? "is-maximized" : ""} ${fileExplorerVisible ? "has-file-explorer" : ""}">
+      ${renderWorkspaceFileExplorerShell(workspace)}
       <section class="terminal-layout">
         ${
           maximizedPane
@@ -7422,6 +9740,186 @@ function renderWorkspace(workspace) {
         }
       </section>
     </main>
+  `;
+}
+
+function renderWorkspaceFileExplorerShell(workspace) {
+  const visible = isWorkspaceFileExplorerVisible(workspace.id);
+  return `
+    <aside
+      class="workspace-file-explorer-shell ${visible ? "is-visible" : ""}"
+      data-workspace-file-explorer="${escapeHtml(workspace.id)}"
+      aria-hidden="${visible ? "false" : "true"}"
+    >
+      ${renderWorkspaceFileExplorer(workspace)}
+    </aside>
+  `;
+}
+
+function renderWorkspaceFileExplorer(workspace) {
+  const explorerState = getWorkspaceFileExplorerState(workspace.id, { create: false });
+  const rootSnapshot = explorerState?.directories.get("") || null;
+  const rootLoading = Boolean(explorerState?.loadingPaths.has(""));
+  const rootError = explorerState?.errorByPath.get("") || "";
+  const summaryLabel = rootLoading
+    ? "Scanning workspace"
+    : rootError
+      ? "Directory unavailable"
+      : rootSnapshot?.entries?.length
+        ? `${rootSnapshot.entries.length} visible ${rootSnapshot.entries.length === 1 ? "item" : "items"}`
+        : "Read-only workspace tree";
+
+  return `
+    <div class="workspace-file-explorer-panel">
+      <header class="workspace-file-explorer-header">
+        <div class="workspace-file-explorer-heading">
+          <span class="workspace-file-explorer-kicker">Files</span>
+          <strong>${escapeHtml(workspace.name)}</strong>
+          <span class="workspace-file-explorer-path" title="${escapeHtml(workspace.path)}">
+            ${escapeHtml(compactWorkspacePath(workspace.path))}
+          </span>
+        </div>
+        <div class="workspace-file-explorer-actions">
+          <button
+            class="workspace-file-explorer-action"
+            type="button"
+            data-action="refresh-file-explorer"
+            title="Refresh the workspace file tree"
+            aria-label="Refresh the workspace file tree"
+          >
+            <span aria-hidden="true">${renderRefreshIcon()}</span>
+            <span>Refresh</span>
+          </button>
+          <button
+            class="workspace-file-explorer-close"
+            type="button"
+            data-action="collapse-file-explorer"
+            title="Collapse file explorer"
+            aria-label="Collapse file explorer"
+          >
+            ${renderCloseIcon()}
+          </button>
+        </div>
+      </header>
+      <div class="workspace-file-explorer-meta">
+        <span class="workspace-file-explorer-meta-label">${escapeHtml(summaryLabel)}</span>
+      </div>
+      <div class="workspace-file-explorer-body" role="tree" aria-label="${escapeHtml(workspace.name)} files">
+        <div class="workspace-file-explorer-tree-shell">
+          ${renderWorkspaceFileExplorerTree({
+            rootSnapshot,
+            rootLoading,
+            rootError,
+            explorerState,
+            selectedPath: explorerState?.selectedPath || "",
+          })}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderWorkspaceFileExplorerTree({
+  rootSnapshot,
+  rootLoading,
+  rootError,
+  explorerState,
+  selectedPath,
+}) {
+  if (rootLoading) {
+    return renderWorkspaceFileExplorerState("Loading workspace files…");
+  }
+
+  if (rootError) {
+    return renderWorkspaceFileExplorerState(rootError, { tone: "error" });
+  }
+
+  if (!rootSnapshot?.entries?.length) {
+    return renderWorkspaceFileExplorerState(
+      rootSnapshot ? "No visible files in this workspace root." : "Open the explorer to browse this workspace.",
+    );
+  }
+
+  return renderWorkspaceFileExplorerEntries(rootSnapshot.entries, explorerState, selectedPath, 0);
+}
+
+function renderWorkspaceFileExplorerEntries(entries, explorerState, selectedPath, depth) {
+  return entries
+    .map((entry) => {
+      const kind = entry.kind === "directory" || entry.kind === "symlink" ? entry.kind : "file";
+      const isDirectory = kind === "directory";
+      const isExpanded = isDirectory && explorerState?.expandedDirectories.has(entry.relativePath);
+      const isSelected = selectedPath === entry.relativePath;
+      const childSnapshot = explorerState?.directories.get(entry.relativePath) || null;
+      const childLoading = Boolean(explorerState?.loadingPaths.has(entry.relativePath));
+      const childError = explorerState?.errorByPath.get(entry.relativePath) || "";
+      const disclosure = isDirectory
+        ? `
+            <button
+              class="workspace-file-explorer-disclosure ${isExpanded ? "is-expanded" : ""}"
+              type="button"
+              data-action="toggle-file-explorer-directory"
+              data-relative-path="${escapeHtml(entry.relativePath)}"
+              title="${isExpanded ? "Collapse folder" : "Expand folder"}"
+              aria-label="${isExpanded ? "Collapse folder" : "Expand folder"}"
+              aria-expanded="${isExpanded ? "true" : "false"}"
+            >
+              ${renderChevronIcon(isExpanded ? "down" : "right")}
+            </button>
+          `
+        : `<span class="workspace-file-explorer-disclosure is-spacer" aria-hidden="true"></span>`;
+      const badge = kind === "symlink"
+        ? `<span class="workspace-file-explorer-badge">Link</span>`
+        : "";
+      const childContent = !isExpanded
+        ? ""
+        : childLoading
+          ? renderWorkspaceFileExplorerState("Loading…", { tone: "muted", depth: depth + 1 })
+          : childError
+            ? renderWorkspaceFileExplorerState(childError, { tone: "error", depth: depth + 1 })
+            : childSnapshot?.entries?.length
+              ? renderWorkspaceFileExplorerEntries(
+                  childSnapshot.entries,
+                  explorerState,
+                  selectedPath,
+                  depth + 1,
+                )
+              : renderWorkspaceFileExplorerState("No visible items.", {
+                  tone: "muted",
+                  depth: depth + 1,
+                });
+
+      return `
+        <div class="workspace-file-explorer-node ${isExpanded ? "is-expanded" : ""}">
+          <div class="workspace-file-explorer-row" style="--explorer-depth:${depth}">
+            ${disclosure}
+            <button
+              class="workspace-file-explorer-entry is-${escapeHtml(kind)} ${isSelected ? "is-selected" : ""}"
+              type="button"
+              data-action="select-file-explorer-entry"
+              data-relative-path="${escapeHtml(entry.relativePath)}"
+              data-kind="${escapeHtml(kind)}"
+              title="${escapeHtml(entry.relativePath || entry.name)}"
+            >
+              <span class="workspace-file-explorer-entry-icon" aria-hidden="true">
+                ${kind === "directory" ? renderFolderIcon() : renderFileIcon()}
+              </span>
+              <span class="workspace-file-explorer-entry-label">${escapeHtml(entry.name)}</span>
+              ${badge}
+            </button>
+          </div>
+          ${isExpanded ? `<div class="workspace-file-explorer-children">${childContent}</div>` : ""}
+        </div>
+      `;
+    })
+    .join("");
+}
+
+function renderWorkspaceFileExplorerState(message, { tone = "muted", depth = 0 } = {}) {
+  return `
+    <div class="workspace-file-explorer-state is-${escapeHtml(tone)}" style="--explorer-depth:${depth}">
+      ${escapeHtml(message)}
+    </div>
   `;
 }
 
@@ -7521,15 +10019,16 @@ function renderPaneShell(pane, paneIndex) {
 }
 
 function renderContextMenu(contextMenu, workspace) {
-  const maxX = Math.max(20, window.innerWidth - 320);
-  const maxY = Math.max(20, window.innerHeight - 360);
-  const left = Math.min(contextMenu.x, maxX);
-  const top = Math.min(contextMenu.y, maxY);
   const canSplit = workspace.panes.length < 16;
   const canClose = workspace.panes.length > 1;
 
   return `
-    <div class="terminal-context-menu" style="left:${left}px; top:${top}px;">
+    <div
+      class="terminal-context-menu"
+      data-context-x="${contextMenu.x}"
+      data-context-y="${contextMenu.y}"
+      style="left:0; top:0; visibility:hidden;"
+    >
       <button class="terminal-context-item" data-action="context-copy-path">
         <span>Copy Path</span>
       </button>
@@ -7559,6 +10058,26 @@ function renderContextSplitAction(label, action, direction, shortcut, enabled) {
       <span class="terminal-context-shortcut">${shortcut}</span>
     </button>
   `;
+}
+
+function syncContextMenuPosition(root = app) {
+  const menu = root?.querySelector(".terminal-context-menu");
+  if (!(menu instanceof HTMLElement)) {
+    return;
+  }
+
+  const viewportMargin = 12;
+  const requestedX = Number(menu.dataset.contextX || 0);
+  const requestedY = Number(menu.dataset.contextY || 0);
+  const { width, height } = menu.getBoundingClientRect();
+  const maxLeft = Math.max(viewportMargin, window.innerWidth - width - viewportMargin);
+  const maxTop = Math.max(viewportMargin, window.innerHeight - height - viewportMargin);
+  const left = Math.min(Math.max(requestedX, viewportMargin), maxLeft);
+  const top = Math.min(Math.max(requestedY, viewportMargin), maxTop);
+
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+  menu.style.visibility = "visible";
 }
 
 function resolveFallbackPaneIdAfterClose(workspace, paneId) {
@@ -7633,6 +10152,7 @@ async function handleContextMenuAction(target) {
 
   const paneId = contextMenu.paneId;
   let focusPaneId = null;
+  let requiresWorkspaceRender = false;
 
   try {
     if (action === "context-copy-path") {
@@ -7644,6 +10164,7 @@ async function handleContextMenuAction(target) {
       || action === "context-close-pane"
       || action === "context-maximize-pane"
     ) {
+      requiresWorkspaceRender = true;
       focusPaneId = await runPaneAction(action, paneId, {
         direction: target.dataset.direction || "right",
       });
@@ -7652,7 +10173,11 @@ async function handleContextMenuAction(target) {
     console.error(error);
   } finally {
     uiState.contextMenu = null;
-    render();
+    if (requiresWorkspaceRender) {
+      render();
+    } else {
+      requestRender(RENDER_CONTEXT);
+    }
     focusPaneTerminal(focusPaneId);
   }
 }
@@ -7723,11 +10248,34 @@ function mountWorkspaceTerminals(workspace, root = document) {
   }
 }
 
+function syncWorkspaceFileExplorerSurface(workspace, root = document) {
+  const screen = root.querySelector(`.workspace-screen[data-workspace-id="${workspace.id}"]`);
+  if (!(screen instanceof HTMLElement)) {
+    return;
+  }
+
+  const shell = screen.querySelector(`[data-workspace-file-explorer="${workspace.id}"]`);
+  if (!(shell instanceof HTMLElement)) {
+    return;
+  }
+
+  const visible = isWorkspaceFileExplorerVisible(workspace.id);
+  screen.classList.toggle("has-file-explorer", visible);
+  shell.classList.toggle("is-visible", visible);
+  shell.setAttribute("aria-hidden", visible ? "false" : "true");
+  shell.innerHTML = renderWorkspaceFileExplorer(workspace);
+  if (visible) {
+    ensureWorkspaceFileExplorerRootLoaded(workspace.id);
+  }
+}
+
 function syncWorkspace(workspace) {
   const theme = getCurrentThemeDefinition();
   const terminalFontSize = getTerminalFontSize();
   const nextPaneIds = workspace.panes.map((pane) => pane.id);
   const previousPaneIds = workspacePaneIds.get(workspace.id) || [];
+
+  syncWorkspaceFileExplorerSurface(workspace);
 
   for (const pane of workspace.panes) {
     const paneElement = document.querySelector(`[data-pane-id="${pane.id}"]`);
@@ -7831,6 +10379,7 @@ function clearWorkspaceBuffers(workspaceId) {
 
   discardCachedWorkspaceScreen(workspaceId, { dispose: false });
   workspacePaneIds.delete(workspaceId);
+  uiState.workspaceFileExplorer.delete(workspaceId);
 }
 
 function clearSinglePaneBuffer(paneId) {
@@ -8074,42 +10623,6 @@ function focusLauncherInput({ select = false } = {}) {
   });
 }
 
-function captureLauncherInputState(root = app) {
-  const input = root.querySelector("[data-launcher-path-input]");
-  if (!(input instanceof HTMLInputElement)) {
-    return null;
-  }
-
-  return {
-    wasFocused: document.activeElement === input,
-    selectionStart: input.selectionStart,
-    selectionEnd: input.selectionEnd,
-  };
-}
-
-function restoreLauncherInputState(state) {
-  if (!state?.wasFocused) {
-    return;
-  }
-
-  const input = app.querySelector("[data-launcher-path-input]");
-  if (!(input instanceof HTMLInputElement)) {
-    return;
-  }
-
-  requestAnimationFrame(() => {
-    input.focus();
-    const maxIndex = input.value.length;
-    const selectionStart = Number.isFinite(state.selectionStart)
-      ? Math.max(0, Math.min(maxIndex, state.selectionStart))
-      : maxIndex;
-    const selectionEnd = Number.isFinite(state.selectionEnd)
-      ? Math.max(selectionStart, Math.min(maxIndex, state.selectionEnd))
-      : selectionStart;
-    input.setSelectionRange(selectionStart, selectionEnd);
-  });
-}
-
 function focusQuickSwitcherInput({ select = false } = {}) {
   const input = app.querySelector("[data-quick-switcher-input]");
   if (!input) {
@@ -8316,18 +10829,101 @@ function completeMockLauncherInput(basePath, rawInput) {
 }
 
 function mockDirectoryEntries(path) {
-  const index = {
-    "/Users/ashutoshbele/Desktop/ashlab/crewdock": ["README.md", "package.json", "src-tauri/", "src-web/"],
-    "/Users/ashutoshbele/Desktop/ashlab": ["crewdock/"],
-    "/Users/ashutoshbele/Desktop": ["ashlab/"],
-  };
+  const entries = mockFileExplorerEntriesForPath(path);
+  if (!entries) {
+    return ["(mock listing unavailable)"];
+  }
 
-  return index[path] || ["(mock listing unavailable)"];
+  return entries.map((entry) => (entry.kind === "directory" ? `${entry.name}/` : entry.name));
 }
 
 function mockListDirectory(path) {
   const entries = mockDirectoryEntries(path);
   return [path, entries.join("  ")];
+}
+
+function mockLoadWorkspaceFileExplorerDirectory(workspacePath, relativePath = "") {
+  const rootPath = normalizePath(workspacePath || "/");
+  const normalizedRelativePath = normalizeWorkspaceFileExplorerRelativePath(relativePath);
+  const targetPath = normalizedRelativePath
+    ? normalizePath(`${rootPath}/${normalizedRelativePath}`)
+    : rootPath;
+  const staticIndex = getMockStaticFileExplorerIndex();
+  const workspaceIndex = buildMockWorkspaceFileExplorerIndex(rootPath);
+  const entries = staticIndex[targetPath] || workspaceIndex[targetPath] || null;
+
+  if (!entries) {
+    throw new Error("mock directory not found");
+  }
+
+  return {
+    relativePath: normalizedRelativePath,
+    entries: entries.map((entry) => ({
+      name: entry.name,
+      relativePath: normalizeWorkspaceFileExplorerRelativePath(
+        normalizedRelativePath ? `${normalizedRelativePath}/${entry.name}` : entry.name,
+      ),
+      kind: entry.kind,
+      expandable: entry.kind === "directory",
+    })),
+  };
+}
+
+function mockFileExplorerEntriesForPath(path) {
+  const normalizedPath = normalizePath(path || "/");
+  const staticIndex = getMockStaticFileExplorerIndex();
+
+  if (staticIndex[normalizedPath]) {
+    return staticIndex[normalizedPath];
+  }
+
+  const workspaceIndex = buildMockWorkspaceFileExplorerIndex(normalizedPath);
+  return workspaceIndex[normalizedPath] || null;
+}
+
+function getMockStaticFileExplorerIndex() {
+  return {
+    "/Users/ashutoshbele/Desktop/ashlab": [
+      { name: "crewdock", kind: "directory" },
+    ],
+    "/Users/ashutoshbele/Desktop": [
+      { name: "ashlab", kind: "directory" },
+    ],
+  };
+}
+
+function buildMockWorkspaceFileExplorerIndex(rootPath) {
+  const normalizedRoot = normalizePath(rootPath || "/");
+  const joinPath = (next) => normalizePath(`${normalizedRoot}/${next}`);
+
+  return {
+    [normalizedRoot]: [
+      { name: "README.md", kind: "file" },
+      { name: "package.json", kind: "file" },
+      { name: "src-tauri", kind: "directory" },
+      { name: "src-web", kind: "directory" },
+    ],
+    [joinPath("src-web")]: [
+      { name: "app.js", kind: "file" },
+      { name: "bridge.js", kind: "file" },
+      { name: "store.js", kind: "file" },
+      { name: "styles.css", kind: "file" },
+      { name: "vendor", kind: "directory" },
+    ],
+    [joinPath("src-web/vendor")]: [
+      { name: "addon-fit.mjs", kind: "file" },
+      { name: "xterm.mjs", kind: "file" },
+    ],
+    [joinPath("src-tauri")]: [
+      { name: "Cargo.toml", kind: "file" },
+      { name: "src", kind: "directory" },
+    ],
+    [joinPath("src-tauri/src")]: [
+      { name: "lib.rs", kind: "file" },
+      { name: "workspace_manager.rs", kind: "file" },
+      { name: "source_control.rs", kind: "file" },
+    ],
+  };
 }
 
 function completeLauncherCommandName(rawInput) {

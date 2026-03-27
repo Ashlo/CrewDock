@@ -693,8 +693,8 @@ pub(crate) fn start_git_task(
             title: title.clone(),
             command: format!("git {}", args.join(" ")),
             status: GitTaskStatus::Running,
-            output: String::new(),
-            can_write_input: true,
+            output: format_git_task_start_output(&args),
+            can_write_input: false,
             started_at: now_timestamp_ms(),
             finished_at: None,
             exit_code: None,
@@ -737,6 +737,10 @@ pub(crate) fn start_git_task(
         .lock()
         .map_err(|_| "failed to acquire application state".to_string())?;
     load_workspace_source_control(&runtime, &workspace_id, None)
+}
+
+fn format_git_task_start_output(args: &[String]) -> String {
+    format!("$ git {}\n\nStarting task...\n", args.join(" "))
 }
 
 fn spawn_git_task_process(
@@ -1597,9 +1601,10 @@ mod tests {
     };
 
     use super::{
-        build_commit_message_generation_request, extract_openai_response_text, load_git_remotes,
-        parse_commit_detail, resolve_repo_relative_existing_path, run_git_task_blocking,
-        select_default_git_remote, GitTaskRecoveryKind, GitTaskStatus,
+        build_commit_message_generation_request, extract_openai_response_text,
+        format_git_task_start_output, load_git_remotes, parse_commit_detail,
+        resolve_repo_relative_existing_path, run_git_task_blocking, select_default_git_remote,
+        GitTaskRecoveryKind, GitTaskStatus,
     };
 
     #[test]
@@ -2048,6 +2053,19 @@ mod tests {
     }
 
     #[test]
+    fn format_git_task_start_output_seeds_visible_progress_copy() {
+        let output = format_git_task_start_output(&[
+            "push".to_string(),
+            "--set-upstream".to_string(),
+            "origin".to_string(),
+            "feature/demo".to_string(),
+        ]);
+
+        assert!(output.contains("$ git push --set-upstream origin feature/demo"));
+        assert!(output.contains("Starting task..."));
+    }
+
+    #[test]
     fn commit_message_generation_prefers_staged_changes() {
         let repo = init_test_repo("commit-message-staged");
         fs::write(repo.join("src-web-app.js"), "console.log('staged');\n")
@@ -2154,8 +2172,10 @@ mod tests {
             pane_layout: crate::PaneLayout::Leaf {
                 pane_id: "pane-1".to_string(),
             },
+            todos: Vec::new(),
             started: true,
             git: None,
+            codex_session_id: None,
         });
         runtime.active_workspace_id = Some("workspace-1".to_string());
         runtime
