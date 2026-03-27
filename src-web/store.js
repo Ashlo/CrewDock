@@ -78,9 +78,17 @@ export function createUiState() {
     codexTargetPaneId: null,
     codexSubmitting: false,
     codexShouldFocus: false,
+    workspaceOpenMenuVisible: false,
+    workspaceOpenTargets: [],
+    workspaceOpenTargetsLoading: false,
+    workspaceOpenTargetsError: "",
+    workspaceLastOpenTargetId: "",
     activityRailVisible: false,
     activityRailScope: "all",
+    dispatchToasts: [],
+    paneAttentionById: new Map(),
     workspaceFileExplorer: new Map(),
+    workspaceFileEditor: new Map(),
     workspaceRenameDraft: null,
     workspaceRenameShouldFocus: false,
     workspaceRenameSaving: false,
@@ -92,6 +100,7 @@ export function createUiState() {
     workspaceTabsLastCount: 0,
     runtimeActivity: [],
     runtimeAttentionByWorkspace: new Map(),
+    codexRestoreByPane: new Map(),
   };
 }
 
@@ -113,6 +122,11 @@ export function createRuntimeStore() {
     systemHealthRefreshTimer: 0,
     systemHealthRefreshMode: "",
     systemHealthRefreshInFlight: null,
+    workspaceOpenTargetsRequest: null,
+    dispatchToastTimer: 0,
+    dispatchToastDeadline: 0,
+    paneAttentionTimers: new Map(),
+    workspaceFileDraftPersistTimers: new Map(),
     pendingRenderMask: 0,
     pendingRenderFrame: 0,
     renderMetrics: {

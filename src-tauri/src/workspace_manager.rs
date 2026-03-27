@@ -7,8 +7,11 @@ use crate::{
     normalize_workspace_name, normalize_workspace_todo_text, relabel_panes,
     remove_pane_from_layout, restore_pane_layout,
     session_manager::{prepare_workspace_launch, PaneJob},
-    split_pane_layout, workspace_name, PaneRecord, PaneStatus, PersistedPaneLayout, RuntimeState,
-    SplitAxis, WorkspaceRecord, WorkspaceTodoRecord,
+    shift_pending_codex_starts_for_insert, shift_pending_codex_starts_for_remove,
+    shift_workspace_codex_restore_bindings_for_insert,
+    shift_workspace_codex_restore_bindings_for_remove, split_pane_layout, workspace_name,
+    PaneRecord, PaneStatus, PersistedPaneLayout, RuntimeState, SplitAxis, WorkspaceRecord,
+    WorkspaceTodoRecord,
 };
 
 pub(crate) fn build_workspace_record(
@@ -44,6 +47,8 @@ pub(crate) fn build_workspace_record(
         started: false,
         git: None,
         codex_session_id: None,
+        codex_restore_bindings: Vec::new(),
+        file_draft: None,
     })
 }
 
@@ -264,6 +269,7 @@ pub(crate) fn close_workspace_in_runtime(
     };
 
     let killers = runtime.drain_workspace_killers(workspace_id);
+    runtime.clear_pending_codex_starts_for_workspace(workspace_id);
     runtime.workspaces.remove(index);
     runtime.active_workspace_id = fallback_active_id.filter(|active_id| {
         runtime
@@ -330,6 +336,11 @@ pub(crate) fn split_pane_in_runtime(
         .position(|pane| pane.id == pane_id)
         .map(|index| if new_pane_first { index } else { index + 1 })
         .ok_or_else(|| "pane not found".to_string())?;
+    shift_workspace_codex_restore_bindings_for_insert(
+        &mut runtime.workspaces[workspace_index],
+        insertion_index,
+    );
+    shift_pending_codex_starts_for_insert(&mut *runtime, &workspace_id, insertion_index);
     runtime.workspaces[workspace_index]
         .panes
         .insert(insertion_index, new_pane);
@@ -385,6 +396,12 @@ pub(crate) fn close_pane_in_runtime(
         .iter()
         .position(|pane| pane.id == pane_id)
         .ok_or_else(|| "pane not found".to_string())?;
+    let workspace_id = runtime.workspaces[workspace_index].id.clone();
+    shift_workspace_codex_restore_bindings_for_remove(
+        &mut runtime.workspaces[workspace_index],
+        pane_index,
+    );
+    shift_pending_codex_starts_for_remove(&mut *runtime, &workspace_id, pane_index, pane_id);
 
     runtime.workspaces[workspace_index].panes.remove(pane_index);
     runtime.workspaces[workspace_index].pane_layout = remove_pane_from_layout(

@@ -66,6 +66,24 @@ export function createBridge({
         tauriApi.core.invoke("load_workspace_source_control", { workspaceId, graphCursor }),
       loadWorkspaceFileExplorerDirectory: (workspaceId, relativePath = "") =>
         tauriApi.core.invoke("load_workspace_file_explorer_directory", { workspaceId, relativePath }),
+      loadWorkspaceTextFile: (workspaceId, relativePath) =>
+        tauriApi.core.invoke("load_workspace_text_file", { workspaceId, relativePath }),
+      saveWorkspaceTextFile: (workspaceId, relativePath, content, expectedVersionToken) =>
+        tauriApi.core.invoke("save_workspace_text_file", {
+          workspaceId,
+          relativePath,
+          content,
+          expectedVersionToken,
+        }),
+      persistWorkspaceFileDraft: (workspaceId, relativePath, draft, baseVersionToken) =>
+        tauriApi.core.invoke("persist_workspace_file_draft", {
+          workspaceId,
+          relativePath,
+          draft,
+          baseVersionToken,
+        }),
+      clearWorkspaceFileDraft: (workspaceId) =>
+        tauriApi.core.invoke("clear_workspace_file_draft", { workspaceId }),
       loadWorkspaceGitDiff: (workspaceId, path, mode) =>
         tauriApi.core.invoke("load_workspace_git_diff", { workspaceId, path, mode }),
       loadWorkspaceGitCommitDetail: (workspaceId, oid) =>
@@ -110,6 +128,10 @@ export function createBridge({
         tauriApi.core.invoke("close_pane", { paneId }),
       showInFinder: (path) =>
         tauriApi.core.invoke("show_in_finder", { path }),
+      listExternalWorkspaceTargets: () =>
+        tauriApi.core.invoke("list_external_workspace_targets"),
+      openWorkspaceInTarget: (path, targetId) =>
+        tauriApi.core.invoke("open_workspace_in_target", { path, targetId }),
       runLauncherCommand: (input) =>
         tauriApi.core.invoke("run_launcher_command", { input }),
       completeLauncherInput: (input) =>
@@ -231,7 +253,32 @@ function createMockBridge({
   let workspaces = [];
   let activeWorkspaceId = null;
   let activityHistory = [];
-  const MAX_ACTIVITY_HISTORY = 80;
+  const MAX_ACTIVITY_HISTORY = 120;
+  const createMockWorkspaceTargetIconDataUrl = (label, background, foreground = "#ffffff") =>
+    `data:image/svg+xml;utf8,${encodeURIComponent(`
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+        <rect width="64" height="64" rx="16" fill="${background}"/>
+        <text
+          x="50%"
+          y="54%"
+          fill="${foreground}"
+          font-family="Inter, Arial, sans-serif"
+          font-size="26"
+          font-weight="700"
+          text-anchor="middle"
+        >${label}</text>
+      </svg>
+    `)}`;
+  const mockExternalWorkspaceTargets = [
+    { id: "cursor", label: "Cursor", kind: "editor", iconDataUrl: createMockWorkspaceTargetIconDataUrl("C", "#24262c") },
+    { id: "vscode", label: "VS Code", kind: "editor", iconDataUrl: createMockWorkspaceTargetIconDataUrl("VS", "#1264d1") },
+    { id: "windsurf", label: "Windsurf", kind: "editor", iconDataUrl: createMockWorkspaceTargetIconDataUrl("W", "#1766d6") },
+    { id: "zed", label: "Zed", kind: "editor", iconDataUrl: createMockWorkspaceTargetIconDataUrl("Z", "#1d2128") },
+    { id: "finder", label: "Finder", kind: "system", iconDataUrl: createMockWorkspaceTargetIconDataUrl("F", "#2b82f6") },
+    { id: "terminal", label: "Terminal", kind: "system", iconDataUrl: createMockWorkspaceTargetIconDataUrl(">", "#17191d") },
+    { id: "iterm2", label: "iTerm2", kind: "system", iconDataUrl: createMockWorkspaceTargetIconDataUrl("I", "#111315") },
+    { id: "warp", label: "Warp", kind: "system", iconDataUrl: createMockWorkspaceTargetIconDataUrl("W", "#d9dee8", "#1b1f27") },
+  ];
 
   function emitState() {
     const activeWorkspace = workspaces.find((workspace) => workspace.id === activeWorkspaceId);
@@ -257,6 +304,7 @@ function createMockBridge({
         path: workspace.path,
         layout: workspace.layout,
         isLive: workspace.started,
+        hasFileDraft: Boolean(workspace.fileDraft),
         gitSummary: workspace.gitDetail?.summary || null,
       })),
       activeWorkspaceId,
@@ -270,6 +318,7 @@ function createMockBridge({
             paneLayout: structuredClone(activeWorkspace.paneLayout),
             todos: activeWorkspace.todos.map((todo) => ({ ...todo })),
             gitDetail: activeWorkspace.gitDetail ? structuredClone(activeWorkspace.gitDetail) : null,
+            fileDraft: activeWorkspace.fileDraft ? { ...activeWorkspace.fileDraft } : null,
           }
         : null,
     };
@@ -288,21 +337,41 @@ function createMockBridge({
   }
 
   function emitRuntimeEvent(payload) {
-    activityHistory.unshift({
-      kind: payload.kind,
-      workspaceId: payload.workspaceId,
-      paneId: payload.paneId || "",
-      label: payload.label || "Terminal",
-      error: payload.error ? String(payload.error) : "",
-      at: Date.now(),
-    });
+    for (const listener of runtimeListeners) {
+      listener(structuredClone(payload));
+    }
+  }
+
+  function normalizeMockActivityEvent(event) {
+    if (!event || !event.workspaceId || typeof event.kind !== "string") {
+      return null;
+    }
+
+    return {
+      kind: String(event.kind),
+      workspaceId: String(event.workspaceId),
+      paneId: String(event.paneId || ""),
+      label: String(event.label || (String(event.kind).startsWith("gitTask") ? "Git task" : "Terminal")),
+      error: event.error ? String(event.error) : "",
+      at: Number(event.at || Date.now()),
+    };
+  }
+
+  function emitActivityRecorded(event) {
+    const normalized = normalizeMockActivityEvent(event);
+    if (!normalized) {
+      return;
+    }
+
+    activityHistory.unshift(normalized);
     if (activityHistory.length > MAX_ACTIVITY_HISTORY) {
       activityHistory.length = MAX_ACTIVITY_HISTORY;
     }
 
-    for (const listener of runtimeListeners) {
-      listener(structuredClone(payload));
-    }
+    emitRuntimeEvent({
+      kind: "activityRecorded",
+      event: normalized,
+    });
   }
 
   function startWorkspace(workspace) {
@@ -670,6 +739,150 @@ function createMockBridge({
     };
   }
 
+  function normalizeMockRelativePath(relativePath = "") {
+    return String(relativePath || "")
+      .replaceAll("\\", "/")
+      .split("/")
+      .map((segment) => segment.trim())
+      .filter((segment) => segment && segment !== ".")
+      .join("/");
+  }
+
+  function detectMockNewlineStyle(content) {
+    const value = String(content || "");
+    if (value.includes("\r\n")) {
+      return "crLf";
+    }
+    if (value.includes("\r")) {
+      return "cr";
+    }
+    return "lf";
+  }
+
+  function buildMockWorkspaceTextFileVersionToken(content) {
+    const bytes = new TextEncoder().encode(String(content || ""));
+    let hash = 0xcbf29ce484222325n;
+    const prime = 0x100000001b3n;
+    for (const byte of bytes) {
+      hash ^= BigInt(byte);
+      hash = BigInt.asUintN(64, hash * prime);
+    }
+    return `${bytes.length}:${hash.toString(16).padStart(16, "0")}`;
+  }
+
+  function getMockWorkspaceTextFileStore(workspace) {
+    if (!(workspace?.mockFiles instanceof Map)) {
+      workspace.mockFiles = new Map();
+    }
+    return workspace.mockFiles;
+  }
+
+  function buildDefaultMockTextFileContent(relativePath) {
+    const normalizedPath = normalizeMockRelativePath(relativePath);
+    if (normalizedPath === "README.md") {
+      return "# CrewDock\n\nMock file editor content.\n";
+    }
+    if (normalizedPath.endsWith(".css")) {
+      return "body {\n  background: #10131a;\n}\n";
+    }
+    if (normalizedPath.endsWith(".js")) {
+      return "export function hello() {\n  return \"CrewDock\";\n}\n";
+    }
+    if (normalizedPath.endsWith(".toml")) {
+      return "[package]\nname = \"crewdock\"\n";
+    }
+    return `Mock contents for ${normalizedPath || "untitled"}\n`;
+  }
+
+  function loadMockWorkspaceTextFile(workspace, relativePath) {
+    if (!workspace) {
+      throw new Error("workspace not found");
+    }
+
+    const normalizedPath = normalizeMockRelativePath(relativePath);
+    if (!normalizedPath) {
+      throw new Error("path must be workspace-relative");
+    }
+
+    const store = getMockWorkspaceTextFileStore(workspace);
+    const defaultContent = buildDefaultMockTextFileContent(normalizedPath);
+    const current = store.get(normalizedPath) || {
+      content: defaultContent,
+      versionToken: buildMockWorkspaceTextFileVersionToken(defaultContent),
+    };
+    store.set(normalizedPath, current);
+
+    const content = String(current.content || "");
+    return {
+      workspaceId: workspace.id,
+      relativePath: normalizedPath,
+      content,
+      sizeBytes: new TextEncoder().encode(content).length,
+      newlineStyle: detectMockNewlineStyle(content),
+      hasTrailingNewline: content.endsWith("\n") || content.endsWith("\r"),
+      versionToken: String(current.versionToken || buildMockWorkspaceTextFileVersionToken(content)),
+      readOnly: false,
+      reason: null,
+    };
+  }
+
+  function saveMockWorkspaceTextFile(workspace, relativePath, content, expectedVersionToken) {
+    const snapshot = loadMockWorkspaceTextFile(workspace, relativePath);
+    if (snapshot.versionToken !== String(expectedVersionToken || "").trim()) {
+      throw new Error("save conflict: file changed on disk.");
+    }
+
+    const store = getMockWorkspaceTextFileStore(workspace);
+    const nextContent = String(content || "");
+    store.set(snapshot.relativePath, {
+      content: nextContent,
+      versionToken: buildMockWorkspaceTextFileVersionToken(nextContent),
+    });
+    return loadMockWorkspaceTextFile(workspace, snapshot.relativePath);
+  }
+
+  function completeMockGitTask(workspace, {
+    title,
+    command,
+    status = "succeeded",
+    output = "",
+    error = "",
+  }) {
+    if (!workspace) {
+      throw new Error("workspace not found");
+    }
+
+    const finishedAt = Date.now();
+    workspace.gitTask = {
+      id: `git-task-${finishedAt}`,
+      title,
+      command,
+      status,
+      output,
+      canWriteInput: false,
+      startedAt: finishedAt,
+      finishedAt,
+      exitCode: status === "failed" ? 1 : 0,
+      recovery: null,
+    };
+    if (status === "succeeded") {
+      syncMockGitDetail(workspace);
+    }
+    emitState();
+    emitRuntimeEvent({
+      kind: "gitTaskSnapshot",
+      workspaceId: workspace.id,
+      task: workspace.gitTask,
+    });
+    emitActivityRecorded({
+      kind: status === "failed" ? "gitTaskFailed" : "gitTaskSucceeded",
+      workspaceId: workspace.id,
+      label: title,
+      error,
+    });
+    return buildMockSourceControl(workspace);
+  }
+
   return {
     getAppSnapshot: async () => emitState(),
     loadSystemHealthSnapshot: async () => buildMockSystemHealthSnapshot(),
@@ -808,6 +1021,7 @@ function createMockBridge({
         layout,
         started: false,
         codexSessionId: null,
+        fileDraft: null,
         todos: [],
         gitDetail: buildMockGitDetail(normalizedPath),
         panes: Array.from({ length: layout.paneCount }, (_, index) => ({
@@ -928,6 +1142,34 @@ function createMockBridge({
       const workspace = workspaces.find((entry) => entry.id === workspaceId);
       return loadMockWorkspaceFileExplorerDirectory(workspace, relativePath);
     },
+    loadWorkspaceTextFile: async (workspaceId, relativePath) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      return loadMockWorkspaceTextFile(workspace, relativePath);
+    },
+    saveWorkspaceTextFile: async (workspaceId, relativePath, content, expectedVersionToken) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      return saveMockWorkspaceTextFile(workspace, relativePath, content, expectedVersionToken);
+    },
+    persistWorkspaceFileDraft: async (workspaceId, relativePath, draft, baseVersionToken) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      if (!workspace) {
+        throw new Error("workspace not found");
+      }
+
+      workspace.fileDraft = {
+        relativePath: normalizeMockRelativePath(relativePath),
+        draft: String(draft || ""),
+        baseVersionToken: String(baseVersionToken || "").trim(),
+      };
+    },
+    clearWorkspaceFileDraft: async (workspaceId) => {
+      const workspace = workspaces.find((entry) => entry.id === workspaceId);
+      if (!workspace) {
+        throw new Error("workspace not found");
+      }
+
+      workspace.fileDraft = null;
+    },
     loadWorkspaceGitDiff: async (_workspaceId, path, mode) => buildMockDiff(path, mode),
     loadWorkspaceGitCommitDetail: async (_workspaceId, oid) => buildMockCommitDetail(oid),
     gitStagePaths: async (workspaceId) => {
@@ -954,29 +1196,11 @@ function createMockBridge({
     },
     gitCommit: async (workspaceId, message) => {
       const workspace = workspaces.find((entry) => entry.id === workspaceId);
-      if (!workspace) {
-        throw new Error("workspace not found");
-      }
-      workspace.gitTask = {
-        id: `git-task-${Date.now()}`,
+      return completeMockGitTask(workspace, {
         title: "Commit",
         command: `git commit -m ${JSON.stringify(message)}`,
-        status: "succeeded",
         output: "Mock commit completed successfully.\n",
-        canWriteInput: false,
-        startedAt: Date.now(),
-        finishedAt: Date.now(),
-        exitCode: 0,
-        recovery: null,
-      };
-      syncMockGitDetail(workspace);
-      emitState();
-      emitRuntimeEvent({
-        kind: "gitTaskSnapshot",
-        workspaceId: workspace.id,
-        task: workspace.gitTask,
       });
-      return buildMockSourceControl(workspace);
     },
     gitCheckoutBranch: async (workspaceId, branchName) => {
       const workspace = workspaces.find((entry) => entry.id === workspaceId);
@@ -1011,15 +1235,27 @@ function createMockBridge({
     },
     gitFetch: async (workspaceId) => {
       const workspace = workspaces.find((entry) => entry.id === workspaceId);
-      return buildMockSourceControl(workspace);
+      return completeMockGitTask(workspace, {
+        title: "Fetch",
+        command: "git fetch --all --prune",
+        output: "Mock fetch completed successfully.\n",
+      });
     },
     gitPull: async (workspaceId) => {
       const workspace = workspaces.find((entry) => entry.id === workspaceId);
-      return buildMockSourceControl(workspace);
+      return completeMockGitTask(workspace, {
+        title: "Pull",
+        command: "git pull",
+        output: "Mock pull completed successfully.\n",
+      });
     },
     gitPush: async (workspaceId) => {
       const workspace = workspaces.find((entry) => entry.id === workspaceId);
-      return buildMockSourceControl(workspace);
+      return completeMockGitTask(workspace, {
+        title: "Push",
+        command: "git push",
+        output: "Mock push completed successfully.\n",
+      });
     },
     gitPublishBranch: async (workspaceId, branchName, remoteName = null) => {
       const workspace = workspaces.find((entry) => entry.id === workspaceId);
@@ -1030,7 +1266,11 @@ function createMockBridge({
           upstream: `${remote}/${branchName}`,
         });
       }
-      return buildMockSourceControl(workspace);
+      return completeMockGitTask(workspace, {
+        title: `Publish ${branchName}`,
+        command: `git push --set-upstream ${remoteName || "origin"} ${branchName}`,
+        output: "Mock publish completed successfully.\n",
+      });
     },
     gitSetUpstream: async (workspaceId, branchName, upstreamName) => {
       const workspace = workspaces.find((entry) => entry.id === workspaceId);
@@ -1158,6 +1398,9 @@ function createMockBridge({
       return snapshot;
     },
     showInFinder: async () => {},
+    listExternalWorkspaceTargets: async () =>
+      structuredClone(mockExternalWorkspaceTargets),
+    openWorkspaceInTarget: async () => {},
     runLauncherCommand: async (input) => {
       const command = String(input || "").trim();
       if (!command) {

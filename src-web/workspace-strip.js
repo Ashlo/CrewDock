@@ -3,7 +3,10 @@ export function renderWorkspaceStrip({
   workspaces,
   activeWorkspaceId,
   workspaceRenameDraft,
+  workspaceOpenControlHtml,
   getWorkspaceAttention,
+  hasWorkspaceFileDraftIndicator,
+  getWorkspaceFileDraftIndicatorTitle,
   escapeHtml,
   getGitTone,
   formatGitBadgeTitle,
@@ -35,6 +38,8 @@ export function renderWorkspaceStrip({
                     workspaceRenameDraft,
                     tabLabels,
                     getWorkspaceAttention,
+                    hasWorkspaceFileDraftIndicator,
+                    getWorkspaceFileDraftIndicatorTitle,
                     escapeHtml,
                     getGitTone,
                     formatGitBadgeTitle,
@@ -57,6 +62,7 @@ export function renderWorkspaceStrip({
         </button>
       </div>
       <div class="workspace-strip-actions">
+        ${workspaceOpenControlHtml || ""}
         <button
           class="workspace-strip-button workspace-settings-button"
           data-tauri-drag-region="false"
@@ -86,6 +92,8 @@ function renderWorkspaceTabs({
   workspaceRenameDraft,
   tabLabels,
   getWorkspaceAttention,
+  hasWorkspaceFileDraftIndicator,
+  getWorkspaceFileDraftIndicatorTitle,
   escapeHtml,
   getGitTone,
   formatGitBadgeTitle,
@@ -98,6 +106,8 @@ function renderWorkspaceTabs({
         label: tabLabels.get(workspace.id) || workspace.name,
         workspaceRenameDraft,
         attention: getWorkspaceAttention(workspace.id),
+        hasFileDraft: hasWorkspaceFileDraftIndicator(workspace.id, workspace),
+        fileDraftTitle: getWorkspaceFileDraftIndicatorTitle(workspace.id, workspace),
         renderIndex: index,
         escapeHtml,
         getGitTone,
@@ -157,6 +167,8 @@ function renderWorkspaceTab({
   label,
   workspaceRenameDraft,
   attention,
+  hasFileDraft,
+  fileDraftTitle,
   renderIndex,
   escapeHtml,
   getGitTone,
@@ -167,7 +179,7 @@ function renderWorkspaceTab({
   const isRenaming = workspaceRenameDraft?.workspaceId === workspace.id;
   const gitSummary = workspace.gitSummary || null;
   const attentionTone = attention?.unreadCount ? attention.tone : "";
-  const tabTitle = buildWorkspaceTabTitle(workspace, attention);
+  const tabTitle = buildWorkspaceTabTitle(workspace, attention, hasFileDraft, fileDraftTitle);
 
   return `
     <div
@@ -213,6 +225,7 @@ function renderWorkspaceTab({
       >
         <span class="workspace-tab-status ${liveClass}" aria-hidden="true"></span>
         <span class="workspace-tab-name">${escapeHtml(label)}</span>
+        ${renderWorkspaceFileDraftIndicator(hasFileDraft, fileDraftTitle, escapeHtml)}
         ${renderWorkspaceAttentionBadge(workspace, attention, escapeHtml)}
         ${renderWorkspaceGitIndicator(gitSummary, getGitTone, formatGitBadgeTitle, escapeHtml)}
       </button>
@@ -256,12 +269,34 @@ function renderWorkspaceGitIndicator(summary, getGitTone, formatGitBadgeTitle, e
   `;
 }
 
-function buildWorkspaceTabTitle(workspace, attention) {
+function buildWorkspaceTabTitle(workspace, attention, hasFileDraft, fileDraftTitle) {
+  if (hasFileDraft && attention?.unreadCount && attention.lastEvent?.message) {
+    return `${workspace.path}\n${fileDraftTitle || "Unsaved file draft"}\n${attention.lastEvent.message}`;
+  }
+
+  if (hasFileDraft) {
+    return `${workspace.path}\n${fileDraftTitle || "Unsaved file draft"}`;
+  }
+
   if (!attention?.unreadCount || !attention.lastEvent?.message) {
     return workspace.path;
   }
 
   return `${workspace.path}\n${attention.lastEvent.message}`;
+}
+
+function renderWorkspaceFileDraftIndicator(hasFileDraft, fileDraftTitle, escapeHtml) {
+  if (!hasFileDraft) {
+    return "";
+  }
+
+  return `
+    <span
+      class="workspace-tab-draft"
+      aria-hidden="true"
+      title="${escapeHtml(fileDraftTitle || "Unsaved file draft")}"
+    ></span>
+  `;
 }
 
 function renderWorkspaceAttentionBadge(workspace, attention, escapeHtml) {
@@ -286,7 +321,8 @@ function renderWorkspaceAttentionBadge(workspace, attention, escapeHtml) {
 function renderSettingsIcon() {
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <path d="M10.3 2.8h3.4l.5 2.2c.5.1.9.3 1.4.6l2-1.1 2.4 2.4-1.1 2c.3.4.5.9.6 1.4l2.2.5v3.4l-2.2.5c-.1.5-.3.9-.6 1.4l1.1 2-2.4 2.4-2-1.1c-.4.3-.9.5-1.4.6l-.5 2.2h-3.4l-.5-2.2c-.5-.1-.9-.3-1.4-.6l-2 1.1-2.4-2.4 1.1-2c-.3-.4-.5-.9-.6-1.4l-2.2-.5v-3.4l2.2-.5c.1-.5.3-.9.6-1.4l-1.1-2 2.4-2.4 2 1.1c.4-.3.9-.5 1.4-.6l.5-2.2Zm1.7 5.2a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z" fill="currentColor"></path>
+      <path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6Z" fill="currentColor"></path>
+      <path fill-rule="evenodd" d="M11.29 2.042a.75.75 0 0 1 1.42 0l.277 1.156c.394.1.766.257 1.107.464l1.04-.543a.75.75 0 0 1 .904.18l1.004 1.004a.75.75 0 0 1 .18.904l-.543 1.04c.207.341.363.713.464 1.107l1.156.277a.75.75 0 0 1 0 1.42l-1.156.277a5.53 5.53 0 0 1-.464 1.107l.543 1.04a.75.75 0 0 1-.18.904l-1.004 1.004a.75.75 0 0 1-.904.18l-1.04-.543a5.523 5.523 0 0 1-1.107.464l-.277 1.156a.75.75 0 0 1-1.42 0l-.277-1.156a5.523 5.523 0 0 1-1.107-.464l-1.04.543a.75.75 0 0 1-.904-.18l-1.004-1.004a.75.75 0 0 1-.18-.904l.543-1.04a5.53 5.53 0 0 1-.464-1.107l-1.156-.277a.75.75 0 0 1 0-1.42l1.156-.277c.1-.394.257-.766.464-1.107l-.543-1.04a.75.75 0 0 1 .18-.904l1.004-1.004a.75.75 0 0 1 .904-.18l1.04.543c.341-.207.713-.363 1.107-.464l.277-1.156ZM12 7.5a4.5 4.5 0 1 0 0 9 4.5 4.5 0 0 0 0-9Z" clip-rule="evenodd" fill="currentColor"></path>
     </svg>
   `;
 }
@@ -294,7 +330,7 @@ function renderSettingsIcon() {
 function renderPlusIcon() {
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-      <path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6Z" fill="currentColor"></path>
+      <path d="M12 5.25a.75.75 0 0 1 .75.75v5.25H18a.75.75 0 0 1 0 1.5h-5.25V18a.75.75 0 0 1-1.5 0v-5.25H6a.75.75 0 0 1 0-1.5h5.25V6a.75.75 0 0 1 .75-.75Z" fill="currentColor"></path>
     </svg>
   `;
 }
@@ -303,7 +339,7 @@ function renderChevronIcon(direction) {
   const rotation = direction === "left" ? " style=\"transform: rotate(180deg)\"" : "";
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"${rotation}>
-      <path d="m9.2 6.7 5.3 5.3-5.3 5.3-1.4-1.4 3.9-3.9-3.9-3.9Z" fill="currentColor"></path>
+      <path fill-rule="evenodd" d="M16.28 11.47a.75.75 0 0 1 0 1.06l-7.5 7.5a.75.75 0 0 1-1.06-1.06L14.69 12 7.72 5.03a.75.75 0 0 1 1.06-1.06l7.5 7.5Z" clip-rule="evenodd" fill="currentColor"></path>
     </svg>
   `;
 }

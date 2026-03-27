@@ -4,11 +4,12 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
 
 use crate::{
-    PersistedPaneLayout, RuntimeState, SettingsRecord, ThemeId, WorkspaceTodoRecord,
+    CodexPaneRestoreBindingRecord, CodexRestoreBindingKind, PersistedPaneLayout, RuntimeState,
+    SettingsRecord, ThemeId, WorkspaceFileDraftRecord, WorkspaceTodoRecord,
 };
 
 const PERSISTENCE_FILE: &str = "workspaces.json";
-const MAX_PERSISTED_ACTIVITY_EVENTS: usize = 80;
+const MAX_PERSISTED_ACTIVITY_EVENTS: usize = 120;
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -50,6 +51,8 @@ pub(crate) struct PersistedWorkspace {
     #[serde(default)]
     pub(crate) codex_session_id: Option<String>,
     #[serde(default)]
+    pub(crate) pane_restore_bindings: Vec<PersistedWorkspacePaneRestoreBinding>,
+    #[serde(default)]
     pub(crate) pane_count: Option<u8>,
     #[serde(default)]
     pub(crate) layout_id: Option<String>,
@@ -57,6 +60,8 @@ pub(crate) struct PersistedWorkspace {
     pub(crate) pane_layout: Option<PersistedPaneLayout>,
     #[serde(default)]
     pub(crate) todos: Vec<PersistedWorkspaceTodo>,
+    #[serde(default)]
+    pub(crate) file_draft: Option<PersistedWorkspaceFileDraft>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -70,12 +75,42 @@ pub(crate) struct PersistedWorkspaceTodo {
     pub(crate) done: bool,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PersistedWorkspaceFileDraft {
+    pub(crate) relative_path: String,
+    #[serde(default)]
+    pub(crate) draft: String,
+    #[serde(default)]
+    pub(crate) base_version_token: String,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum PersistedWorkspacePaneRestoreKind {
+    Codex,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PersistedWorkspacePaneRestoreBinding {
+    pub(crate) slot_index: usize,
+    pub(crate) kind: PersistedWorkspacePaneRestoreKind,
+    pub(crate) session_id: String,
+    pub(crate) cwd: String,
+    #[serde(default)]
+    pub(crate) last_bound_at_ms: u64,
+}
+
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum ActivityEventKind {
     PaneReady,
     PaneClosed,
     PaneFailed,
+    GitTaskSucceeded,
+    GitTaskFailed,
+    GitTaskNeedsInput,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -83,6 +118,8 @@ pub(crate) enum ActivityEventKind {
 pub(crate) struct ActivityEventRecord {
     pub(crate) kind: ActivityEventKind,
     pub(crate) workspace_path: String,
+    #[serde(default)]
+    pub(crate) pane_id: String,
     pub(crate) label: String,
     #[serde(default)]
     pub(crate) error: String,
@@ -128,6 +165,17 @@ pub(crate) fn build_persisted_state(runtime: &RuntimeState) -> PersistedWorkspac
                 path: workspace.path.clone(),
                 name: Some(workspace.name.clone()),
                 codex_session_id: workspace.codex_session_id.clone(),
+                pane_restore_bindings: workspace
+                    .codex_restore_bindings
+                    .iter()
+                    .map(|binding| PersistedWorkspacePaneRestoreBinding {
+                        slot_index: binding.slot_index,
+                        kind: PersistedWorkspacePaneRestoreKind::Codex,
+                        session_id: binding.session_id.clone(),
+                        cwd: binding.cwd.clone(),
+                        last_bound_at_ms: binding.last_bound_at_ms,
+                    })
+                    .collect(),
                 pane_count: Some(workspace.layout.pane_count),
                 layout_id: None,
                 pane_layout: crate::persist_pane_layout(workspace),
@@ -140,6 +188,13 @@ pub(crate) fn build_persisted_state(runtime: &RuntimeState) -> PersistedWorkspac
                         done: todo.done,
                     })
                     .collect(),
+                file_draft: workspace.file_draft.as_ref().map(|draft| {
+                    PersistedWorkspaceFileDraft {
+                        relative_path: draft.relative_path.clone(),
+                        draft: draft.draft.clone(),
+                        base_version_token: draft.base_version_token.clone(),
+                    }
+                }),
             })
             .collect(),
         recent_activity: runtime
@@ -168,7 +223,7 @@ pub(crate) fn build_activity_snapshot(runtime: &RuntimeState) -> ActivitySnapsho
                 Some(ActivityEventSnapshot {
                     kind: event.kind,
                     workspace_id,
-                    pane_id: String::new(),
+                    pane_id: event.pane_id.clone(),
                     label: event.label.clone(),
                     error: event.error.clone(),
                     at: event.at,
@@ -181,35 +236,46 @@ pub(crate) fn build_activity_snapshot(runtime: &RuntimeState) -> ActivitySnapsho
 pub(crate) fn record_runtime_activity(
     runtime: &mut RuntimeState,
     workspace_id: &str,
+    pane_id: Option<&str>,
     kind: ActivityEventKind,
     label: &str,
     error: Option<&str>,
-) {
+) -> Option<ActivityEventSnapshot> {
     let Some(workspace_path) = runtime
         .workspaces
         .iter()
         .find(|workspace| workspace.id == workspace_id)
         .map(|workspace| workspace.path.clone())
     else {
-        return;
+        return None;
     };
 
-    runtime.activity_history.insert(
-        0,
-        ActivityEventRecord {
-            kind,
-            workspace_path,
-            label: label.to_string(),
-            error: error.unwrap_or_default().to_string(),
-            at: now_timestamp_ms(),
-        },
-    );
+    let event = ActivityEventRecord {
+        kind,
+        workspace_path,
+        pane_id: pane_id.unwrap_or_default().to_string(),
+        label: label.to_string(),
+        error: error.unwrap_or_default().to_string(),
+        at: now_timestamp_ms(),
+    };
+    let snapshot = ActivityEventSnapshot {
+        kind: event.kind,
+        workspace_id: workspace_id.to_string(),
+        pane_id: event.pane_id.clone(),
+        label: event.label.clone(),
+        error: event.error.clone(),
+        at: event.at,
+    };
+
+    runtime.activity_history.insert(0, event);
 
     if runtime.activity_history.len() > MAX_PERSISTED_ACTIVITY_EVENTS {
         runtime
             .activity_history
             .truncate(MAX_PERSISTED_ACTIVITY_EVENTS);
     }
+
+    Some(snapshot)
 }
 
 pub(crate) fn persist_to_disk(runtime: &RuntimeState) -> Result<(), String> {
@@ -249,6 +315,7 @@ pub(crate) fn load_persisted_from_disk(
     runtime.settings = SettingsRecord::default();
     runtime.activity_history.clear();
     runtime.sessions.clear();
+    runtime.pending_codex_starts.clear();
 
     if let Some(theme_id) = persisted
         .settings
@@ -306,8 +373,28 @@ pub(crate) fn load_persisted_from_disk(
                 workspace.codex_session_id = crate::normalize_optional_codex_session_id(
                     persisted_workspace.codex_session_id,
                 );
+                workspace.codex_restore_bindings = normalize_persisted_codex_restore_bindings(
+                    persisted_workspace.pane_restore_bindings,
+                    &workspace.path,
+                    workspace.panes.len(),
+                );
+                if workspace.codex_restore_bindings.is_empty() && pane_count == 1 {
+                    if let Some(session_id) = workspace.codex_session_id.clone() {
+                        workspace
+                            .codex_restore_bindings
+                            .push(CodexPaneRestoreBindingRecord {
+                                slot_index: 0,
+                                kind: CodexRestoreBindingKind::Codex,
+                                session_id,
+                                cwd: workspace.path.clone(),
+                                last_bound_at_ms: now_timestamp_ms(),
+                            });
+                    }
+                }
                 workspace.todos =
                     normalize_persisted_workspace_todos(runtime, persisted_workspace.todos);
+                workspace.file_draft =
+                    normalize_persisted_workspace_file_draft(persisted_workspace.file_draft);
                 workspace
             }
             Err(_) => continue,
@@ -412,4 +499,63 @@ fn normalize_persisted_workspace_todos(
 
     open_todos.extend(completed_todos);
     open_todos
+}
+
+fn normalize_persisted_codex_restore_bindings(
+    bindings: Vec<PersistedWorkspacePaneRestoreBinding>,
+    workspace_path: &str,
+    pane_count: usize,
+) -> Vec<CodexPaneRestoreBindingRecord> {
+    let mut normalized = Vec::new();
+    let mut seen_slots = HashSet::new();
+
+    for binding in bindings {
+        if binding.kind != PersistedWorkspacePaneRestoreKind::Codex {
+            continue;
+        }
+        if binding.slot_index >= pane_count || !seen_slots.insert(binding.slot_index) {
+            continue;
+        }
+        let Some(session_id) = crate::normalize_optional_codex_session_id(Some(binding.session_id))
+        else {
+            continue;
+        };
+        let cwd = if binding.cwd.trim().is_empty() {
+            workspace_path.to_string()
+        } else {
+            binding.cwd.trim().to_string()
+        };
+
+        normalized.push(CodexPaneRestoreBindingRecord {
+            slot_index: binding.slot_index,
+            kind: CodexRestoreBindingKind::Codex,
+            session_id,
+            cwd,
+            last_bound_at_ms: binding.last_bound_at_ms,
+        });
+    }
+
+    normalized.sort_by(|left, right| left.slot_index.cmp(&right.slot_index));
+    normalized
+}
+
+fn normalize_persisted_workspace_file_draft(
+    draft: Option<PersistedWorkspaceFileDraft>,
+) -> Option<WorkspaceFileDraftRecord> {
+    let draft = draft?;
+    let relative_path = crate::normalize_workspace_relative_path(&draft.relative_path).ok()?;
+    if relative_path.is_empty() {
+        return None;
+    }
+
+    let base_version_token = draft.base_version_token.trim().to_string();
+    if base_version_token.is_empty() {
+        return None;
+    }
+
+    Some(WorkspaceFileDraftRecord {
+        relative_path,
+        draft: draft.draft,
+        base_version_token,
+    })
 }

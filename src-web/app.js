@@ -18,8 +18,11 @@ import {
 } from "./workspace-strip.js";
 
 const MAX_PENDING_TERMINAL_BYTES = 4 * 1024 * 1024;
-const MAX_RUNTIME_ACTIVITY_ITEMS = 80;
+const MAX_RUNTIME_ACTIVITY_ITEMS = 120;
 const MAX_WORKSPACE_ATTENTION_COUNT = 99;
+const MAX_DISPATCH_TOASTS = 4;
+const DISPATCH_TOAST_LIFETIME_MS = 5000;
+const PANE_ATTENTION_LIFETIME_MS = 4500;
 const LAUNCHER_CARD_TRANSITION_MS = 360;
 const SYSTEM_HEALTH_IDLE_REFRESH_MS = 5000;
 const SYSTEM_HEALTH_PANEL_REFRESH_MS = 1000;
@@ -30,6 +33,7 @@ const MAX_INTERFACE_TEXT_SCALE = 1.2;
 const DEFAULT_TERMINAL_FONT_SIZE = 13.5;
 const MIN_TERMINAL_FONT_SIZE = 11;
 const MAX_TERMINAL_FONT_SIZE = 18;
+const WORKSPACE_FILE_DRAFT_PERSIST_DELAY_MS = 240;
 const COMPACT_PANE_HEIGHT = 420;
 const WORKSPACE_TAB_DRAG_THRESHOLD_PX = 6;
 const WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX = 32;
@@ -59,6 +63,18 @@ const RENDER_TODO_SURFACES = RENDER_STATUS | RENDER_MODAL;
 const RENDER_SOURCE_CONTROL_SURFACES = RENDER_STRIP | RENDER_STATUS | RENDER_MODAL;
 const RENDER_CODEX_SURFACES = RENDER_STATUS | RENDER_MODAL;
 const RENDER_FILE_EXPLORER_SURFACES = RENDER_STATUS | RENDER_EXPLORER;
+const WORKSPACE_OPEN_TARGET_META = Object.freeze({
+  cursor: { label: "Cursor", kind: "editor", shortLabel: "C" },
+  vscode: { label: "VS Code", kind: "editor", shortLabel: "VS" },
+  windsurf: { label: "Windsurf", kind: "editor", shortLabel: "W" },
+  zed: { label: "Zed", kind: "editor", shortLabel: "Z" },
+  xcode: { label: "Xcode", kind: "editor", shortLabel: "X" },
+  "android-studio": { label: "Android Studio", kind: "editor", shortLabel: "A" },
+  finder: { label: "Finder", kind: "system", shortLabel: "F" },
+  terminal: { label: "Terminal", kind: "system", shortLabel: ">" },
+  iterm2: { label: "iTerm2", kind: "system", shortLabel: "I" },
+  warp: { label: "Warp", kind: "system", shortLabel: "W" },
+});
 
 const THEME_REGISTRY = Object.freeze({
   "one-dark": {
@@ -611,6 +627,7 @@ const {
   workspacePaneIds,
   workspaceScreens,
   terminalViewportLines,
+  workspaceFileDraftPersistTimers,
 } = runtimeStore;
 window.__crewdockRenderDebug = runtimeStore.renderMetrics;
 
@@ -620,6 +637,8 @@ async function init() {
   document.body.dataset.platform = detectPlatform();
   uiState.snapshot = await bridge.getAppSnapshot();
   pruneWorkspaceFileExplorerState(uiState.snapshot);
+  pruneWorkspaceFileEditorState(uiState.snapshot);
+  pruneCodexRestoreState(uiState.snapshot);
   hydrateRuntimeActivityFromSnapshot(uiState.snapshot);
   applySnapshotSettings(uiState.snapshot);
 
@@ -627,8 +646,14 @@ async function init() {
     await bridge.listenState((snapshot) => {
       uiState.snapshot = snapshot;
       pruneWorkspaceFileExplorerState(snapshot);
+      pruneWorkspaceFileEditorState(snapshot);
+      pruneCodexRestoreState(snapshot);
       applySnapshotSettings(snapshot);
+      if (!snapshot.activeWorkspaceId) {
+        closeWorkspaceOpenMenu();
+      }
       requestRender(RENDER_ALL);
+      void restoreActiveWorkspaceFileDraft();
     });
   }
 
@@ -642,11 +667,15 @@ async function init() {
     await bridge.listenRuntimeEvents((event) => {
       const handledSourceControl = handleSourceControlRuntimeEvent(event);
       const handledActivity = recordRuntimeEvent(event);
+      const handledCodexRestore = handleCodexRestoreRuntimeEvent(event);
       if (handledSourceControl) {
         requestSourceControlRender();
       }
       if (handledActivity) {
         requestActivityRender();
+      }
+      if (handledCodexRestore) {
+        syncCodexRestorePaneDom(event.workspaceId, event.paneId);
       }
       if (
         handledSourceControl
@@ -686,8 +715,10 @@ async function init() {
   window.addEventListener("focus", handleWindowFocus);
   window.addEventListener("blur", handleWindowBlur);
   window.addEventListener("resize", handleWindowResize);
+  window.addEventListener("beforeunload", handleBeforeUnload);
 
   render();
+  void restoreActiveWorkspaceFileDraft();
   syncGitRefreshLoop();
   syncSystemHealthLoop();
   void loadSystemHealthSnapshot({ silent: true });
@@ -765,6 +796,17 @@ function pruneWorkspaceFileExplorerState(snapshot = uiState.snapshot) {
   }
 }
 
+function pruneCodexRestoreState(snapshot = uiState.snapshot) {
+  const paneIds = new Set(
+    (snapshot?.workspaces || []).flatMap((workspace) => workspace.panes?.map((pane) => pane.id) || []),
+  );
+  for (const paneId of uiState.codexRestoreByPane.keys()) {
+    if (!paneIds.has(paneId)) {
+      uiState.codexRestoreByPane.delete(paneId);
+    }
+  }
+}
+
 function normalizeWorkspaceFileExplorerRelativePath(value) {
   if (!value) {
     return "";
@@ -798,6 +840,50 @@ function clearWorkspaceFileExplorerCache(workspaceId) {
   state.directories.clear();
   state.loadingPaths.clear();
   state.errorByPath.clear();
+}
+
+function workspacePathDirname(relativePath) {
+  const normalizedPath = normalizeWorkspaceFileExplorerRelativePath(relativePath);
+  if (!normalizedPath.includes("/")) {
+    return "";
+  }
+
+  return normalizedPath.split("/").slice(0, -1).join("/");
+}
+
+function buildWorkspaceExplorerAncestorPaths(relativePath, { includeSelf = false } = {}) {
+  const normalizedPath = normalizeWorkspaceFileExplorerRelativePath(relativePath);
+  if (!normalizedPath) {
+    return [];
+  }
+
+  const segments = normalizedPath.split("/");
+  const limit = includeSelf ? segments.length : Math.max(segments.length - 1, 0);
+  const ancestors = [];
+  for (let index = 1; index <= limit; index += 1) {
+    ancestors.push(segments.slice(0, index).join("/"));
+  }
+  return ancestors;
+}
+
+function workspaceFileExplorerEntryExists(workspaceId, relativePath) {
+  const normalizedPath = normalizeWorkspaceFileExplorerRelativePath(relativePath);
+  if (!normalizedPath) {
+    return true;
+  }
+
+  const explorerState = getWorkspaceFileExplorerState(workspaceId, { create: false });
+  const parentPath = workspacePathDirname(normalizedPath);
+  const snapshot = explorerState?.directories.get(parentPath);
+  return Boolean(snapshot?.entries?.some((entry) => entry.relativePath === normalizedPath));
+}
+
+function resolveWorkspaceExplorerSelectionPath(workspaceId, relativePath) {
+  let selectionPath = normalizeWorkspaceFileExplorerRelativePath(relativePath);
+  while (selectionPath && !workspaceFileExplorerEntryExists(workspaceId, selectionPath)) {
+    selectionPath = workspacePathDirname(selectionPath);
+  }
+  return selectionPath;
 }
 
 async function loadWorkspaceFileExplorerDirectory(workspaceId, relativePath = "", { force = false } = {}) {
@@ -957,6 +1043,856 @@ function toggleWorkspaceFileExplorerDirectory(relativePath) {
   }
 }
 
+async function revealWorkspacePathInExplorer(
+  relativePath,
+  { closeSourceControl = false, parentFallback = false } = {},
+) {
+  const workspace = getActiveWorkspace();
+  if (!workspace) {
+    return false;
+  }
+
+  const normalizedPath = normalizeWorkspaceFileExplorerRelativePath(relativePath);
+  if (!normalizedPath) {
+    return false;
+  }
+
+  const explorerState = getWorkspaceFileExplorerState(workspace.id);
+  const wasVisible = isWorkspaceFileExplorerVisible(workspace.id);
+  openWorkspaceFileExplorer(workspace.id);
+  await loadWorkspaceFileExplorerDirectory(workspace.id, "");
+
+  const ancestorPaths = buildWorkspaceExplorerAncestorPaths(normalizedPath);
+  for (const ancestorPath of ancestorPaths) {
+    explorerState.expandedDirectories.add(ancestorPath);
+    await loadWorkspaceFileExplorerDirectory(workspace.id, ancestorPath);
+  }
+
+  const preferredSelection = parentFallback ? workspacePathDirname(normalizedPath) : normalizedPath;
+  explorerState.selectedPath = resolveWorkspaceExplorerSelectionPath(workspace.id, preferredSelection)
+    || resolveWorkspaceExplorerSelectionPath(workspace.id, normalizedPath)
+    || workspacePathDirname(normalizedPath)
+    || "";
+
+  if (closeSourceControl && uiState.gitPanelVisible) {
+    closeSourceControlPanel();
+    requestRender(RENDER_MODAL);
+  }
+
+  requestWorkspaceFileExplorerRender(RENDER_FILE_EXPLORER_SURFACES | (!wasVisible ? RENDER_TERMINALS : 0));
+  return true;
+}
+
+function canOpenSourceControlFileInEditor(file) {
+  return Boolean(file?.path) && file.kind !== "deleted";
+}
+
+function createWorkspaceFileEditorState() {
+  return {
+    activePath: "",
+    snapshot: null,
+    draft: "",
+    dirty: false,
+    loading: false,
+    saving: false,
+    loadError: "",
+    saveError: "",
+    notice: "",
+    conflict: false,
+    conflictSnapshot: null,
+    shouldFocus: false,
+    version: 0,
+    externalCheckInFlight: false,
+    restoredDraftKey: "",
+    recoveryInFlightKey: "",
+  };
+}
+
+function getWorkspaceFileEditorState(workspaceId, { create = true } = {}) {
+  if (!workspaceId) {
+    return null;
+  }
+
+  let state = uiState.workspaceFileEditor.get(workspaceId) || null;
+  if (!state && create) {
+    state = createWorkspaceFileEditorState();
+    uiState.workspaceFileEditor.set(workspaceId, state);
+  }
+
+  return state;
+}
+
+function pruneWorkspaceFileEditorState(snapshot = uiState.snapshot) {
+  const workspaceIds = new Set((snapshot?.workspaces || []).map((workspace) => workspace.id));
+  for (const workspaceId of uiState.workspaceFileEditor.keys()) {
+    if (!workspaceIds.has(workspaceId)) {
+      cancelWorkspaceFileDraftPersistence(workspaceId);
+      uiState.workspaceFileEditor.delete(workspaceId);
+    }
+  }
+}
+
+function clearWorkspaceFileEditorState(workspaceId) {
+  const state = getWorkspaceFileEditorState(workspaceId, { create: false });
+  if (!state) {
+    return;
+  }
+
+  state.version += 1;
+  state.activePath = "";
+  state.snapshot = null;
+  state.draft = "";
+  state.dirty = false;
+  state.loading = false;
+  state.saving = false;
+  state.loadError = "";
+  state.saveError = "";
+  state.notice = "";
+  state.conflict = false;
+  state.conflictSnapshot = null;
+  state.shouldFocus = false;
+  state.externalCheckInFlight = false;
+  state.restoredDraftKey = "";
+  state.recoveryInFlightKey = "";
+}
+
+function getActiveWorkspaceFileDraft() {
+  return getActiveWorkspace()?.fileDraft || null;
+}
+
+function buildWorkspaceFileDraftRecoveryKey(fileDraft) {
+  if (!fileDraft?.relativePath) {
+    return "";
+  }
+
+  return JSON.stringify([
+    String(fileDraft.relativePath || ""),
+    String(fileDraft.baseVersionToken || ""),
+    String(fileDraft.draft || ""),
+  ]);
+}
+
+function inferWorkspaceTextFileNewlineStyle(value) {
+  const normalized = String(value || "");
+  if (normalized.includes("\r\n")) {
+    return "crLf";
+  }
+  if (normalized.includes("\r")) {
+    return "cr";
+  }
+  return "lf";
+}
+
+function cancelWorkspaceFileDraftPersistence(workspaceId) {
+  const timer = workspaceFileDraftPersistTimers.get(workspaceId) || 0;
+  if (timer) {
+    window.clearTimeout(timer);
+    workspaceFileDraftPersistTimers.delete(workspaceId);
+  }
+}
+
+function syncWorkspaceFileDraftSnapshotState(workspaceId, fileDraft) {
+  if (!uiState.snapshot?.workspaces?.length) {
+    return;
+  }
+
+  const workspaceTab = uiState.snapshot.workspaces.find((workspace) => workspace.id === workspaceId);
+  if (workspaceTab) {
+    workspaceTab.hasFileDraft = Boolean(fileDraft);
+  }
+
+  if (uiState.snapshot.activeWorkspace?.id === workspaceId) {
+    uiState.snapshot.activeWorkspace.fileDraft = fileDraft ? { ...fileDraft } : null;
+  }
+}
+
+async function flushWorkspaceFileDraftPersistence(workspaceId = getActiveWorkspace()?.id || "") {
+  cancelWorkspaceFileDraftPersistence(workspaceId);
+
+  if (!workspaceId) {
+    return false;
+  }
+
+  const editorState = getWorkspaceFileEditorState(workspaceId, { create: false });
+  if (!editorState) {
+    return false;
+  }
+
+  try {
+    if (
+      editorState.activePath
+      && editorState.snapshot
+      && editorState.dirty
+      && typeof bridge.persistWorkspaceFileDraft === "function"
+    ) {
+      const nextDraft = {
+        relativePath: editorState.activePath,
+        draft: editorState.draft,
+        baseVersionToken: editorState.snapshot.versionToken,
+      };
+      await bridge.persistWorkspaceFileDraft(
+        workspaceId,
+        nextDraft.relativePath,
+        nextDraft.draft,
+        nextDraft.baseVersionToken,
+      );
+      syncWorkspaceFileDraftSnapshotState(workspaceId, nextDraft);
+      return true;
+    }
+
+    if (typeof bridge.clearWorkspaceFileDraft === "function") {
+      await bridge.clearWorkspaceFileDraft(workspaceId);
+      syncWorkspaceFileDraftSnapshotState(workspaceId, null);
+      return true;
+    }
+  } catch (error) {
+    console.error(error);
+  }
+
+  return false;
+}
+
+function scheduleWorkspaceFileDraftPersistence(
+  workspaceId = getActiveWorkspace()?.id || "",
+  { immediate = false } = {},
+) {
+  if (!workspaceId) {
+    return;
+  }
+
+  cancelWorkspaceFileDraftPersistence(workspaceId);
+  if (immediate) {
+    void flushWorkspaceFileDraftPersistence(workspaceId);
+    return;
+  }
+
+  const timer = window.setTimeout(() => {
+    workspaceFileDraftPersistTimers.delete(workspaceId);
+    void flushWorkspaceFileDraftPersistence(workspaceId);
+  }, WORKSPACE_FILE_DRAFT_PERSIST_DELAY_MS);
+  workspaceFileDraftPersistTimers.set(workspaceId, timer);
+}
+
+function normalizeWorkspaceTextFileSnapshot(snapshot, workspaceId, relativePath = "") {
+  const normalizedRelativePath = normalizeWorkspaceFileExplorerRelativePath(
+    snapshot?.relativePath || relativePath,
+  );
+  const newlineStyle = snapshot?.newlineStyle === "crLf" || snapshot?.newlineStyle === "cr"
+    ? snapshot.newlineStyle
+    : "lf";
+
+  return {
+    workspaceId,
+    relativePath: normalizedRelativePath,
+    content: String(snapshot?.content || ""),
+    sizeBytes: Number(snapshot?.sizeBytes || 0),
+    newlineStyle,
+    hasTrailingNewline: Boolean(snapshot?.hasTrailingNewline),
+    versionToken: String(snapshot?.versionToken || ""),
+    readOnly: Boolean(snapshot?.readOnly),
+    reason: snapshot?.reason ? String(snapshot.reason) : "",
+  };
+}
+
+function normalizeWorkspaceTextContentForComparison(value) {
+  return String(value || "").replaceAll("\r\n", "\n").replaceAll("\r", "\n");
+}
+
+function applyWorkspaceTextFileNewlineStyle(value, newlineStyle = "lf") {
+  const normalized = normalizeWorkspaceTextContentForComparison(value);
+  if (newlineStyle === "crLf") {
+    return normalized.replaceAll("\n", "\r\n");
+  }
+  if (newlineStyle === "cr") {
+    return normalized.replaceAll("\n", "\r");
+  }
+  return normalized;
+}
+
+function computeWorkspaceFileEditorDirty(editorState) {
+  const baseline = normalizeWorkspaceTextContentForComparison(editorState?.snapshot?.content || "");
+  const draft = normalizeWorkspaceTextContentForComparison(editorState?.draft || "");
+  return draft !== baseline;
+}
+
+function syncWorkspaceFileEditorDirtyState(editorState) {
+  if (!editorState) {
+    return false;
+  }
+
+  const nextDirty = computeWorkspaceFileEditorDirty(editorState);
+  const didChange = nextDirty !== editorState.dirty;
+  editorState.dirty = nextDirty;
+  return didChange;
+}
+
+function isWorkspaceFileEditorVisible(workspaceId = getActiveWorkspace()?.id || "") {
+  return Boolean(getWorkspaceFileEditorState(workspaceId, { create: false })?.activePath);
+}
+
+function hasDirtyWorkspaceFileEditor(workspaceId = getActiveWorkspace()?.id || "") {
+  return Boolean(getWorkspaceFileEditorState(workspaceId, { create: false })?.dirty);
+}
+
+function workspaceHasFileDraftIndicator(
+  workspaceId = getActiveWorkspace()?.id || "",
+  workspaceTab = getWorkspaceById(workspaceId),
+) {
+  if (!workspaceId) {
+    return false;
+  }
+
+  const editorState = getWorkspaceFileEditorState(workspaceId, { create: false });
+  if (editorState?.dirty) {
+    return true;
+  }
+
+  const activeWorkspace = getActiveWorkspace();
+  if (activeWorkspace?.id === workspaceId && activeWorkspace.fileDraft?.relativePath) {
+    return true;
+  }
+
+  return Boolean(workspaceTab?.hasFileDraft);
+}
+
+function getWorkspaceFileDraftIndicatorPath(
+  workspaceId = getActiveWorkspace()?.id || "",
+  workspaceTab = getWorkspaceById(workspaceId),
+) {
+  if (!workspaceId) {
+    return "";
+  }
+
+  const editorState = getWorkspaceFileEditorState(workspaceId, { create: false });
+  if (editorState?.activePath) {
+    return editorState.activePath;
+  }
+
+  const activeWorkspace = getActiveWorkspace();
+  if (activeWorkspace?.id === workspaceId && activeWorkspace.fileDraft?.relativePath) {
+    return normalizeWorkspaceFileExplorerRelativePath(activeWorkspace.fileDraft.relativePath);
+  }
+
+  return workspaceTab?.hasFileDraft ? "unsaved file draft" : "";
+}
+
+function getWorkspaceFileDraftIndicatorTitle(
+  workspaceId = getActiveWorkspace()?.id || "",
+  workspaceTab = getWorkspaceById(workspaceId),
+) {
+  const path = getWorkspaceFileDraftIndicatorPath(workspaceId, workspaceTab);
+  return path ? `Unsaved file draft: ${path}` : "Unsaved file draft";
+}
+
+function getWorkspaceFileEditorTitle(editorState) {
+  if (!editorState?.activePath) {
+    return "Editor";
+  }
+
+  return basename(editorState.activePath);
+}
+
+function getWorkspaceFileEditorStatusLabel(editorState) {
+  if (!editorState?.activePath) {
+    return "";
+  }
+  if (editorState.loading) {
+    return "Loading";
+  }
+  if (editorState.loadError) {
+    return "Error";
+  }
+  if (editorState.saving) {
+    return "Saving";
+  }
+  if (editorState.conflict) {
+    return "Conflict";
+  }
+  if (editorState.snapshot?.readOnly) {
+    return "Read only";
+  }
+  return editorState.dirty ? "Unsaved" : "Saved";
+}
+
+function syncWorkspaceFileEditorLiveDom(workspaceId = getActiveWorkspace()?.id || "") {
+  const shell = document.querySelector(`[data-workspace-file-editor="${workspaceId}"]`);
+  if (!(shell instanceof HTMLElement)) {
+    return;
+  }
+
+  const editorState = getWorkspaceFileEditorState(workspaceId, { create: false });
+  const visible = Boolean(editorState?.activePath);
+  shell.classList.toggle("is-visible", visible);
+  shell.setAttribute("aria-hidden", visible ? "false" : "true");
+
+  const title = shell.querySelector("[data-workspace-file-editor-title]");
+  if (title) {
+    title.textContent = getWorkspaceFileEditorTitle(editorState);
+  }
+
+  const status = shell.querySelector("[data-workspace-file-editor-status]");
+  if (status) {
+    status.textContent = getWorkspaceFileEditorStatusLabel(editorState);
+  }
+
+  const saveButton = shell.querySelector('[data-action="save-workspace-file"]');
+  if (saveButton instanceof HTMLButtonElement) {
+    saveButton.disabled = Boolean(
+      !editorState?.activePath
+      || editorState.loading
+      || editorState.saving
+      || editorState.conflict
+      || editorState.snapshot?.readOnly
+      || !editorState.dirty,
+    );
+  }
+}
+
+function confirmWorkspaceFileEditorDiscard(workspaceId, actionLabel = "continue") {
+  const editorState = getWorkspaceFileEditorState(workspaceId, { create: false });
+  if (!editorState?.dirty) {
+    return true;
+  }
+
+  const label = basename(editorState.activePath || "current file");
+  return window.confirm(
+    `Discard unsaved changes in ${label} and ${actionLabel}?`,
+  );
+}
+
+function captureWorkspaceFileEditorFocusState(root = document) {
+  const input = root.querySelector("[data-workspace-file-editor-input]");
+  if (!(input instanceof HTMLTextAreaElement)) {
+    return null;
+  }
+
+  return {
+    hasFocus: document.activeElement === input,
+    selectionStart: input.selectionStart,
+    selectionEnd: input.selectionEnd,
+    scrollTop: input.scrollTop,
+    scrollLeft: input.scrollLeft,
+  };
+}
+
+function restoreWorkspaceFileEditorFocusState(focusState, root = document) {
+  if (!focusState?.hasFocus) {
+    return;
+  }
+
+  const input = root.querySelector("[data-workspace-file-editor-input]");
+  if (!(input instanceof HTMLTextAreaElement)) {
+    return;
+  }
+
+  input.focus({ preventScroll: true });
+  input.selectionStart = focusState.selectionStart;
+  input.selectionEnd = focusState.selectionEnd;
+  input.scrollTop = focusState.scrollTop;
+  input.scrollLeft = focusState.scrollLeft;
+}
+
+async function restoreActiveWorkspaceFileDraft() {
+  const workspace = getActiveWorkspace();
+  const fileDraft = getActiveWorkspaceFileDraft();
+  if (!workspace || !fileDraft) {
+    return false;
+  }
+
+  const editorState = getWorkspaceFileEditorState(workspace.id);
+  if (!editorState || editorState.activePath || editorState.loading || editorState.saving) {
+    return false;
+  }
+
+  const recoveryKey = buildWorkspaceFileDraftRecoveryKey(fileDraft);
+  if (!recoveryKey || editorState.restoredDraftKey === recoveryKey || editorState.recoveryInFlightKey === recoveryKey) {
+    return false;
+  }
+
+  editorState.version += 1;
+  const requestVersion = editorState.version;
+  const wasVisible = isWorkspaceFileEditorVisible(workspace.id);
+  editorState.recoveryInFlightKey = recoveryKey;
+  editorState.activePath = String(fileDraft.relativePath || "");
+  editorState.loading = true;
+  editorState.loadError = "";
+  editorState.saveError = "";
+  editorState.notice = "";
+  editorState.conflict = false;
+  editorState.conflictSnapshot = null;
+  editorState.shouldFocus = false;
+  requestRender(RENDER_EXPLORER | (!wasVisible ? RENDER_TERMINALS : 0));
+
+  try {
+    const snapshot = normalizeWorkspaceTextFileSnapshot(
+      await bridge.loadWorkspaceTextFile(workspace.id, editorState.activePath),
+      workspace.id,
+      editorState.activePath,
+    );
+    if (editorState.version !== requestVersion) {
+      return false;
+    }
+
+    editorState.snapshot = snapshot;
+    editorState.draft = String(fileDraft.draft || "");
+    editorState.loading = false;
+    editorState.loadError = "";
+    editorState.saveError = "";
+    editorState.notice = "";
+    editorState.conflict = false;
+    editorState.conflictSnapshot = null;
+    syncWorkspaceFileEditorDirtyState(editorState);
+
+    if (snapshot.versionToken !== String(fileDraft.baseVersionToken || "")) {
+      if (editorState.dirty) {
+        editorState.conflict = true;
+        editorState.conflictSnapshot = snapshot;
+        editorState.saveError = "Recovered draft differs from the current disk version.";
+      }
+    } else if (editorState.dirty) {
+      editorState.notice = "Recovered unsaved draft from your last session.";
+    }
+
+    if (!editorState.dirty) {
+      scheduleWorkspaceFileDraftPersistence(workspace.id, { immediate: true });
+    }
+    editorState.restoredDraftKey = recoveryKey;
+    return true;
+  } catch (error) {
+    if (editorState.version !== requestVersion) {
+      return false;
+    }
+
+    const recoveredDraft = String(fileDraft.draft || "");
+    editorState.snapshot = {
+      workspaceId: workspace.id,
+      relativePath: String(fileDraft.relativePath || ""),
+      content: "",
+      sizeBytes: new TextEncoder().encode(recoveredDraft).length,
+      newlineStyle: inferWorkspaceTextFileNewlineStyle(recoveredDraft),
+      hasTrailingNewline: recoveredDraft.endsWith("\n") || recoveredDraft.endsWith("\r"),
+      versionToken: String(fileDraft.baseVersionToken || ""),
+      readOnly: true,
+      reason: "File is no longer available on disk. Draft recovered locally.",
+    };
+    editorState.draft = recoveredDraft;
+    editorState.loading = false;
+    editorState.loadError = "";
+    editorState.saveError = error instanceof Error
+      ? `Recovered draft, but the file could not be reopened: ${error.message}`
+      : "Recovered draft, but the file could not be reopened.";
+    editorState.notice = "";
+    editorState.conflict = false;
+    editorState.conflictSnapshot = null;
+    syncWorkspaceFileEditorDirtyState(editorState);
+    editorState.restoredDraftKey = recoveryKey;
+    return true;
+  } finally {
+    if (editorState.version === requestVersion) {
+      editorState.loading = false;
+      editorState.recoveryInFlightKey = "";
+    }
+    requestRender(RENDER_EXPLORER | (editorState.dirty ? (RENDER_STRIP | RENDER_STATUS) : 0));
+  }
+}
+
+async function openWorkspaceTextFile(relativePath, { forceReload = false } = {}) {
+  const workspace = getActiveWorkspace();
+  const editorState = getWorkspaceFileEditorState(workspace?.id);
+  if (!workspace || !editorState || typeof bridge.loadWorkspaceTextFile !== "function") {
+    return false;
+  }
+
+  const normalizedPath = normalizeWorkspaceFileExplorerRelativePath(relativePath);
+  if (!normalizedPath) {
+    return false;
+  }
+
+  if (
+    editorState.activePath
+    && editorState.activePath !== normalizedPath
+    && editorState.dirty
+    && !confirmWorkspaceFileEditorDiscard(workspace.id, "open another file")
+  ) {
+    return false;
+  }
+
+  const hadDirtyDraft = Boolean(editorState.dirty);
+  selectWorkspaceFileExplorerEntry(normalizedPath);
+  if (hadDirtyDraft) {
+    syncWorkspaceFileDraftSnapshotState(workspace.id, null);
+  }
+
+  const wasVisible = isWorkspaceFileEditorVisible(workspace.id);
+  if (
+    !forceReload
+    && editorState.activePath === normalizedPath
+    && editorState.snapshot
+    && !editorState.loadError
+    && !editorState.loading
+  ) {
+    editorState.shouldFocus = true;
+    requestRender(RENDER_EXPLORER | (!wasVisible ? RENDER_TERMINALS : 0));
+    return true;
+  }
+
+  editorState.version += 1;
+  const requestVersion = editorState.version;
+  editorState.activePath = normalizedPath;
+  editorState.loading = true;
+  editorState.saving = false;
+  editorState.loadError = "";
+  editorState.saveError = "";
+  editorState.notice = "";
+  editorState.conflict = false;
+  editorState.conflictSnapshot = null;
+  editorState.shouldFocus = true;
+  requestRender(
+    RENDER_EXPLORER
+    | (!wasVisible ? RENDER_TERMINALS : 0)
+    | (hadDirtyDraft ? (RENDER_STRIP | RENDER_STATUS) : 0),
+  );
+
+  try {
+    const snapshot = normalizeWorkspaceTextFileSnapshot(
+      await bridge.loadWorkspaceTextFile(workspace.id, normalizedPath),
+      workspace.id,
+      normalizedPath,
+    );
+    if (editorState.version !== requestVersion || editorState.activePath !== normalizedPath) {
+      return false;
+    }
+
+    editorState.snapshot = snapshot;
+    editorState.draft = snapshot.content;
+    editorState.dirty = false;
+    editorState.loading = false;
+    editorState.loadError = "";
+    editorState.saveError = "";
+    editorState.notice = "";
+    editorState.conflict = false;
+    editorState.conflictSnapshot = null;
+    return true;
+  } catch (error) {
+    if (editorState.version === requestVersion && editorState.activePath === normalizedPath) {
+      editorState.snapshot = null;
+      editorState.draft = "";
+      editorState.dirty = false;
+      editorState.loading = false;
+      editorState.loadError = error instanceof Error ? error.message : String(error || "Failed to load file.");
+      editorState.saveError = "";
+      editorState.notice = "";
+      editorState.conflict = false;
+      editorState.conflictSnapshot = null;
+    }
+    return false;
+  } finally {
+    if (editorState.version === requestVersion) {
+      editorState.loading = false;
+    }
+    scheduleWorkspaceFileDraftPersistence(workspace.id, { immediate: true });
+    requestRender(RENDER_EXPLORER | (hadDirtyDraft ? (RENDER_STRIP | RENDER_STATUS) : 0));
+  }
+}
+
+async function reloadWorkspaceTextFile({ forceDiscard = false } = {}) {
+  const workspace = getActiveWorkspace();
+  const editorState = getWorkspaceFileEditorState(workspace?.id, { create: false });
+  if (!workspace || !editorState?.activePath) {
+    return false;
+  }
+
+  if (editorState.dirty && !forceDiscard && !confirmWorkspaceFileEditorDiscard(workspace.id, "reload from disk")) {
+    return false;
+  }
+
+  return openWorkspaceTextFile(editorState.activePath, { forceReload: true });
+}
+
+async function saveWorkspaceTextFile({ forceConflict = false } = {}) {
+  const workspace = getActiveWorkspace();
+  const editorState = getWorkspaceFileEditorState(workspace?.id, { create: false });
+  if (
+    !workspace
+    || !editorState?.activePath
+    || !editorState.snapshot
+    || editorState.loading
+    || editorState.saving
+    || editorState.snapshot.readOnly
+    || !editorState.dirty
+    || typeof bridge.saveWorkspaceTextFile !== "function"
+  ) {
+    return false;
+  }
+
+  editorState.saving = true;
+  editorState.saveError = "";
+  editorState.notice = "";
+  requestRender(RENDER_EXPLORER);
+
+  const expectedVersionToken = forceConflict && editorState.conflictSnapshot?.versionToken
+    ? editorState.conflictSnapshot.versionToken
+    : editorState.snapshot.versionToken;
+  const serializedDraft = applyWorkspaceTextFileNewlineStyle(
+    editorState.draft,
+    editorState.snapshot.newlineStyle,
+  );
+
+  try {
+    const snapshot = normalizeWorkspaceTextFileSnapshot(
+      await bridge.saveWorkspaceTextFile(
+        workspace.id,
+        editorState.activePath,
+        serializedDraft,
+        expectedVersionToken,
+      ),
+      workspace.id,
+      editorState.activePath,
+    );
+    editorState.snapshot = snapshot;
+    editorState.draft = snapshot.content;
+    editorState.dirty = false;
+    editorState.saveError = "";
+    editorState.notice = "";
+    editorState.conflict = false;
+    editorState.conflictSnapshot = null;
+    editorState.shouldFocus = true;
+    syncWorkspaceFileDraftSnapshotState(workspace.id, null);
+    scheduleWorkspaceFileDraftPersistence(workspace.id, { immediate: true });
+    return true;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error || "Failed to save file.");
+    editorState.saveError = message;
+    if (message.toLowerCase().includes("save conflict")) {
+      try {
+        const latest = normalizeWorkspaceTextFileSnapshot(
+          await bridge.loadWorkspaceTextFile(workspace.id, editorState.activePath),
+          workspace.id,
+          editorState.activePath,
+        );
+        editorState.conflict = true;
+        editorState.conflictSnapshot = latest;
+        editorState.saveError = "This file changed on disk before CrewDock could save your draft.";
+      } catch {
+        editorState.conflict = true;
+      }
+    }
+    return false;
+  } finally {
+    editorState.saving = false;
+    requestRender(RENDER_EXPLORER | RENDER_STRIP | RENDER_STATUS);
+  }
+}
+
+async function copyWorkspaceTextFileDraft() {
+  const workspace = getActiveWorkspace();
+  const editorState = getWorkspaceFileEditorState(workspace?.id, { create: false });
+  if (!workspace || !editorState?.activePath || !navigator.clipboard?.writeText) {
+    return false;
+  }
+
+  try {
+    await navigator.clipboard.writeText(editorState.draft || "");
+    editorState.notice = "Draft copied to clipboard.";
+    requestRender(RENDER_EXPLORER);
+    return true;
+  } catch (error) {
+    editorState.saveError = error instanceof Error ? error.message : "Failed to copy draft.";
+    requestRender(RENDER_EXPLORER);
+    return false;
+  }
+}
+
+function closeWorkspaceFileEditor(workspaceId = getActiveWorkspace()?.id || "", { force = false } = {}) {
+  const editorState = getWorkspaceFileEditorState(workspaceId, { create: false });
+  if (!editorState?.activePath) {
+    return false;
+  }
+
+  if (!force && editorState.dirty && !confirmWorkspaceFileEditorDiscard(workspaceId, "close the editor")) {
+    return false;
+  }
+
+  clearWorkspaceFileEditorState(workspaceId);
+  syncWorkspaceFileDraftSnapshotState(workspaceId, null);
+  scheduleWorkspaceFileDraftPersistence(workspaceId, { immediate: true });
+  return true;
+}
+
+async function checkWorkspaceTextFileExternalChanges(workspaceId = getActiveWorkspace()?.id || "") {
+  const workspace = getWorkspaceById(workspaceId);
+  const editorState = getWorkspaceFileEditorState(workspaceId, { create: false });
+  if (
+    !workspace
+    || !editorState?.activePath
+    || !editorState.snapshot
+    || editorState.loading
+    || editorState.saving
+    || editorState.externalCheckInFlight
+    || typeof bridge.loadWorkspaceTextFile !== "function"
+  ) {
+    return false;
+  }
+
+  editorState.externalCheckInFlight = true;
+  try {
+    const latest = normalizeWorkspaceTextFileSnapshot(
+      await bridge.loadWorkspaceTextFile(workspaceId, editorState.activePath),
+      workspaceId,
+      editorState.activePath,
+    );
+    if (editorState.activePath !== latest.relativePath) {
+      return false;
+    }
+    if (latest.versionToken === editorState.snapshot.versionToken) {
+      return false;
+    }
+
+    if (editorState.dirty) {
+      editorState.conflict = true;
+      editorState.conflictSnapshot = latest;
+      editorState.saveError = "This file changed on disk while you were editing.";
+      editorState.notice = "";
+      requestRender(RENDER_EXPLORER);
+      return true;
+    }
+
+    editorState.snapshot = latest;
+    editorState.draft = latest.content;
+    editorState.dirty = false;
+    editorState.loadError = "";
+    editorState.saveError = "";
+    editorState.notice = "";
+    editorState.conflict = false;
+    editorState.conflictSnapshot = null;
+    requestRender(RENDER_EXPLORER);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    editorState.externalCheckInFlight = false;
+  }
+}
+
+async function openSourceControlPathInEditor(relativePath) {
+  const normalizedPath = normalizeWorkspaceFileExplorerRelativePath(relativePath);
+  if (!normalizedPath) {
+    return false;
+  }
+
+  const didOpen = await openWorkspaceTextFile(normalizedPath);
+  if (!didOpen) {
+    return false;
+  }
+
+  await revealWorkspacePathInExplorer(normalizedPath);
+  if (uiState.gitPanelVisible) {
+    closeSourceControlPanel();
+    requestRender(RENDER_MODAL);
+  }
+  return true;
+}
+
 function formatWorkspaceTodoSummary({ openCount, completedCount }) {
   if (openCount > 0 && completedCount > 0) {
     return `${openCount} open • ${completedCount} completed`;
@@ -997,7 +1933,9 @@ function setActivePaneId(paneId, workspace = getActiveWorkspace()) {
   }
 
   uiState.activePaneId = paneId;
+  clearPaneAttention(paneId);
   syncActivePaneSelection(workspace, paneId);
+  syncPaneAttentionDom();
   return paneId;
 }
 
@@ -2173,6 +3111,21 @@ async function handleClick(event) {
     return;
   }
 
+  if (target.dataset.action === "open-workspace-preferred-target") {
+    await openActiveWorkspaceInTarget();
+    return;
+  }
+
+  if (target.dataset.action === "toggle-workspace-open-menu") {
+    await toggleWorkspaceOpenMenu();
+    return;
+  }
+
+  if (target.dataset.action === "open-workspace-in-target") {
+    await openActiveWorkspaceInTarget(target.dataset.targetId || "");
+    return;
+  }
+
   if (target.dataset.action === "show-settings") {
     uiState.settingsVisible = true;
     uiState.settingsSection = "workbench";
@@ -2180,11 +3133,12 @@ async function handleClick(event) {
     closeCodexModal();
     closeSystemHealthPanel();
     closeSourceControlPanel();
+    closeWorkspaceOpenMenu();
     uiState.activityRailVisible = false;
     closeQuickSwitcher();
     uiState.pendingWorkspaceDraft = null;
     uiState.contextMenu = null;
-    requestPanelSurfacesRender();
+    requestRender(RENDER_STRIP | RENDER_PANEL_SURFACES);
     return;
   }
 
@@ -2209,6 +3163,7 @@ async function handleClick(event) {
     closeCodexModal();
     closeSystemHealthPanel();
     closeSourceControlPanel();
+    closeWorkspaceOpenMenu();
     uiState.activityRailVisible = false;
     closeQuickSwitcher();
     uiState.pendingWorkspaceDraft = null;
@@ -2219,7 +3174,11 @@ async function handleClick(event) {
   }
 
   if (target.dataset.action === "show-git-panel") {
+    const didCloseOpenMenu = closeWorkspaceOpenMenu();
     await openSourceControlPanel({ force: true });
+    if (didCloseOpenMenu) {
+      requestRender(RENDER_STRIP);
+    }
     return;
   }
 
@@ -2246,14 +3205,54 @@ async function handleClick(event) {
   }
 
   if (target.dataset.action === "select-file-explorer-entry") {
-    selectWorkspaceFileExplorerEntry(target.dataset.relativePath || "");
-    requestRender(RENDER_EXPLORER);
+    const relativePath = target.dataset.relativePath || "";
+    selectWorkspaceFileExplorerEntry(relativePath);
+    await openWorkspaceTextFile(relativePath);
+    return;
+  }
+
+  if (target.dataset.action === "reveal-workspace-file-in-explorer") {
+    const workspace = getActiveWorkspace();
+    const editorState = getWorkspaceFileEditorState(workspace?.id, { create: false });
+    if (editorState?.activePath) {
+      await revealWorkspacePathInExplorer(editorState.activePath);
+    }
+    return;
+  }
+
+  if (target.dataset.action === "close-workspace-file") {
+    if (closeWorkspaceFileEditor()) {
+      requestRender(RENDER_EXPLORER | RENDER_TERMINALS | RENDER_STRIP | RENDER_STATUS);
+    }
+    return;
+  }
+
+  if (target.dataset.action === "reload-workspace-file") {
+    await reloadWorkspaceTextFile({
+      forceDiscard: target.dataset.forceDiscard === "true",
+    });
+    return;
+  }
+
+  if (target.dataset.action === "save-workspace-file") {
+    await saveWorkspaceTextFile();
+    return;
+  }
+
+  if (target.dataset.action === "save-workspace-file-force") {
+    await saveWorkspaceTextFile({ forceConflict: true });
+    return;
+  }
+
+  if (target.dataset.action === "copy-workspace-file-draft") {
+    await copyWorkspaceTextFileDraft();
     return;
   }
 
   if (target.dataset.action === "toggle-todo-panel") {
+    closeWorkspaceOpenMenu();
     toggleTodoPanel();
-    requestPanelSurfacesRender();
+    requestRender(RENDER_STRIP | RENDER_STAGE | RENDER_STATUS | RENDER_ACTIVITY | RENDER_MODAL | RENDER_CONTEXT);
     return;
   }
 
@@ -2265,7 +3264,11 @@ async function handleClick(event) {
   }
 
   if (target.dataset.action === "show-codex-modal") {
+    const didCloseOpenMenu = closeWorkspaceOpenMenu();
     await openCodexModal();
+    if (didCloseOpenMenu) {
+      requestRender(RENDER_STRIP);
+    }
     return;
   }
 
@@ -2312,8 +3315,9 @@ async function handleClick(event) {
   }
 
   if (target.dataset.action === "toggle-system-health-panel") {
+    closeWorkspaceOpenMenu();
     toggleSystemHealthPanel();
-    requestPanelSurfacesRender();
+    requestRender(RENDER_STRIP | RENDER_STAGE | RENDER_STATUS | RENDER_ACTIVITY | RENDER_MODAL | RENDER_CONTEXT);
     if (uiState.systemHealthPanelVisible) {
       void loadSystemHealthSnapshot({ force: true });
     }
@@ -2333,8 +3337,9 @@ async function handleClick(event) {
   }
 
   if (target.dataset.action === "toggle-activity-rail") {
+    closeWorkspaceOpenMenu();
     toggleActivityRail();
-    requestPanelSurfacesRender();
+    requestRender(RENDER_STRIP | RENDER_STAGE | RENDER_STATUS | RENDER_ACTIVITY | RENDER_MODAL | RENDER_CONTEXT);
     return;
   }
 
@@ -2360,6 +3365,13 @@ async function handleClick(event) {
     return;
   }
 
+  if (target.dataset.action === "dismiss-dispatch-toast") {
+    if (dismissDispatchToast(target.dataset.dispatchToastId || "")) {
+      requestActivityRender();
+    }
+    return;
+  }
+
   if (target.dataset.action === "jump-to-activity-workspace") {
     const workspaceId = target.dataset.workspaceId;
     if (!workspaceId) {
@@ -2369,11 +3381,23 @@ async function handleClick(event) {
     if (workspaceId === uiState.snapshot?.activeWorkspaceId) {
       markWorkspaceAttentionSeen(workspaceId);
     } else {
-      await activateWorkspace(workspaceId);
+      if (!await activateWorkspace(workspaceId)) {
+        return;
+      }
     }
 
     uiState.activityRailVisible = false;
     render();
+    return;
+  }
+
+  if (target.dataset.action === "open-dispatch-item") {
+    await openDispatchItem({
+      workspaceId: target.dataset.workspaceId || "",
+      paneId: target.dataset.paneId || "",
+      kind: target.dataset.dispatchKind || "",
+      toastId: target.dataset.dispatchToastId || "",
+    });
     return;
   }
 
@@ -2583,6 +3607,10 @@ async function handleClick(event) {
       return;
     }
 
+    if (!confirmWorkspaceFileEditorDiscard(workspaceId, "close the workspace")) {
+      return;
+    }
+
     clearWorkspaceBuffers(workspaceId);
     uiState.runtimeAttentionByWorkspace.delete(workspaceId);
     uiState.runtimeActivity = uiState.runtimeActivity.filter((entry) => entry.workspaceId !== workspaceId);
@@ -2656,6 +3684,11 @@ function handlePointerDown(event) {
   if (uiState.contextMenu && !target?.closest(".terminal-context-menu")) {
     uiState.contextMenu = null;
     renderMask |= RENDER_CONTEXT;
+  }
+
+  if (uiState.workspaceOpenMenuVisible && !target?.closest("[data-workspace-open-shell]")) {
+    closeWorkspaceOpenMenu();
+    renderMask |= RENDER_STRIP;
   }
 
   if (
@@ -2934,7 +3967,12 @@ function renderWorkspaceStripRegion(
     workspaces: snapshot.workspaces,
     activeWorkspaceId: snapshot.activeWorkspaceId,
     workspaceRenameDraft: uiState.workspaceRenameDraft,
+    workspaceOpenControlHtml: snapshot.activeWorkspace
+      ? renderWorkspaceOpenControl(snapshot.activeWorkspace)
+      : "",
     getWorkspaceAttention,
+    hasWorkspaceFileDraftIndicator: workspaceHasFileDraftIndicator,
+    getWorkspaceFileDraftIndicatorTitle,
     escapeHtml,
     getGitTone,
     formatGitBadgeTitle,
@@ -3423,6 +4461,7 @@ function handleWindowFocus() {
   if (didClearAttention && activeWorkspaceId) {
     requestActivityRender();
   }
+  void checkWorkspaceTextFileExternalChanges(activeWorkspaceId);
   scheduleVisibleTerminalRefresh();
 }
 
@@ -3430,8 +4469,22 @@ function handleWindowBlur() {
   if (isWorkspaceTabDragActive()) {
     cancelWorkspaceTabDrag();
   }
+  void flushWorkspaceFileDraftPersistence(uiState.snapshot?.activeWorkspaceId || "");
   syncGitRefreshLoop();
   syncSystemHealthLoop();
+}
+
+function handleBeforeUnload(event) {
+  const hasDirtyEditor = Array.from(uiState.workspaceFileEditor.values()).some((state) => state?.dirty);
+  for (const workspaceId of uiState.workspaceFileEditor.keys()) {
+    void flushWorkspaceFileDraftPersistence(workspaceId);
+  }
+  if (!hasDirtyEditor) {
+    return;
+  }
+
+  event.preventDefault();
+  event.returnValue = "";
 }
 
 function handleFocusOut(event) {
@@ -3495,6 +4548,36 @@ async function handleSubmit(event) {
 }
 
 function handleInput(event) {
+  const fileEditorInput = event.target.closest("[data-workspace-file-editor-input]");
+  if (fileEditorInput) {
+    const workspace = getActiveWorkspace();
+    const editorState = getWorkspaceFileEditorState(workspace?.id, { create: false });
+    if (editorState) {
+      editorState.draft = fileEditorInput.value;
+      const shouldRefreshSurface = Boolean(
+        editorState.notice || (!editorState.conflict && editorState.saveError),
+      );
+      editorState.notice = "";
+      if (!editorState.conflict) {
+        editorState.saveError = "";
+      }
+      const dirtyDidChange = syncWorkspaceFileEditorDirtyState(editorState);
+      if (shouldRefreshSurface) {
+        requestRender(RENDER_EXPLORER | (dirtyDidChange ? (RENDER_STRIP | RENDER_STATUS) : 0));
+      } else {
+        syncWorkspaceFileEditorLiveDom(workspace?.id);
+        if (dirtyDidChange) {
+          if (!editorState.dirty) {
+            syncWorkspaceFileDraftSnapshotState(workspace?.id || "", null);
+          }
+          requestRender(RENDER_STRIP | RENDER_STATUS);
+        }
+      }
+      scheduleWorkspaceFileDraftPersistence(workspace?.id || "");
+    }
+    return;
+  }
+
   const workspaceTodoInput = event.target.closest("[data-workspace-todo-input]");
   if (workspaceTodoInput) {
     uiState.workspaceTodos.draft = workspaceTodoInput.value;
@@ -3596,6 +4679,23 @@ async function handleKeyDown(event) {
     return;
   }
 
+  const fileEditorInput = event.target.closest("[data-workspace-file-editor-input]");
+  if (fileEditorInput) {
+    if ((event.metaKey || event.ctrlKey) && !event.shiftKey && event.key.toLowerCase() === "s") {
+      event.preventDefault();
+      await saveWorkspaceTextFile();
+      return;
+    }
+
+    if (event.key === "Escape") {
+      event.preventDefault();
+      if (closeWorkspaceFileEditor()) {
+        requestRender(RENDER_EXPLORER | RENDER_TERMINALS | RENDER_STRIP | RENDER_STATUS);
+      }
+      return;
+    }
+  }
+
   const workspaceTodoEditInput = event.target.closest("[data-workspace-todo-edit-input]");
   if (workspaceTodoEditInput && event.key === "Escape") {
     event.preventDefault();
@@ -3642,8 +4742,7 @@ async function handleKeyDown(event) {
     if (event.key === "Enter") {
       event.preventDefault();
       const item = items[uiState.quickSwitcherCursor] || items[0] || null;
-      if (item) {
-        await activateWorkspace(item.id);
+      if (item && await activateWorkspace(item.id)) {
         render();
       }
       return;
@@ -3769,6 +4868,13 @@ async function handleKeyDown(event) {
     return;
   }
 
+  if (uiState.workspaceOpenMenuVisible && event.key === "Escape") {
+    event.preventDefault();
+    closeWorkspaceOpenMenu();
+    requestRender(RENDER_STRIP);
+    return;
+  }
+
   const input = event.target.closest("[data-launcher-path-input]");
   if (input) {
     if (event.key === "Tab" && !event.shiftKey && !event.altKey && !event.metaKey && !event.ctrlKey) {
@@ -3812,6 +4918,7 @@ async function handleKeyDown(event) {
     || uiState.todoPanelVisible
     || uiState.gitPanelVisible
     || uiState.systemHealthPanelVisible
+    || uiState.workspaceOpenMenuVisible
     || uiState.pendingWorkspaceDraft
   ) {
     return;
@@ -3875,7 +4982,26 @@ async function beginWorkspaceCreation() {
 
 async function activateWorkspace(workspaceId) {
   if (!workspaceId) {
-    return;
+    return false;
+  }
+
+  const activeWorkspaceId = uiState.snapshot?.activeWorkspaceId || "";
+  let shouldDiscardActiveEditor = false;
+  if (
+    activeWorkspaceId
+    && workspaceId !== activeWorkspaceId
+    && hasDirtyWorkspaceFileEditor(activeWorkspaceId)
+  ) {
+    if (!confirmWorkspaceFileEditorDiscard(activeWorkspaceId, "switch workspaces")) {
+      return false;
+    }
+    shouldDiscardActiveEditor = true;
+  }
+
+  if (shouldDiscardActiveEditor && activeWorkspaceId) {
+    clearWorkspaceFileEditorState(activeWorkspaceId);
+    syncWorkspaceFileDraftSnapshotState(activeWorkspaceId, null);
+    scheduleWorkspaceFileDraftPersistence(activeWorkspaceId, { immediate: true });
   }
 
   const keepSourceControlOpen = uiState.gitPanelVisible;
@@ -3893,12 +5019,15 @@ async function activateWorkspace(workspaceId) {
   uiState.gitPanelVisible = keepSourceControlOpen;
   uiState.pendingWorkspaceDraft = null;
   uiState.contextMenu = null;
+  closeWorkspaceOpenMenu();
   markWorkspaceAttentionSeen(workspaceId);
   closeQuickSwitcher();
   if (keepSourceControlOpen) {
     resetSourceControlState();
     void loadActiveWorkspaceSourceControl({ force: true });
   }
+
+  return true;
 }
 
 function openQuickSwitcher() {
@@ -5326,6 +6455,19 @@ async function handleSourceControlAction(target) {
         await loadSourceControlDiff(path, uiState.sourceControl.selectedDiffMode);
       }
       return;
+    case "scm-open-in-editor":
+      if (path) {
+        await openSourceControlPathInEditor(path);
+      }
+      return;
+    case "scm-reveal-in-explorer":
+      if (path) {
+        await revealWorkspacePathInExplorer(path, {
+          closeSourceControl: true,
+          parentFallback: target.dataset.parentFallback === "true",
+        });
+      }
+      return;
     case "scm-stage-path":
       await runSourceControlMutation(() => bridge.gitStagePaths(workspaceId, [path]));
       return;
@@ -5491,11 +6633,15 @@ function syncRuntimeActivityState(snapshot = uiState.snapshot) {
   }
 
   uiState.runtimeActivity = uiState.runtimeActivity.filter((entry) => workspaceIds.has(entry.workspaceId));
+  uiState.dispatchToasts = uiState.dispatchToasts.filter((entry) => workspaceIds.has(entry.workspaceId));
+  pruneExpiredDispatchToasts();
   uiState.activityRailScope = normalizeActivityScope(uiState.activityRailScope, snapshot);
 
   if (snapshot?.activeWorkspaceId && document.hasFocus()) {
     markWorkspaceAttentionSeen(snapshot.activeWorkspaceId);
   }
+
+  syncDispatchToastTimer();
 }
 
 function hydrateRuntimeActivityFromSnapshot(snapshot = uiState.snapshot) {
@@ -5504,26 +6650,7 @@ function hydrateRuntimeActivityFromSnapshot(snapshot = uiState.snapshot) {
     : [];
   uiState.runtimeAttentionByWorkspace = new Map();
   uiState.runtimeActivity = recentEvents
-    .map((event) => {
-      if (!event || typeof event !== "object" || !event.workspaceId || typeof event.kind !== "string") {
-        return null;
-      }
-
-      const normalized = {
-        kind: event.kind,
-        workspaceId: String(event.workspaceId),
-        paneId: String(event.paneId || ""),
-        label: String(event.label || "Terminal"),
-        error: event.error ? String(event.error) : "",
-        at: Number(event.at || 0),
-      };
-
-      return {
-        ...normalized,
-        tone: runtimeEventTone(normalized.kind),
-        message: formatRuntimeEventMessage(normalized),
-      };
-    })
+    .map((event) => buildRuntimeActivityEntry(normalizeActivityRecord(event)))
     .filter(Boolean);
 }
 
@@ -5599,12 +6726,7 @@ function recordRuntimeEvent(event) {
     return false;
   }
 
-  const nextEvent = {
-    ...normalizedEvent,
-    at: Date.now(),
-    tone: runtimeEventTone(normalizedEvent.kind),
-    message: formatRuntimeEventMessage(normalizedEvent),
-  };
+  const nextEvent = buildRuntimeActivityEntry(normalizedEvent);
   const currentAttention =
     uiState.runtimeAttentionByWorkspace.get(normalizedEvent.workspaceId) || {
       unreadCount: 0,
@@ -5626,37 +6748,138 @@ function recordRuntimeEvent(event) {
   if (uiState.runtimeActivity.length > MAX_RUNTIME_ACTIVITY_ITEMS) {
     uiState.runtimeActivity.length = MAX_RUNTIME_ACTIVITY_ITEMS;
   }
+
+  queueDispatchToast(nextEvent);
+  if (nextEvent.paneId) {
+    armPaneAttention(nextEvent.paneId, nextEvent.tone);
+  }
   return true;
 }
 
-function normalizeRuntimeEvent(event) {
+function normalizeCodexRestoreRuntimeEvent(event) {
   if (!event || typeof event !== "object") {
     return null;
   }
-
   if (!event.workspaceId || !event.paneId || typeof event.kind !== "string") {
     return null;
   }
-
-  if (!["paneReady", "paneClosed", "paneFailed"].includes(event.kind)) {
+  if (!["codexRestoreStarted", "codexRestoreSucceeded", "codexRestoreFailed"].includes(event.kind)) {
     return null;
   }
 
   return {
     kind: event.kind,
-    workspaceId: event.workspaceId,
-    paneId: event.paneId,
-    label: String(event.label || "Terminal"),
+    workspaceId: String(event.workspaceId),
+    paneId: String(event.paneId),
+    sessionId: event.sessionId ? String(event.sessionId) : "",
     error: event.error ? String(event.error) : "",
   };
+}
+
+function handleCodexRestoreRuntimeEvent(event) {
+  const normalizedEvent = normalizeCodexRestoreRuntimeEvent(event);
+  if (!normalizedEvent) {
+    return false;
+  }
+
+  const existingStatus = uiState.codexRestoreByPane.get(normalizedEvent.paneId) || null;
+  switch (normalizedEvent.kind) {
+    case "codexRestoreStarted":
+      uiState.codexRestoreByPane.set(normalizedEvent.paneId, {
+        tone: "restoring",
+        label: "Restoring Codex",
+        title: normalizedEvent.sessionId
+          ? `Restoring Codex session ${normalizedEvent.sessionId}.`
+          : "Restoring saved Codex session.",
+      });
+      return true;
+    case "codexRestoreSucceeded":
+      uiState.codexRestoreByPane.set(normalizedEvent.paneId, {
+        tone: "ready",
+        label: "Codex restored",
+        title: normalizedEvent.sessionId
+          ? `Restored Codex session ${normalizedEvent.sessionId}.`
+          : "Codex session restored.",
+      });
+      return true;
+    case "codexRestoreFailed":
+      uiState.codexRestoreByPane.set(normalizedEvent.paneId, {
+        tone: "failed",
+        label: "Restore failed",
+        title: normalizedEvent.error || existingStatus?.title || "CrewDock could not restore the saved Codex session.",
+      });
+      return true;
+    default:
+      return false;
+  }
+}
+
+function getPaneCodexRestoreStatus(paneId) {
+  return uiState.codexRestoreByPane.get(paneId) || null;
+}
+
+function renderPaneCodexRestoreStatus(paneId) {
+  const status = getPaneCodexRestoreStatus(paneId);
+  if (!status) {
+    return "";
+  }
+
+  return `
+    <span
+      class="terminal-pane-codex-status is-${escapeHtml(status.tone || "ready")}"
+      title="${escapeHtml(status.title || status.label || "")}"
+    >
+      ${escapeHtml(status.label || "Codex")}
+    </span>
+  `;
+}
+
+function syncCodexRestorePaneDom(workspaceId, paneId) {
+  const activeWorkspace = getActiveWorkspace();
+  if (!workspaceId || !paneId || activeWorkspace?.id !== workspaceId) {
+    return;
+  }
+
+  const paneElement = document.querySelector(`[data-pane-id="${paneId}"]`);
+  if (!(paneElement instanceof HTMLElement)) {
+    return;
+  }
+
+  const statusSlot = paneElement.querySelector("[data-pane-codex-restore]");
+  if (!(statusSlot instanceof HTMLElement)) {
+    return;
+  }
+
+  statusSlot.innerHTML = renderPaneCodexRestoreStatus(paneId);
+}
+
+function normalizeRuntimeEvent(event) {
+  if (!event || typeof event !== "object" || event.kind !== "activityRecorded") {
+    return null;
+  }
+
+  return normalizeActivityRecord(event.event);
+}
+
+function isDispatchActivityKind(kind) {
+  return [
+    "paneFailed",
+    "gitTaskSucceeded",
+    "gitTaskFailed",
+    "gitTaskNeedsInput",
+  ].includes(kind);
 }
 
 function runtimeEventTone(kind) {
   switch (kind) {
     case "paneFailed":
+    case "gitTaskFailed":
       return "failed";
+    case "gitTaskNeedsInput":
+      return "warning";
     case "paneClosed":
       return "closed";
+    case "gitTaskSucceeded":
     case "paneReady":
     default:
       return "ready";
@@ -5671,6 +6894,12 @@ function formatRuntimeEventMessage(event) {
       return `${label} failed${event.error ? `: ${event.error}` : ""}`;
     case "paneClosed":
       return `${label} closed`;
+    case "gitTaskFailed":
+      return `${label} failed${event.error ? `: ${event.error}` : ""}`;
+    case "gitTaskNeedsInput":
+      return `${label} needs input`;
+    case "gitTaskSucceeded":
+      return `${label} completed successfully`;
     case "paneReady":
     default:
       return `${label} is live`;
@@ -5684,6 +6913,8 @@ function getWorkspaceAttention(workspaceId) {
 function activityToneRank(tone) {
   switch (tone) {
     case "failed":
+      return 4;
+    case "warning":
       return 3;
     case "ready":
       return 2;
@@ -5778,6 +7009,8 @@ function buildActivityFeedItems(snapshot = uiState.snapshot) {
       return {
         ...entry,
         tone: entry.tone || runtimeEventTone(entry.kind),
+        kind: entry.kind,
+        paneId: entry.paneId || "",
         workspaceLabel: labels.get(entry.workspaceId) || workspace.name,
         path: workspace.path,
         pathLabel: compactWorkspacePath(workspace.path),
@@ -5786,6 +7019,253 @@ function buildActivityFeedItems(snapshot = uiState.snapshot) {
       };
     })
     .filter(Boolean);
+}
+
+function normalizeActivityRecord(event) {
+  if (!event || typeof event !== "object" || !event.workspaceId || typeof event.kind !== "string") {
+    return null;
+  }
+
+  const kind = String(event.kind);
+  if (!isDispatchActivityKind(kind)) {
+    return null;
+  }
+
+  const defaultLabel = kind.startsWith("gitTask") ? "Git task" : "Terminal";
+  return {
+    kind,
+    workspaceId: String(event.workspaceId),
+    paneId: String(event.paneId || ""),
+    label: String(event.label || defaultLabel),
+    error: event.error ? String(event.error) : "",
+    at: Number(event.at || Date.now()),
+  };
+}
+
+function buildRuntimeActivityEntry(event) {
+  if (!event) {
+    return null;
+  }
+
+  return {
+    ...event,
+    tone: runtimeEventTone(event.kind),
+    message: formatRuntimeEventMessage(event),
+  };
+}
+
+function buildDispatchToasts(snapshot = uiState.snapshot) {
+  const workspaces = snapshot?.workspaces || [];
+  const labels = buildWorkspaceTabLabels(workspaces);
+
+  return uiState.dispatchToasts
+    .map((toast) => {
+      const workspace = getWorkspaceById(toast.workspaceId, snapshot);
+      if (!workspace) {
+        return null;
+      }
+
+      return {
+        ...toast,
+        workspaceLabel: labels.get(toast.workspaceId) || workspace.name,
+        path: workspace.path,
+      };
+    })
+    .filter(Boolean);
+}
+
+function resolveDispatchToastSpec(event) {
+  if (uiState.activityRailVisible) {
+    return null;
+  }
+
+  const isActiveWorkspace = event.workspaceId === uiState.snapshot?.activeWorkspaceId;
+  const isFocusedWindow = document.hasFocus();
+
+  switch (event.kind) {
+    case "paneFailed":
+    case "gitTaskFailed":
+    case "gitTaskNeedsInput":
+      return { sticky: true };
+    case "gitTaskSucceeded":
+      return isActiveWorkspace && isFocusedWindow ? null : { sticky: false };
+    default:
+      return null;
+  }
+}
+
+function queueDispatchToast(event) {
+  const spec = resolveDispatchToastSpec(event);
+  if (!spec) {
+    return false;
+  }
+
+  const toast = {
+    ...event,
+    id: `dispatch-toast-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    autoDismissAt: spec.sticky ? null : Date.now() + DISPATCH_TOAST_LIFETIME_MS,
+  };
+
+  uiState.dispatchToasts.unshift(toast);
+  if (uiState.dispatchToasts.length > MAX_DISPATCH_TOASTS) {
+    uiState.dispatchToasts.length = MAX_DISPATCH_TOASTS;
+  }
+  return true;
+}
+
+function dismissDispatchToast(toastId) {
+  if (!toastId) {
+    return false;
+  }
+
+  const nextToasts = uiState.dispatchToasts.filter((toast) => toast.id !== toastId);
+  if (nextToasts.length === uiState.dispatchToasts.length) {
+    return false;
+  }
+
+  uiState.dispatchToasts = nextToasts;
+  syncDispatchToastTimer();
+  return true;
+}
+
+function pruneExpiredDispatchToasts(now = Date.now()) {
+  const nextToasts = uiState.dispatchToasts.filter(
+    (toast) => !toast.autoDismissAt || toast.autoDismissAt > now,
+  );
+  const didChange = nextToasts.length !== uiState.dispatchToasts.length;
+  if (didChange) {
+    uiState.dispatchToasts = nextToasts;
+  }
+  return didChange;
+}
+
+function syncDispatchToastTimer() {
+  const nextDeadline = uiState.dispatchToasts
+    .map((toast) => Number(toast.autoDismissAt || 0))
+    .filter((deadline) => deadline > 0)
+    .sort((left, right) => left - right)[0] || 0;
+
+  if (!nextDeadline) {
+    if (runtimeStore.dispatchToastTimer) {
+      clearTimeout(runtimeStore.dispatchToastTimer);
+      runtimeStore.dispatchToastTimer = 0;
+      runtimeStore.dispatchToastDeadline = 0;
+    }
+    return;
+  }
+
+  if (
+    runtimeStore.dispatchToastTimer
+    && runtimeStore.dispatchToastDeadline === nextDeadline
+  ) {
+    return;
+  }
+
+  if (runtimeStore.dispatchToastTimer) {
+    clearTimeout(runtimeStore.dispatchToastTimer);
+  }
+
+  runtimeStore.dispatchToastDeadline = nextDeadline;
+  runtimeStore.dispatchToastTimer = window.setTimeout(() => {
+    runtimeStore.dispatchToastTimer = 0;
+    runtimeStore.dispatchToastDeadline = 0;
+    if (pruneExpiredDispatchToasts()) {
+      requestActivityRender();
+    }
+    syncDispatchToastTimer();
+  }, Math.max(0, nextDeadline - Date.now()));
+}
+
+function armPaneAttention(paneId, tone) {
+  if (!paneId || !tone) {
+    return false;
+  }
+
+  const nextTone = tone === "warning" || tone === "failed" ? tone : "ready";
+  uiState.paneAttentionById.set(paneId, nextTone);
+
+  const existingTimer = runtimeStore.paneAttentionTimers.get(paneId) || 0;
+  if (existingTimer) {
+    clearTimeout(existingTimer);
+  }
+
+  const timeoutId = window.setTimeout(() => {
+    runtimeStore.paneAttentionTimers.delete(paneId);
+    if (uiState.paneAttentionById.delete(paneId)) {
+      requestActivityRender();
+    }
+  }, PANE_ATTENTION_LIFETIME_MS);
+
+  runtimeStore.paneAttentionTimers.set(paneId, timeoutId);
+  return true;
+}
+
+function clearPaneAttention(paneId) {
+  if (!paneId) {
+    return false;
+  }
+
+  const timeoutId = runtimeStore.paneAttentionTimers.get(paneId) || 0;
+  if (timeoutId) {
+    clearTimeout(timeoutId);
+    runtimeStore.paneAttentionTimers.delete(paneId);
+  }
+
+  return uiState.paneAttentionById.delete(paneId);
+}
+
+function syncPaneAttentionDom() {
+  for (const paneElement of document.querySelectorAll("[data-pane-id]")) {
+    const tone = uiState.paneAttentionById.get(paneElement.dataset.paneId || "") || "";
+    paneElement.dataset.dispatchAttention = tone ? "true" : "false";
+    paneElement.dataset.dispatchTone = tone;
+  }
+}
+
+async function openDispatchItem({
+  workspaceId,
+  paneId = "",
+  kind = "",
+  toastId = "",
+} = {}) {
+  if (!workspaceId) {
+    return;
+  }
+
+  if (toastId) {
+    dismissDispatchToast(toastId);
+  }
+
+  if (workspaceId !== uiState.snapshot?.activeWorkspaceId) {
+    if (!await activateWorkspace(workspaceId)) {
+      requestActivityRender();
+      return;
+    }
+  } else {
+    markWorkspaceAttentionSeen(workspaceId);
+  }
+
+  const workspace = getWorkspaceById(workspaceId);
+  if (!workspace) {
+    requestActivityRender();
+    return;
+  }
+
+  if (kind.startsWith("gitTask")) {
+    await openSourceControlPanel({ force: true });
+    if (uiState.sourceControl.snapshot?.task) {
+      uiState.sourceControl.taskTrayExpanded = true;
+      requestRender(RENDER_MODAL);
+    }
+    return;
+  }
+
+  if (paneId && workspace.panes.some((pane) => pane.id === paneId)) {
+    claimPaneTerminalFocus(paneId, workspace);
+  }
+
+  uiState.activityRailVisible = false;
+  requestActivityRender();
 }
 
 function startWorkspaceRename(workspaceId) {
@@ -6001,6 +7481,8 @@ function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskInterse
   applyRenderedSettings(snapshot);
   syncRuntimeActivityState(snapshot);
   pruneWorkspaceFileExplorerState(snapshot);
+  pruneWorkspaceFileEditorState(snapshot);
+  pruneCodexRestoreState(snapshot);
   ensureFrame();
 
   const activeWorkspace = snapshot.activeWorkspace;
@@ -6079,6 +7561,7 @@ function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskInterse
       ...getRuntimeActivitySummary(snapshot),
       workspaceSummaries: activityVisible ? buildActivityWorkspaceSummaries(snapshot) : [],
       items: activityVisible ? buildActivityFeedItems(snapshot) : [],
+      toasts: activityVisible ? [] : buildDispatchToasts(snapshot),
       escapeHtml,
     });
     recordRenderMetric("activity");
@@ -6178,6 +7661,7 @@ function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskInterse
   if (uiState.quickSwitcherVisible && uiState.quickSwitcherShouldFocus) {
     focusQuickSwitcherInput();
   }
+  syncPaneAttentionDom();
   syncGitRefreshLoop();
   syncSystemHealthLoop();
 
@@ -6262,6 +7746,7 @@ function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskInterse
 
   if (!renderMaskIncludes(mask, RENDER_STAGE)) {
     syncWorkspaceFileExplorerSurface(activeWorkspace);
+    syncWorkspaceFileEditorSurface(activeWorkspace);
     recordRenderMetric("explorer");
     if (refreshVisibleTerminals) {
       scheduleVisibleTerminalRefresh(activeWorkspace);
@@ -6277,6 +7762,7 @@ function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskInterse
     recordRenderMetric("terminals");
   }
   recordRenderMetric("stage");
+  syncPaneAttentionDom();
 }
 
 function renderBranchIcon() {
@@ -6331,6 +7817,16 @@ function renderFolderIcon() {
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
       <path d="M4.5 7.5A2.5 2.5 0 0 1 7 5h3l1.6 1.8H17A2.5 2.5 0 0 1 19.5 9.3v6.2A2.5 2.5 0 0 1 17 18H7a2.5 2.5 0 0 1-2.5-2.5V7.5Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></path>
+    </svg>
+  `;
+}
+
+function renderWorkspaceTerminalIcon() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M4.5 6.5A2.5 2.5 0 0 1 7 4h10a2.5 2.5 0 0 1 2.5 2.5v11A2.5 2.5 0 0 1 17 20H7a2.5 2.5 0 0 1-2.5-2.5v-11Z" fill="none" stroke="currentColor" stroke-width="1.6"></path>
+      <path d="m8 9 2.5 2.5L8 14" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></path>
+      <path d="M12.5 15H16" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"></path>
     </svg>
   `;
 }
@@ -6463,12 +7959,16 @@ function renderStatusBarGitButton(summary) {
 
 function renderStatusBarFilesButton(activeWorkspace) {
   const isOpen = isWorkspaceFileExplorerVisible(activeWorkspace.id);
-  const title = isOpen
-    ? `Hide the file explorer for ${activeWorkspace.name}`
-    : `Show the file explorer for ${activeWorkspace.name}`;
+  const hasDraft = workspaceHasFileDraftIndicator(activeWorkspace.id, activeWorkspace);
+  const title = [
+    isOpen
+      ? `Hide the file explorer for ${activeWorkspace.name}`
+      : `Show the file explorer for ${activeWorkspace.name}`,
+    hasDraft ? getWorkspaceFileDraftIndicatorTitle(activeWorkspace.id, activeWorkspace) : "",
+  ].filter(Boolean).join("\n");
   return `
     <button
-      class="workspace-statusbar-item workspace-statusbar-button is-neutral ${isOpen ? "is-panel-open" : ""}"
+      class="workspace-statusbar-item workspace-statusbar-button ${hasDraft ? "is-dirty" : "is-neutral"} ${isOpen ? "is-panel-open" : ""}"
       type="button"
       data-action="toggle-file-explorer"
       title="${escapeHtml(title)}"
@@ -6477,6 +7977,7 @@ function renderStatusBarFilesButton(activeWorkspace) {
     >
       <span class="workspace-statusbar-icon" aria-hidden="true">${renderFolderIcon()}</span>
       <span>Files</span>
+      ${hasDraft ? '<span class="workspace-statusbar-draft-dot" aria-hidden="true"></span>' : ""}
     </button>
   `;
 }
@@ -6531,10 +8032,10 @@ function renderStatusBarTodoButton(activeWorkspace) {
 function renderStatusBarActivityButton(summary) {
   const unreadLabel = summary.totalUnreadCount > 0 ? ` ${summary.totalUnreadCount}` : "";
   const title = summary.totalUnreadCount > 0
-    ? `${summary.totalUnreadCount} unread updates across ${summary.unreadWorkspaceCount} ${summary.unreadWorkspaceCount === 1 ? "workspace" : "workspaces"}`
+    ? `${summary.totalUnreadCount} unread dispatches across ${summary.unreadWorkspaceCount} ${summary.unreadWorkspaceCount === 1 ? "workspace" : "workspaces"}`
     : summary.hasActivity
-      ? `${uiState.runtimeActivity.length} recent activity ${uiState.runtimeActivity.length === 1 ? "event" : "events"}`
-      : "No recent activity yet";
+      ? `${uiState.runtimeActivity.length} recent dispatch ${uiState.runtimeActivity.length === 1 ? "event" : "events"}`
+      : "No recent dispatch yet";
 
   return `
     <button
@@ -6546,7 +8047,7 @@ function renderStatusBarActivityButton(summary) {
       aria-pressed="${uiState.activityRailVisible ? "true" : "false"}"
     >
       <span class="workspace-statusbar-icon" aria-hidden="true">${renderActivityIcon()}</span>
-      <span>Activity${escapeHtml(unreadLabel)}</span>
+      <span>Dispatch${escapeHtml(unreadLabel)}</span>
     </button>
   `;
 }
@@ -7746,8 +9247,8 @@ function renderSettingsGuide(primaryModifier) {
       keys: [primaryModifier, "Shift", "G"],
     },
     {
-      label: "Open activity rail",
-      copy: "Review unread workspace changes without leaving the keyboard.",
+      label: "Open dispatch",
+      copy: "Review unread workspace updates without leaving the keyboard.",
       keys: [primaryModifier, "Shift", "A"],
     },
     {
@@ -8608,6 +10109,7 @@ function renderSourceControlRowMenu(kind, key, items) {
                       class="workspace-scm-row-menu-item ${item.tone === "danger" ? "is-danger" : ""}"
                       data-action="${escapeHtml(item.action)}"
                       ${item.path ? `data-path="${escapeHtml(item.path)}"` : ""}
+                      ${item.parentFallback ? 'data-parent-fallback="true"' : ""}
                       ${item.branchName ? `data-branch-name="${escapeHtml(item.branchName)}"` : ""}
                       ${item.startPoint ? `data-start-point="${escapeHtml(item.startPoint)}"` : ""}
                       ${item.upstreamName ? `data-upstream-name="${escapeHtml(item.upstreamName)}"` : ""}
@@ -8629,6 +10131,7 @@ function renderSourceControlRowMenu(kind, key, items) {
 function renderSourceControlFileRow(file, sectionKey) {
   const pathParts = splitGitFilePath(file.path);
   const presentation = getGitFilePresentation(file);
+  const canOpenInEditor = canOpenSourceControlFileInEditor(file);
   const secondaryParts = [];
   if (pathParts.directory) {
     secondaryParts.push(pathParts.directory);
@@ -8642,6 +10145,19 @@ function renderSourceControlFileRow(file, sectionKey) {
     ? { action: "scm-unstage-path", label: "Unstage" }
     : { action: "scm-stage-path", label: "Stage" };
   const menu = renderSourceControlRowMenu("file", file.path, [
+    ...(canOpenInEditor
+      ? [{
+          action: "scm-open-in-editor",
+          label: "Edit file",
+          path: file.path,
+        }]
+      : []),
+    {
+      action: "scm-reveal-in-explorer",
+      label: canOpenInEditor ? "Reveal in explorer" : "Reveal parent in explorer",
+      path: file.path,
+      parentFallback: !canOpenInEditor,
+    },
     {
       action: "scm-discard-path",
       label: "Discard",
@@ -8684,12 +10200,13 @@ function renderSourceControlDiffPanel(selectedFile) {
   if (!selectedFile) {
     return renderSourceControlEmpty(
       "Select a file",
-      "Choose a change to review the diff. CrewDock keeps the view read-only and pushes editing back to your terminals.",
+      "Choose a change to review the diff. CrewDock keeps the view read-only; use the Explorer to edit files.",
     );
   }
 
   const diff = uiState.sourceControl.diff;
   const diffModes = getSourceControlDiffModes(selectedFile);
+  const canOpenInEditor = canOpenSourceControlFileInEditor(selectedFile);
 
   return `
     <div class="workspace-scm-detail-shell">
@@ -8698,29 +10215,51 @@ function renderSourceControlDiffPanel(selectedFile) {
           <p class="workspace-scm-detail-kicker">${escapeHtml(formatGitFileKindLabel(selectedFile.kind))}</p>
           <strong title="${escapeHtml(selectedFile.path)}">${escapeHtml(selectedFile.path)}</strong>
         </div>
-        ${
-          diffModes.length > 1
-            ? `
-              <div class="workspace-scm-detail-toggle">
-                ${diffModes
-                  .map(
-                    (mode) => `
-                      <button
-                        type="button"
-                        class="workspace-scm-toggle-button ${uiState.sourceControl.selectedDiffMode === mode.id ? "is-active" : ""}"
-                        data-action="scm-set-diff-mode"
-                        data-path="${escapeHtml(selectedFile.path)}"
-                        data-diff-mode="${mode.id}"
-                      >
-                        ${mode.label}
-                      </button>
-                    `,
-                  )
-                  .join("")}
-              </div>
-            `
-            : ""
-        }
+        <div class="workspace-scm-detail-controls">
+          <div class="workspace-scm-detail-actions">
+            <button
+              type="button"
+              class="workspace-scm-inline-action"
+              data-action="scm-open-in-editor"
+              data-path="${escapeHtml(selectedFile.path)}"
+              ${canOpenInEditor ? "" : "disabled"}
+            >
+              Edit file
+            </button>
+            <button
+              type="button"
+              class="workspace-scm-inline-action"
+              data-action="scm-reveal-in-explorer"
+              data-path="${escapeHtml(selectedFile.path)}"
+              ${canOpenInEditor ? "" : 'data-parent-fallback="true"'}
+            >
+              ${canOpenInEditor ? "Reveal in explorer" : "Reveal parent"}
+            </button>
+          </div>
+          ${
+            diffModes.length > 1
+              ? `
+                <div class="workspace-scm-detail-toggle">
+                  ${diffModes
+                    .map(
+                      (mode) => `
+                        <button
+                          type="button"
+                          class="workspace-scm-toggle-button ${uiState.sourceControl.selectedDiffMode === mode.id ? "is-active" : ""}"
+                          data-action="scm-set-diff-mode"
+                          data-path="${escapeHtml(selectedFile.path)}"
+                          data-diff-mode="${mode.id}"
+                        >
+                          ${mode.label}
+                        </button>
+                      `,
+                    )
+                    .join("")}
+                </div>
+              `
+              : ""
+          }
+        </div>
       </header>
       ${
         uiState.sourceControl.diffLoading
@@ -9722,6 +11261,323 @@ function relabelMockPanes(panes) {
   });
 }
 
+function normalizeWorkspaceOpenTarget(target) {
+  if (!target || typeof target !== "object" || !target.id) {
+    return null;
+  }
+
+  const id = String(target.id);
+  const fallback = WORKSPACE_OPEN_TARGET_META[id] || {};
+  return {
+    id,
+    label: String(target.label || fallback.label || id),
+    kind: String(target.kind || fallback.kind || "editor") === "system" ? "system" : "editor",
+    iconDataUrl: typeof target.iconDataUrl === "string" ? target.iconDataUrl : "",
+  };
+}
+
+function closeWorkspaceOpenMenu() {
+  if (!uiState.workspaceOpenMenuVisible) {
+    return false;
+  }
+
+  uiState.workspaceOpenMenuVisible = false;
+  return true;
+}
+
+async function ensureWorkspaceOpenTargetsLoaded({ force = false } = {}) {
+  if (!bridge.listExternalWorkspaceTargets) {
+    uiState.workspaceOpenTargets = [];
+    uiState.workspaceOpenTargetsError = "External app launching is unavailable in this environment.";
+    return [];
+  }
+
+  if (runtimeStore.workspaceOpenTargetsRequest && !force) {
+    return runtimeStore.workspaceOpenTargetsRequest;
+  }
+
+  uiState.workspaceOpenTargetsLoading = true;
+  if (force) {
+    uiState.workspaceOpenTargetsError = "";
+  }
+  requestRender(RENDER_STRIP);
+
+  const request = Promise.resolve(bridge.listExternalWorkspaceTargets())
+    .then((targets) => {
+      const normalizedTargets = Array.isArray(targets)
+        ? targets
+          .map((entry) => normalizeWorkspaceOpenTarget(entry))
+          .filter(Boolean)
+        : [];
+      uiState.workspaceOpenTargets = normalizedTargets;
+      uiState.workspaceOpenTargetsError = "";
+      if (
+        uiState.workspaceLastOpenTargetId
+        && !normalizedTargets.some((entry) => entry.id === uiState.workspaceLastOpenTargetId)
+      ) {
+        uiState.workspaceLastOpenTargetId = "";
+      }
+      return normalizedTargets;
+    })
+    .catch((error) => {
+      uiState.workspaceOpenTargets = [];
+      uiState.workspaceOpenTargetsError = error instanceof Error
+        ? error.message
+        : "Unable to detect installed apps.";
+      return [];
+    })
+    .finally(() => {
+      uiState.workspaceOpenTargetsLoading = false;
+      runtimeStore.workspaceOpenTargetsRequest = null;
+      requestRender(RENDER_STRIP);
+    });
+
+  runtimeStore.workspaceOpenTargetsRequest = request;
+  return request;
+}
+
+function getWorkspaceOpenTargets() {
+  return uiState.workspaceOpenTargets;
+}
+
+function getPreferredWorkspaceOpenTarget(targets = getWorkspaceOpenTargets()) {
+  if (!targets.length) {
+    return null;
+  }
+
+  const preferred = uiState.workspaceLastOpenTargetId
+    ? targets.find((entry) => entry.id === uiState.workspaceLastOpenTargetId) || null
+    : null;
+  if (preferred) {
+    return preferred;
+  }
+
+  return targets.find((entry) => entry.kind === "editor") || targets[0];
+}
+
+async function openActiveWorkspaceInTarget(targetId = "") {
+  const workspace = getActiveWorkspace();
+  if (!workspace || !bridge.openWorkspaceInTarget) {
+    return false;
+  }
+
+  let targets = getWorkspaceOpenTargets();
+  if (!targets.length) {
+    targets = await ensureWorkspaceOpenTargetsLoaded();
+  }
+
+  const resolvedTarget = targets.find((entry) => entry.id === targetId)
+    || getPreferredWorkspaceOpenTarget(targets);
+  if (!resolvedTarget) {
+    uiState.workspaceOpenMenuVisible = true;
+    requestRender(RENDER_STRIP);
+    return false;
+  }
+
+  try {
+    await bridge.openWorkspaceInTarget(workspace.path, resolvedTarget.id);
+    uiState.workspaceLastOpenTargetId = resolvedTarget.id;
+    closeWorkspaceOpenMenu();
+    requestRender(RENDER_STRIP);
+    return true;
+  } catch (error) {
+    uiState.workspaceOpenTargetsError = error instanceof Error
+      ? error.message
+      : `Unable to open ${resolvedTarget.label}.`;
+    uiState.workspaceOpenMenuVisible = true;
+    requestRender(RENDER_STRIP);
+    console.error(error);
+    return false;
+  }
+}
+
+async function toggleWorkspaceOpenMenu(forceVisible = !uiState.workspaceOpenMenuVisible) {
+  if (!getActiveWorkspace()) {
+    return;
+  }
+
+  if (!forceVisible) {
+    if (closeWorkspaceOpenMenu()) {
+      requestRender(RENDER_STRIP);
+    }
+    return;
+  }
+
+  uiState.workspaceOpenMenuVisible = true;
+  requestRender(RENDER_STRIP);
+  await ensureWorkspaceOpenTargetsLoaded();
+}
+
+function renderWorkspaceOpenTargetIcon(targetOrId) {
+  const target = targetOrId && typeof targetOrId === "object"
+    ? targetOrId
+    : { id: String(targetOrId || ""), iconDataUrl: "" };
+  const targetId = target.id || "";
+  const metadata = WORKSPACE_OPEN_TARGET_META[targetId] || {
+    shortLabel: "?",
+  };
+  const iconClass = `is-${escapeHtml(targetId || "generic")}`;
+  const iconDataUrl = typeof target.iconDataUrl === "string" ? target.iconDataUrl : "";
+
+  if (iconDataUrl) {
+    return `
+      <span class="workspace-open-target-icon ${iconClass}" aria-hidden="true">
+        <img
+          class="workspace-open-target-icon-image"
+          src="${escapeHtml(iconDataUrl)}"
+          alt=""
+          loading="lazy"
+          decoding="async"
+        />
+      </span>
+    `;
+  }
+
+  if (targetId === "finder") {
+    return `
+      <span class="workspace-open-target-icon ${iconClass}" aria-hidden="true">
+        ${renderFolderIcon()}
+      </span>
+    `;
+  }
+
+  if (targetId === "terminal" || targetId === "iterm2" || targetId === "warp") {
+    return `
+      <span class="workspace-open-target-icon ${iconClass}" aria-hidden="true">
+        ${renderWorkspaceTerminalIcon()}
+      </span>
+    `;
+  }
+
+  return `
+    <span class="workspace-open-target-icon ${iconClass}" aria-hidden="true">
+      <span class="workspace-open-target-monogram">${escapeHtml(metadata.shortLabel || "?")}</span>
+    </span>
+  `;
+}
+
+function renderWorkspaceOpenMenu(workspace) {
+  const targets = getWorkspaceOpenTargets();
+  const preferredTarget = getPreferredWorkspaceOpenTarget(targets);
+  const editors = targets.filter((entry) => entry.kind === "editor");
+  const systemTargets = targets.filter((entry) => entry.kind === "system");
+
+  let body = `
+    <div class="workspace-open-menu-state">
+      <strong>No supported apps found</strong>
+      <p>CrewDock could not detect any supported editors or system targets on this machine.</p>
+    </div>
+  `;
+
+  if (uiState.workspaceOpenTargetsLoading && !targets.length) {
+    body = `
+      <div class="workspace-open-menu-state">
+        <strong>Scanning installed apps…</strong>
+        <p>Checking for supported editors and developer tools.</p>
+      </div>
+    `;
+  } else if (uiState.workspaceOpenTargetsError) {
+    body = `
+      <div class="workspace-open-menu-state is-error">
+        <strong>Unable to open external apps</strong>
+        <p>${escapeHtml(uiState.workspaceOpenTargetsError)}</p>
+      </div>
+    `;
+  } else if (targets.length) {
+    body = `
+      ${
+        editors.length
+          ? `
+            <div class="workspace-open-menu-group">
+              <p class="workspace-open-menu-label">Open in</p>
+              ${editors.map((target) => renderWorkspaceOpenMenuItem(target, preferredTarget)).join("")}
+            </div>
+          `
+          : ""
+      }
+      ${
+        systemTargets.length
+          ? `
+            <div class="workspace-open-menu-group ${editors.length ? "has-divider" : ""}">
+              <p class="workspace-open-menu-label">System</p>
+              ${systemTargets.map((target) => renderWorkspaceOpenMenuItem(target, preferredTarget)).join("")}
+            </div>
+          `
+          : ""
+      }
+    `;
+  }
+
+  return `
+    <div
+      class="workspace-open-menu"
+      role="menu"
+      aria-label="${escapeHtml(`Open ${workspace.name} in another app`)}"
+    >
+      ${body}
+    </div>
+  `;
+}
+
+function renderWorkspaceOpenMenuItem(target, preferredTarget) {
+  const isPreferred = preferredTarget?.id === target.id;
+  return `
+    <button
+      class="workspace-open-menu-item ${isPreferred ? "is-preferred" : ""}"
+      type="button"
+      role="menuitem"
+      data-action="open-workspace-in-target"
+      data-target-id="${escapeHtml(target.id)}"
+      title="${escapeHtml(target.label)}"
+    >
+      ${renderWorkspaceOpenTargetIcon(target)}
+      <span class="workspace-open-menu-copy">
+        <strong>${escapeHtml(target.label)}</strong>
+        <span>${escapeHtml(isPreferred ? "Primary action" : target.kind === "system" ? "System target" : "Editor")}</span>
+      </span>
+    </button>
+  `;
+}
+
+function renderWorkspaceOpenControl(workspace) {
+  const targets = getWorkspaceOpenTargets();
+  const preferredTarget = getPreferredWorkspaceOpenTarget(targets);
+  const primaryTitle = preferredTarget
+    ? `Open ${workspace.name} in ${preferredTarget.label}`
+    : `Open ${workspace.name} in another app`;
+
+  return `
+    <div
+      class="workspace-open-shell ${uiState.workspaceOpenMenuVisible ? "is-open" : ""}"
+      data-workspace-open-shell
+      data-tauri-drag-region="false"
+    >
+      <button
+        class="workspace-open-button workspace-open-button-main"
+        type="button"
+        data-action="open-workspace-preferred-target"
+        title="${escapeHtml(primaryTitle)}"
+        aria-label="${escapeHtml(primaryTitle)}"
+      >
+        ${renderWorkspaceOpenTargetIcon(preferredTarget || "cursor")}
+        <span>Open</span>
+      </button>
+      <button
+        class="workspace-open-button workspace-open-button-toggle"
+        type="button"
+        data-action="toggle-workspace-open-menu"
+        title="Choose app"
+        aria-label="Choose app"
+        aria-haspopup="menu"
+        aria-expanded="${uiState.workspaceOpenMenuVisible ? "true" : "false"}"
+      >
+        ${renderChevronIcon(uiState.workspaceOpenMenuVisible ? "up" : "down")}
+      </button>
+      ${uiState.workspaceOpenMenuVisible ? renderWorkspaceOpenMenu(workspace) : ""}
+    </div>
+  `;
+}
+
 function renderWorkspace(workspace) {
   const paneLayout = resolveWorkspacePaneLayout(workspace);
   const maximizedPane = uiState.maximizedPaneId
@@ -9729,9 +11585,11 @@ function renderWorkspace(workspace) {
     : null;
   const paneIndexById = new Map(workspace.panes.map((pane, index) => [pane.id, index]));
   const fileExplorerVisible = isWorkspaceFileExplorerVisible(workspace.id);
+  const fileEditorVisible = isWorkspaceFileEditorVisible(workspace.id);
   return `
-    <main class="workspace-screen ${maximizedPane ? "is-maximized" : ""} ${fileExplorerVisible ? "has-file-explorer" : ""}">
+    <main class="workspace-screen ${maximizedPane ? "is-maximized" : ""} ${fileExplorerVisible ? "has-file-explorer" : ""} ${fileEditorVisible ? "has-file-editor" : ""}">
       ${renderWorkspaceFileExplorerShell(workspace)}
+      ${renderWorkspaceFileEditorShell(workspace)}
       <section class="terminal-layout">
         ${
           maximizedPane
@@ -9761,49 +11619,34 @@ function renderWorkspaceFileExplorer(workspace) {
   const rootSnapshot = explorerState?.directories.get("") || null;
   const rootLoading = Boolean(explorerState?.loadingPaths.has(""));
   const rootError = explorerState?.errorByPath.get("") || "";
-  const summaryLabel = rootLoading
-    ? "Scanning workspace"
-    : rootError
-      ? "Directory unavailable"
-      : rootSnapshot?.entries?.length
-        ? `${rootSnapshot.entries.length} visible ${rootSnapshot.entries.length === 1 ? "item" : "items"}`
-        : "Read-only workspace tree";
 
   return `
     <div class="workspace-file-explorer-panel">
       <header class="workspace-file-explorer-header">
         <div class="workspace-file-explorer-heading">
-          <span class="workspace-file-explorer-kicker">Files</span>
-          <strong>${escapeHtml(workspace.name)}</strong>
-          <span class="workspace-file-explorer-path" title="${escapeHtml(workspace.path)}">
-            ${escapeHtml(compactWorkspacePath(workspace.path))}
-          </span>
+          <strong>Explorer</strong>
         </div>
         <div class="workspace-file-explorer-actions">
           <button
             class="workspace-file-explorer-action"
             type="button"
             data-action="refresh-file-explorer"
-            title="Refresh the workspace file tree"
-            aria-label="Refresh the workspace file tree"
+            title="Refresh Explorer"
+            aria-label="Refresh Explorer"
           >
-            <span aria-hidden="true">${renderRefreshIcon()}</span>
-            <span>Refresh</span>
+            ${renderRefreshIcon()}
           </button>
           <button
             class="workspace-file-explorer-close"
             type="button"
             data-action="collapse-file-explorer"
-            title="Collapse file explorer"
-            aria-label="Collapse file explorer"
+            title="Collapse Explorer"
+            aria-label="Collapse Explorer"
           >
             ${renderCloseIcon()}
           </button>
         </div>
       </header>
-      <div class="workspace-file-explorer-meta">
-        <span class="workspace-file-explorer-meta-label">${escapeHtml(summaryLabel)}</span>
-      </div>
       <div class="workspace-file-explorer-body" role="tree" aria-label="${escapeHtml(workspace.name)} files">
         <div class="workspace-file-explorer-tree-shell">
           ${renderWorkspaceFileExplorerTree({
@@ -9827,7 +11670,7 @@ function renderWorkspaceFileExplorerTree({
   selectedPath,
 }) {
   if (rootLoading) {
-    return renderWorkspaceFileExplorerState("Loading workspace files…");
+    return renderWorkspaceFileExplorerState("Scanning…");
   }
 
   if (rootError) {
@@ -9836,7 +11679,7 @@ function renderWorkspaceFileExplorerTree({
 
   if (!rootSnapshot?.entries?.length) {
     return renderWorkspaceFileExplorerState(
-      rootSnapshot ? "No visible files in this workspace root." : "Open the explorer to browse this workspace.",
+      rootSnapshot ? "No files found." : "Open folder to browse.",
     );
   }
 
@@ -9853,24 +11696,23 @@ function renderWorkspaceFileExplorerEntries(entries, explorerState, selectedPath
       const childSnapshot = explorerState?.directories.get(entry.relativePath) || null;
       const childLoading = Boolean(explorerState?.loadingPaths.has(entry.relativePath));
       const childError = explorerState?.errorByPath.get(entry.relativePath) || "";
+      
       const disclosure = isDirectory
         ? `
-            <button
-              class="workspace-file-explorer-disclosure ${isExpanded ? "is-expanded" : ""}"
-              type="button"
+            <div
+              class="workspace-file-explorer-disclosure ${isExpanded ? "is-open" : ""}"
               data-action="toggle-file-explorer-directory"
               data-relative-path="${escapeHtml(entry.relativePath)}"
-              title="${isExpanded ? "Collapse folder" : "Expand folder"}"
-              aria-label="${isExpanded ? "Collapse folder" : "Expand folder"}"
-              aria-expanded="${isExpanded ? "true" : "false"}"
             >
-              ${renderChevronIcon(isExpanded ? "down" : "right")}
-            </button>
+              ${renderChevronIcon("right")}
+            </div>
           `
-        : `<span class="workspace-file-explorer-disclosure is-spacer" aria-hidden="true"></span>`;
+        : `<div class="workspace-file-explorer-disclosure is-spacer"></div>`;
+
       const badge = kind === "symlink"
         ? `<span class="workspace-file-explorer-badge">Link</span>`
         : "";
+
       const childContent = !isExpanded
         ? ""
         : childLoading
@@ -9884,31 +11726,29 @@ function renderWorkspaceFileExplorerEntries(entries, explorerState, selectedPath
                   selectedPath,
                   depth + 1,
                 )
-              : renderWorkspaceFileExplorerState("No visible items.", {
+              : renderWorkspaceFileExplorerState("Empty", {
                   tone: "muted",
                   depth: depth + 1,
                 });
 
       return `
         <div class="workspace-file-explorer-node ${isExpanded ? "is-expanded" : ""}">
-          <div class="workspace-file-explorer-row" style="--explorer-depth:${depth}">
+          <div 
+            class="workspace-file-explorer-row ${isSelected ? "is-selected" : ""}" 
+            style="--explorer-depth:${depth}"
+            data-action="${isDirectory ? "toggle-file-explorer-directory" : "select-file-explorer-entry"}"
+            data-relative-path="${escapeHtml(entry.relativePath)}"
+          >
             ${disclosure}
-            <button
-              class="workspace-file-explorer-entry is-${escapeHtml(kind)} ${isSelected ? "is-selected" : ""}"
-              type="button"
-              data-action="select-file-explorer-entry"
-              data-relative-path="${escapeHtml(entry.relativePath)}"
-              data-kind="${escapeHtml(kind)}"
-              title="${escapeHtml(entry.relativePath || entry.name)}"
-            >
-              <span class="workspace-file-explorer-entry-icon" aria-hidden="true">
+            <div class="workspace-file-explorer-entry is-${escapeHtml(kind)}">
+              <span class="workspace-file-explorer-entry-icon">
                 ${kind === "directory" ? renderFolderIcon() : renderFileIcon()}
               </span>
               <span class="workspace-file-explorer-entry-label">${escapeHtml(entry.name)}</span>
               ${badge}
-            </button>
+            </div>
           </div>
-          ${isExpanded ? `<div class="workspace-file-explorer-children">${childContent}</div>` : ""}
+          ${isExpanded ? `<div class="workspace-file-explorer-children" style="--explorer-depth:${depth}">${childContent}</div>` : ""}
         </div>
       `;
     })
@@ -9918,6 +11758,155 @@ function renderWorkspaceFileExplorerEntries(entries, explorerState, selectedPath
 function renderWorkspaceFileExplorerState(message, { tone = "muted", depth = 0 } = {}) {
   return `
     <div class="workspace-file-explorer-state is-${escapeHtml(tone)}" style="--explorer-depth:${depth}">
+      ${escapeHtml(message)}
+    </div>
+  `;
+}
+
+function renderWorkspaceFileEditorShell(workspace) {
+  const visible = isWorkspaceFileEditorVisible(workspace.id);
+  return `
+    <aside
+      class="workspace-file-editor-shell ${visible ? "is-visible" : ""}"
+      data-workspace-file-editor="${escapeHtml(workspace.id)}"
+      aria-hidden="${visible ? "false" : "true"}"
+    >
+      ${renderWorkspaceFileEditor(workspace)}
+    </aside>
+  `;
+}
+
+function renderWorkspaceFileEditor(workspace) {
+  const editorState = getWorkspaceFileEditorState(workspace.id, { create: false });
+  const activePath = editorState?.activePath || "";
+  const title = getWorkspaceFileEditorTitle(editorState);
+  const statusLabel = getWorkspaceFileEditorStatusLabel(editorState);
+  const snapshot = editorState?.snapshot || null;
+
+  let body = `
+    <div class="workspace-file-editor-empty">
+      <strong>Select a file</strong>
+      <p>Open a text file from the explorer to edit it here without leaving your workspace.</p>
+    </div>
+  `;
+
+  if (editorState?.loading) {
+    body = renderWorkspaceFileEditorState("Loading file…");
+  } else if (editorState?.loadError) {
+    body = renderWorkspaceFileEditorState(editorState.loadError, { tone: "error" });
+  } else if (activePath) {
+    const message = editorState.notice || editorState.saveError || snapshot?.reason || "";
+    const messageTone = editorState.notice
+      ? "muted"
+      : editorState.saveError
+        ? "error"
+        : snapshot?.readOnly
+          ? "warning"
+          : "muted";
+    const conflictBanner = editorState.conflict
+      ? `
+          <div class="workspace-file-editor-banner is-conflict">
+            <strong>File changed on disk</strong>
+            <p>Reload the latest disk version or save your draft over it after reviewing the conflict.</p>
+            <div class="workspace-file-editor-banner-actions">
+              <button type="button" class="workspace-file-editor-inline-button" data-action="reload-workspace-file" data-force-discard="true">
+                Reload disk
+              </button>
+              <button type="button" class="workspace-file-editor-inline-button" data-action="copy-workspace-file-draft">
+                Copy draft
+              </button>
+              <button
+                type="button"
+                class="workspace-file-editor-inline-button is-emphasis"
+                data-action="save-workspace-file-force"
+                ${snapshot?.readOnly ? "disabled" : ""}
+              >
+                Save anyway
+              </button>
+            </div>
+          </div>
+        `
+      : "";
+    body = `
+      <div class="workspace-file-editor-body">
+        ${conflictBanner}
+        ${
+          message
+            ? renderWorkspaceFileEditorState(message, { tone: messageTone })
+            : ""
+        }
+        <textarea
+          class="workspace-file-editor-input"
+          data-workspace-file-editor-input
+          spellcheck="false"
+          autocapitalize="off"
+          autocorrect="off"
+          ${snapshot?.readOnly ? "readonly" : ""}
+        >${escapeHtml(editorState?.draft || "")}</textarea>
+        <div class="workspace-file-editor-footer">
+          <span>${escapeHtml(activePath)}</span>
+          <span>${snapshot?.readOnly ? "Read only" : "Cmd/Ctrl+S to save"}</span>
+        </div>
+      </div>
+    `;
+  }
+
+  return `
+    <div class="workspace-file-editor-panel">
+      <header class="workspace-file-editor-header">
+        <div class="workspace-file-editor-heading">
+          <strong data-workspace-file-editor-title>${escapeHtml(title)}</strong>
+          <span class="workspace-file-editor-path">${escapeHtml(activePath || workspace.path)}</span>
+        </div>
+        <div class="workspace-file-editor-actions">
+          <span class="workspace-file-editor-status" data-workspace-file-editor-status>${escapeHtml(statusLabel)}</span>
+          <button
+            class="workspace-file-editor-action"
+            type="button"
+            data-action="reveal-workspace-file-in-explorer"
+            title="Reveal in explorer"
+            aria-label="Reveal in explorer"
+            ${!activePath ? "disabled" : ""}
+          >
+            ${renderFolderIcon()}
+          </button>
+          <button
+            class="workspace-file-editor-action"
+            type="button"
+            data-action="reload-workspace-file"
+            title="Reload from disk"
+            aria-label="Reload from disk"
+            ${!activePath || editorState?.loading || editorState?.saving ? "disabled" : ""}
+          >
+            ${renderRefreshIcon()}
+          </button>
+          <button
+            class="workspace-file-editor-action is-save"
+            type="button"
+            data-action="save-workspace-file"
+            ${!activePath || !editorState?.dirty || editorState?.loading || editorState?.saving || editorState?.conflict || snapshot?.readOnly ? "disabled" : ""}
+          >
+            Save
+          </button>
+          <button
+            class="workspace-file-editor-close"
+            type="button"
+            data-action="close-workspace-file"
+            title="Close editor"
+            aria-label="Close editor"
+          >
+            ${renderCloseIcon()}
+          </button>
+        </div>
+      </header>
+      ${body}
+    </div>
+  `;
+}
+
+function renderWorkspaceFileEditorState(message, { tone = "muted" } = {}) {
+  return `
+    <div class="workspace-file-editor-state is-${escapeHtml(tone)}">
       ${escapeHtml(message)}
     </div>
   `;
@@ -9999,6 +11988,7 @@ function workspaceLayoutSignature(workspace) {
 
 function renderPaneShell(pane, paneIndex) {
   const paneNumber = String(paneIndex + 1).padStart(2, "0");
+  const dispatchTone = uiState.paneAttentionById.get(pane.id) || "";
   return `
     <article
       class="terminal-pane"
@@ -10006,11 +11996,16 @@ function renderPaneShell(pane, paneIndex) {
       data-status="${escapeHtml(pane.status)}"
       data-density="default"
       data-active="${uiState.activePaneId === pane.id ? "true" : "false"}"
+      data-dispatch-attention="${dispatchTone ? "true" : "false"}"
+      data-dispatch-tone="${escapeHtml(dispatchTone)}"
     >
       <header class="terminal-pane-header">
         <div class="terminal-pane-title">
           <span class="terminal-pane-kicker">Terminal</span>
           <strong>${paneNumber}</strong>
+        </div>
+        <div class="terminal-pane-meta" data-pane-codex-restore>
+          ${renderPaneCodexRestoreStatus(pane.id)}
         </div>
       </header>
       <div class="terminal-host" data-terminal-host="${escapeHtml(pane.id)}"></div>
@@ -10269,6 +12264,37 @@ function syncWorkspaceFileExplorerSurface(workspace, root = document) {
   }
 }
 
+function syncWorkspaceFileEditorSurface(workspace, root = document) {
+  const screen = root.querySelector(`.workspace-screen[data-workspace-id="${workspace.id}"]`);
+  if (!(screen instanceof HTMLElement)) {
+    return;
+  }
+
+  const shell = screen.querySelector(`[data-workspace-file-editor="${workspace.id}"]`);
+  if (!(shell instanceof HTMLElement)) {
+    return;
+  }
+
+  const visible = isWorkspaceFileEditorVisible(workspace.id);
+  const editorState = getWorkspaceFileEditorState(workspace.id, { create: false });
+  const focusState = captureWorkspaceFileEditorFocusState(screen);
+  screen.classList.toggle("has-file-editor", visible);
+  shell.classList.toggle("is-visible", visible);
+  shell.setAttribute("aria-hidden", visible ? "false" : "true");
+  shell.innerHTML = renderWorkspaceFileEditor(workspace);
+  if (editorState?.shouldFocus) {
+    editorState.shouldFocus = false;
+    const input = shell.querySelector("[data-workspace-file-editor-input]");
+    if (input instanceof HTMLTextAreaElement && !input.readOnly) {
+      input.focus({ preventScroll: true });
+      input.selectionStart = input.value.length;
+      input.selectionEnd = input.value.length;
+    }
+  } else if (focusState) {
+    restoreWorkspaceFileEditorFocusState(focusState, screen);
+  }
+}
+
 function syncWorkspace(workspace) {
   const theme = getCurrentThemeDefinition();
   const terminalFontSize = getTerminalFontSize();
@@ -10276,11 +12302,16 @@ function syncWorkspace(workspace) {
   const previousPaneIds = workspacePaneIds.get(workspace.id) || [];
 
   syncWorkspaceFileExplorerSurface(workspace);
+  syncWorkspaceFileEditorSurface(workspace);
 
   for (const pane of workspace.panes) {
     const paneElement = document.querySelector(`[data-pane-id="${pane.id}"]`);
     if (paneElement) {
       paneElement.dataset.status = pane.status;
+      const restoreSlot = paneElement.querySelector("[data-pane-codex-restore]");
+      if (restoreSlot) {
+        restoreSlot.innerHTML = renderPaneCodexRestoreStatus(pane.id);
+      }
     }
   }
 
@@ -10380,6 +12411,8 @@ function clearWorkspaceBuffers(workspaceId) {
   discardCachedWorkspaceScreen(workspaceId, { dispose: false });
   workspacePaneIds.delete(workspaceId);
   uiState.workspaceFileExplorer.delete(workspaceId);
+  uiState.workspaceFileEditor.delete(workspaceId);
+  cancelWorkspaceFileDraftPersistence(workspaceId);
 }
 
 function clearSinglePaneBuffer(paneId) {
