@@ -7924,9 +7924,17 @@ function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskInterse
       || stageRegion.dataset.stageSignature !== nextLauncherSignature;
 
     if (shouldRemountLauncher) {
-      stageRegion.innerHTML = renderEmptyState();
+      stageRegion.innerHTML = renderEmptyState({
+        basePath: snapshot.launcher.basePath,
+        commandValue: uiState.launcherCommandValue,
+        latestEntry: uiState.launcherLatestCard.current || uiState.launcherHistory.at(-1) || null,
+        escapeHtml,
+      });
       stageRegion.dataset.stageMode = "launcher";
       stageRegion.dataset.stageSignature = nextLauncherSignature;
+      if (!uiState.pendingWorkspaceDraft) {
+        focusLauncherInput();
+      }
     }
 
     recordRenderMetric("stage");

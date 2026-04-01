@@ -839,38 +839,60 @@ button {
 .workspace-strip-button,
 .workspace-add {
   flex: 0 0 auto;
-  width: 24px;
-  height: 24px;
+  width: 28px;
+  height: 28px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   border-radius: 999px;
-  border: 1px solid transparent;
-  background: var(--strip-control-surface);
-  color: var(--control-text);
-  box-shadow: none;
+  border: 1px solid color-mix(in srgb, var(--border-strong) 54%, transparent);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, white 4%, transparent), transparent 56%),
+    color-mix(in srgb, var(--control-bg) 88%, transparent);
+  color: color-mix(in srgb, var(--control-text-strong) 82%, var(--control-text) 18%);
+  box-shadow:
+    0 8px 18px rgba(0, 0, 0, 0.14),
+    inset 0 1px 0 color-mix(in srgb, white 5%, transparent);
   font-size: 1.1rem;
   line-height: 1;
   transition:
     border-color 160ms ease,
     background 160ms ease,
-    color 160ms ease;
+    color 160ms ease,
+    box-shadow 160ms ease,
+    transform 160ms ease;
 }
 
 .workspace-add {
-  color: color-mix(in srgb, var(--accent) 66%, var(--text) 34%);
+  color: color-mix(in srgb, var(--accent) 82%, var(--text) 18%);
+}
+
+.workspace-settings-button {
+  color: color-mix(in srgb, var(--control-text-strong) 88%, var(--accent) 12%);
 }
 
 .workspace-strip-button:hover,
 .workspace-add:hover {
-  background: var(--strip-control-surface-hover);
+  border-color: color-mix(in srgb, var(--border-strong) 72%, transparent);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, white 5%, transparent), transparent 52%),
+    color-mix(in srgb, var(--control-bg-hover) 92%, transparent);
   color: var(--control-text-strong);
+  box-shadow:
+    0 10px 20px rgba(0, 0, 0, 0.18),
+    inset 0 1px 0 color-mix(in srgb, white 6%, transparent);
+  transform: translateY(-1px);
 }
 
 .workspace-strip-button svg,
 .workspace-add svg {
-  width: 13px;
-  height: 13px;
+  width: 15px;
+  height: 15px;
+}
+
+.workspace-settings-button svg {
+  width: 16px;
+  height: 16px;
 }
 
 .workspace-tab-main:focus-visible,
@@ -1272,14 +1294,154 @@ button {
   display: grid;
   gap: 0;
   justify-items: stretch;
-  padding: 22px;
-  border-radius: 30px;
-  border: 1px solid var(--surface-card-border);
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
+  backdrop-filter: none;
+}
+
+.workspace-launch-terminal {
+  display: grid;
+  gap: 12px;
+}
+
+.workspace-launch-terminal-screen {
+  min-height: 300px;
+  display: grid;
+  align-content: space-between;
+  gap: 22px;
+  padding: 24px 28px 16px;
+  border-radius: 28px;
+  border: 1px solid color-mix(in srgb, var(--surface-card-border) 78%, transparent);
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.045), transparent 40%),
-    var(--launcher-shell-bg);
-  box-shadow: 0 22px 56px rgba(0, 0, 0, 0.28);
-  backdrop-filter: blur(22px);
+    radial-gradient(circle at 50% 16%, rgba(102, 131, 255, 0.1), transparent 34%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.032), transparent 38%),
+    color-mix(in srgb, var(--launcher-card-bg) 92%, transparent);
+  box-shadow:
+    0 18px 48px rgba(0, 0, 0, 0.18),
+    inset 0 1px 0 rgba(255, 255, 255, 0.028);
+}
+
+.workspace-launch-transcript,
+.workspace-launch-hints {
+  min-height: 0;
+  display: grid;
+  gap: 14px;
+  align-content: start;
+}
+
+.workspace-launch-transcript {
+  padding: 2px 0 0;
+  border: 0;
+  background: none;
+}
+
+.workspace-launch-transcript.is-error {
+  color: color-mix(in srgb, var(--danger) 72%, var(--text) 28%);
+}
+
+.workspace-launch-transcript-output {
+  display: grid;
+  gap: 7px;
+}
+
+.workspace-launch-transcript-line {
+  min-width: 0;
+  color: var(--launcher-output);
+  font-family: "SFMono-Regular", "JetBrains Mono", "Menlo", "Monaco", monospace;
+  font-size: 0.96rem;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.workspace-launch-transcript-line.is-command {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: color-mix(in srgb, var(--text) 92%, white 8%);
+}
+
+.workspace-launch-command {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  min-height: 52px;
+  padding: 14px 0 0;
+  border: 0;
+  border-top: 1px solid color-mix(in srgb, var(--surface-card-border) 74%, transparent);
+  background: none;
+  box-shadow: none;
+}
+
+.workspace-launch-command-prefix {
+  color: var(--launcher-prefix);
+  font-family: "SFMono-Regular", "JetBrains Mono", "Menlo", "Monaco", monospace;
+  font-size: 1.05rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.workspace-launch-command-input {
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font-family: "SFMono-Regular", "JetBrains Mono", "Menlo", "Monaco", monospace;
+  font-size: 1rem;
+  line-height: 1.45;
+}
+
+.workspace-launch-command-input::placeholder {
+  color: var(--launcher-output-muted);
+}
+
+.workspace-launch-terminal-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 0 4px 2px;
+  color: var(--surface-soft-text);
+  font-size: 0.76rem;
+}
+
+.workspace-launch-terminal-path {
+  font-family: "SFMono-Regular", "JetBrains Mono", "Menlo", "Monaco", monospace;
+  color: color-mix(in srgb, var(--text) 74%, var(--muted) 26%);
+}
+
+.workspace-launch-hints-copy {
+  margin: 0;
+  color: var(--surface-soft-text);
+  font-size: 0.88rem;
+  line-height: 1.6;
+}
+
+.workspace-launch-terminal-tip code,
+.workspace-launch-hints-copy code,
+.workspace-launch-command-list code {
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  color: color-mix(in srgb, var(--text) 90%, white 10%);
+  font-family: "SFMono-Regular", "JetBrains Mono", "Menlo", "Monaco", monospace;
+  font-size: 0.78em;
+}
+
+.workspace-launch-command-list {
+  display: flex;
+  align-items: center;
+  gap: 10px 18px;
+  flex-wrap: wrap;
+  color: var(--surface-soft-text);
+  font-size: 0.8rem;
+  line-height: 1.5;
 }
 
 .workspace-launch-visual {
@@ -1458,6 +1620,16 @@ button {
 
   .workspace-launch-shell {
     width: 100%;
+  }
+
+  .workspace-launch-terminal-screen {
+    min-height: 0;
+    padding: 18px 18px 14px;
+  }
+
+  .workspace-launch-command {
+    min-height: 48px;
+    padding-top: 12px;
   }
 
   .workspace-launch-visual {
@@ -7581,8 +7753,8 @@ button {
   .workspace-strip-button,
   .workspace-add,
   .workspace-tabs-scroll {
-    width: 22px;
-    height: 22px;
+    width: 26px;
+    height: 26px;
   }
 
   .workspace-stage {
