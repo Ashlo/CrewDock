@@ -68,6 +68,9 @@ export function renderEmptyState({
 } = {}) {
   return `
     <div class="workspace-empty">
+      <div class="workspace-empty-background" aria-hidden="true">
+        <canvas class="workspace-empty-particles" data-launcher-particles></canvas>
+      </div>
       <div class="workspace-empty-panel">
         <p class="workspace-empty-mark">CrewDock</p>
         <h1>Open a folder to start a workspace.</h1>

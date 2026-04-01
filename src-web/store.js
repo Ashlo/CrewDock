@@ -117,6 +117,7 @@ export function createRuntimeStore() {
     workspaceTabAutoScrollFrame: 0,
     launcherCardTransitionTimer: 0,
     launcherCardAnimationFrame: 0,
+    launcherParticles: null,
     gitRefreshInFlight: null,
     gitRefreshQueuedWorkspaceId: null,
     systemHealthRefreshTimer: 0,

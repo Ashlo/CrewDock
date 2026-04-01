@@ -10,6 +10,10 @@ import {
   renderEmptyState,
   renderLayoutPicker,
 } from "./launcher.js";
+import {
+  destroyLauncherParticles,
+  syncLauncherParticles,
+} from "./launcher-particles.js";
 import { renderActivityRail } from "./activity-rail.js";
 import { createRuntimeStore, createUiState } from "./store.js";
 import {
@@ -7937,6 +7941,8 @@ function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskInterse
       }
     }
 
+    syncLauncherParticles(runtimeStore, stageRegion)
+
     recordRenderMetric("stage");
     if (refreshVisibleTerminals) {
       scheduleVisibleTerminalRefresh(activeWorkspace);
@@ -7944,6 +7950,8 @@ function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskInterse
     }
     return;
   }
+
+  destroyLauncherParticles(runtimeStore)
 
   const nextLayoutSignature = workspaceStageSignature(activeWorkspace);
   const expectedMountedPaneCount = getRenderedWorkspacePaneCount(activeWorkspace);
