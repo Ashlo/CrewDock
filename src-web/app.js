@@ -1,5 +1,5 @@
 import { Terminal } from "./vendor/xterm.mjs";
-import { FitAddon } from "./vendor/addon-fit.mjs";
+import { FitAddon } from "./vendor/addon-fit.mjs?v=20260401b";
 import { createBridge } from "./bridge.js";
 import {
   clampPaneCount,
@@ -20,6 +20,7 @@ import {
 const MAX_PENDING_TERMINAL_BYTES = 4 * 1024 * 1024;
 const MAX_RUNTIME_ACTIVITY_ITEMS = 120;
 const MAX_WORKSPACE_ATTENTION_COUNT = 99;
+const TERMINAL_VIEWPORT_PINNED_TO_BOTTOM = -1;
 const MAX_DISPATCH_TOASTS = 4;
 const DISPATCH_TOAST_LIFETIME_MS = 5000;
 const PANE_ATTENTION_LIFETIME_MS = 4500;
@@ -33,7 +34,7 @@ const MAX_INTERFACE_TEXT_SCALE = 1.2;
 const DEFAULT_TERMINAL_FONT_SIZE = 13.5;
 const MIN_TERMINAL_FONT_SIZE = 11;
 const MAX_TERMINAL_FONT_SIZE = 18;
-const WORKSPACE_FILE_DRAFT_PERSIST_DELAY_MS = 240;
+const WORKSPACE_FILE_DRAFT_PERSIST_DELAY_MS = 900;
 const COMPACT_PANE_HEIGHT = 420;
 const WORKSPACE_TAB_DRAG_THRESHOLD_PX = 6;
 const WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX = 32;
@@ -65,6 +66,7 @@ const RENDER_CODEX_SURFACES = RENDER_STATUS | RENDER_MODAL;
 const RENDER_FILE_EXPLORER_SURFACES = RENDER_STATUS | RENDER_EXPLORER;
 const WORKSPACE_OPEN_TARGET_META = Object.freeze({
   cursor: { label: "Cursor", kind: "editor", shortLabel: "C" },
+  antigravity: { label: "Antigravity", kind: "editor", shortLabel: "A" },
   vscode: { label: "VS Code", kind: "editor", shortLabel: "VS" },
   windsurf: { label: "Windsurf", kind: "editor", shortLabel: "W" },
   zed: { label: "Zed", kind: "editor", shortLabel: "Z" },
@@ -665,20 +667,24 @@ async function init() {
 
   if (bridge.listenRuntimeEvents) {
     await bridge.listenRuntimeEvents((event) => {
-      const handledSourceControl = handleSourceControlRuntimeEvent(event);
+      const sourceControlUpdate = handleSourceControlRuntimeEvent(event);
+      const handledPaneLifecycle = handlePaneLifecycleRuntimeEvent(event);
       const handledActivity = recordRuntimeEvent(event);
       const handledCodexRestore = handleCodexRestoreRuntimeEvent(event);
-      if (handledSourceControl) {
-        requestSourceControlRender();
+      if (sourceControlUpdate.handled && sourceControlUpdate.renderMask) {
+        requestRender(sourceControlUpdate.renderMask);
       }
       if (handledActivity) {
         requestActivityRender();
+      }
+      if (handledPaneLifecycle && uiState.codexModalVisible) {
+        requestRender(RENDER_MODAL);
       }
       if (handledCodexRestore) {
         syncCodexRestorePaneDom(event.workspaceId, event.paneId);
       }
       if (
-        handledSourceControl
+        sourceControlUpdate.handled
         && event?.kind === "gitTaskSnapshot"
         && event?.task?.status
         && event.task.status !== "running"
@@ -716,6 +722,7 @@ async function init() {
   window.addEventListener("blur", handleWindowBlur);
   window.addEventListener("resize", handleWindowResize);
   window.addEventListener("beforeunload", handleBeforeUnload);
+  bindTerminalFontMetricObservers();
 
   render();
   void restoreActiveWorkspaceFileDraft();
@@ -803,6 +810,25 @@ function pruneCodexRestoreState(snapshot = uiState.snapshot) {
   for (const paneId of uiState.codexRestoreByPane.keys()) {
     if (!paneIds.has(paneId)) {
       uiState.codexRestoreByPane.delete(paneId);
+    }
+  }
+}
+
+function prunePaneAttentionState(snapshot = uiState.snapshot) {
+  const paneIds = new Set(
+    (snapshot?.workspaces || []).flatMap((workspace) => workspace.panes?.map((pane) => pane.id) || []),
+  );
+
+  for (const paneId of uiState.paneAttentionById.keys()) {
+    if (!paneIds.has(paneId)) {
+      uiState.paneAttentionById.delete(paneId);
+    }
+  }
+
+  for (const [paneId, timeoutId] of runtimeStore.paneAttentionTimers.entries()) {
+    if (!paneIds.has(paneId)) {
+      clearTimeout(timeoutId);
+      runtimeStore.paneAttentionTimers.delete(paneId);
     }
   }
 }
@@ -5580,6 +5606,22 @@ function captureSourceControlFocusState(root = document) {
   };
 }
 
+function isElementScrolledNearBottom(element, threshold = 16) {
+  if (!(element instanceof HTMLElement)) {
+    return false;
+  }
+
+  return element.scrollHeight - element.scrollTop - element.clientHeight <= threshold;
+}
+
+function scrollElementToBottom(element) {
+  if (!(element instanceof HTMLElement)) {
+    return;
+  }
+
+  element.scrollTop = Math.max(0, element.scrollHeight - element.clientHeight);
+}
+
 function captureTodoFocusState(root = document) {
   const activeElement = document.activeElement;
   if (!(activeElement instanceof HTMLInputElement || activeElement instanceof HTMLTextAreaElement)) {
@@ -5639,6 +5681,9 @@ function captureSourceControlScrollState(root = document) {
         index,
         scrollTop: element.scrollTop,
         scrollLeft: element.scrollLeft,
+        stickToBottom: selector.includes("workspace-scm-task-output")
+          ? isElementScrolledNearBottom(element)
+          : false,
       };
     })
     .filter(Boolean));
@@ -5778,7 +5823,9 @@ function restoreSourceControlScrollState(states, root = document) {
       continue;
     }
 
-    if (typeof state.scrollTop === "number") {
+    if (state.stickToBottom) {
+      scrollElementToBottom(element);
+    } else if (typeof state.scrollTop === "number") {
       element.scrollTop = state.scrollTop;
     }
     if (typeof state.scrollLeft === "number") {
@@ -5917,6 +5964,10 @@ function applySourceControlSnapshot(snapshot, { appendGraph = false } = {}) {
     : snapshot;
 
   uiState.sourceControl.snapshot = nextSnapshot;
+  applyWorkspaceGitSummaryUpdate({
+    workspaceId: nextSnapshot.workspaceId,
+    summary: nextSnapshot.summary,
+  });
   uiState.sourceControl.lastLoadedWorkspaceId = nextSnapshot.workspaceId || "";
   uiState.sourceControl.graphLoadingMore = false;
   syncSourceControlTaskTray(nextSnapshot.task || null, previousTask);
@@ -5959,11 +6010,22 @@ function applySourceControlSnapshot(snapshot, { appendGraph = false } = {}) {
 }
 
 function handleSourceControlRuntimeEvent(event) {
-  if (!event || event.kind !== "gitTaskSnapshot" || !event.workspaceId || !event.task) {
-    return false;
+  if (!event || typeof event !== "object") {
+    return { handled: false, renderMask: 0 };
+  }
+
+  if (event.kind === "workspaceGitSummaryUpdated") {
+    const { handled, renderMask } = applyWorkspaceGitSummaryUpdate(event);
+    return { handled, renderMask };
+  }
+
+  if (event.kind !== "gitTaskSnapshot" || !event.workspaceId || !event.task) {
+    return { handled: false, renderMask: 0 };
   }
 
   const sourceControl = uiState.sourceControl;
+  let render = true;
+  let renderMask = 0;
   if (sourceControl.snapshot?.workspaceId === event.workspaceId) {
     const previousTask = sourceControl.snapshot.task || null;
     sourceControl.snapshot = {
@@ -5971,15 +6033,181 @@ function handleSourceControlRuntimeEvent(event) {
       task: event.task,
     };
     syncSourceControlTaskTray(event.task, previousTask);
+    if (syncSourceControlTaskRegionDom()) {
+      render = false;
+    }
+    if (
+      uiState.gitPanelVisible
+      && uiState.snapshot?.activeWorkspaceId === event.workspaceId
+      && render
+    ) {
+      renderMask = RENDER_SOURCE_CONTROL_SURFACES;
+    }
+  } else if (uiState.gitPanelVisible && uiState.snapshot?.activeWorkspaceId === event.workspaceId) {
+    void loadWorkspaceSourceControlFor(event.workspaceId);
+    renderMask = 0;
   }
 
-  if (uiState.snapshot?.activeWorkspaceId === event.workspaceId) {
-    const activeWorkspace = uiState.snapshot?.activeWorkspace;
-    if (activeWorkspace?.gitDetail?.summary) {
-      activeWorkspace.gitDetail.summary = {
-        ...activeWorkspace.gitDetail.summary,
-      };
+  return { handled: true, renderMask };
+}
+
+function cloneGitSummarySnapshot(summary) {
+  if (!summary || typeof summary !== "object") {
+    return null;
+  }
+
+  const counts = summary.counts && typeof summary.counts === "object" ? summary.counts : {};
+  return {
+    branch: String(summary.branch || ""),
+    upstream: summary.upstream ? String(summary.upstream) : null,
+    ahead: Number(summary.ahead || 0),
+    behind: Number(summary.behind || 0),
+    counts: {
+      staged: Number(counts.staged || 0),
+      modified: Number(counts.modified || 0),
+      deleted: Number(counts.deleted || 0),
+      renamed: Number(counts.renamed || 0),
+      untracked: Number(counts.untracked || 0),
+      conflicted: Number(counts.conflicted || 0),
+    },
+    isDirty: Boolean(summary.isDirty),
+    hasConflicts: Boolean(summary.hasConflicts),
+    message: summary.message ? String(summary.message) : null,
+  };
+}
+
+function applyWorkspaceGitSummaryUpdate(update) {
+  if (!uiState.snapshot || !update?.workspaceId) {
+    return { handled: false, renderMask: 0 };
+  }
+
+  const workspaceId = String(update.workspaceId || "");
+  const summary = cloneGitSummarySnapshot(update.summary);
+  if (!summary) {
+    return { handled: false, renderMask: 0 };
+  }
+
+  let handled = false;
+  let renderMask = 0;
+  const workspaceTab = getWorkspaceById(workspaceId);
+  if (workspaceTab) {
+    workspaceTab.gitSummary = summary;
+    handled = true;
+    renderMask |= RENDER_STRIP;
+  }
+
+  if (uiState.snapshot.activeWorkspace?.id === workspaceId) {
+    const activeWorkspace = uiState.snapshot.activeWorkspace;
+    activeWorkspace.gitDetail = {
+      ...(activeWorkspace.gitDetail || {}),
+      summary,
+    };
+    handled = true;
+    renderMask |= RENDER_STATUS;
+  }
+
+  if (uiState.sourceControl.snapshot?.workspaceId === workspaceId) {
+    uiState.sourceControl.snapshot = {
+      ...uiState.sourceControl.snapshot,
+      summary,
+    };
+    handled = true;
+    if (
+      uiState.gitPanelVisible
+      && uiState.snapshot?.activeWorkspaceId === workspaceId
+    ) {
+      renderMask |= RENDER_MODAL;
     }
+  }
+
+  return { handled, renderMask };
+}
+
+function normalizePaneLifecycleRuntimeEvent(event) {
+  if (!event || typeof event !== "object") {
+    return null;
+  }
+  if (!event.workspaceId || !event.paneId || typeof event.kind !== "string") {
+    return null;
+  }
+  if (!["paneReady", "paneClosed", "paneFailed"].includes(event.kind)) {
+    return null;
+  }
+
+  return {
+    kind: event.kind,
+    workspaceId: String(event.workspaceId),
+    paneId: String(event.paneId),
+  };
+}
+
+function paneStatusForRuntimeKind(kind) {
+  switch (kind) {
+    case "paneReady":
+      return "ready";
+    case "paneClosed":
+      return "closed";
+    case "paneFailed":
+      return "failed";
+    default:
+      return "booting";
+  }
+}
+
+function syncActiveWorkspacePaneStatusDom(workspaceId, paneId) {
+  const activeWorkspace = getActiveWorkspace();
+  if (activeWorkspace?.id !== workspaceId) {
+    return;
+  }
+
+  const pane = activeWorkspace.panes?.find((entry) => entry.id === paneId) || null;
+  if (!pane) {
+    return;
+  }
+
+  const paneElement = document.querySelector(`[data-pane-id="${paneId}"]`);
+  if (paneElement instanceof HTMLElement) {
+    paneElement.dataset.status = pane.status;
+  }
+}
+
+function handlePaneLifecycleRuntimeEvent(event) {
+  const normalizedEvent = normalizePaneLifecycleRuntimeEvent(event);
+  if (!normalizedEvent || uiState.snapshot?.activeWorkspaceId !== normalizedEvent.workspaceId) {
+    return false;
+  }
+
+  const activeWorkspace = getActiveWorkspace();
+  const pane = activeWorkspace?.panes?.find((entry) => entry.id === normalizedEvent.paneId) || null;
+  if (!pane) {
+    return false;
+  }
+
+  pane.status = paneStatusForRuntimeKind(normalizedEvent.kind);
+  syncActiveWorkspacePaneStatusDom(normalizedEvent.workspaceId, normalizedEvent.paneId);
+  return true;
+}
+
+function syncSourceControlTaskRegionDom(root = app) {
+  if (!uiState.gitPanelVisible) {
+    return false;
+  }
+
+  const taskRegion = root?.querySelector("[data-scm-task-region]");
+  if (!(taskRegion instanceof HTMLElement)) {
+    return false;
+  }
+
+  const previousOutput = taskRegion.querySelector(".workspace-scm-task-tray-output");
+  const shouldFollowOutput = previousOutput
+    ? isElementScrolledNearBottom(previousOutput)
+    : true;
+
+  taskRegion.innerHTML = renderSourceControlTaskPanel(uiState.sourceControl.snapshot?.task || null);
+
+  const nextOutput = taskRegion.querySelector(".workspace-scm-task-tray-output");
+  if (shouldFollowOutput && nextOutput instanceof HTMLElement) {
+    scrollElementToBottom(nextOutput);
   }
 
   return true;
@@ -6385,6 +6613,15 @@ async function submitSourceControlTaskInput() {
   try {
     const payload = rawValue.endsWith("\n") ? rawValue : `${rawValue}\n`;
     await bridge.gitTaskWriteStdin(workspaceId, payload);
+    if (uiState.sourceControl.snapshot?.task?.id === task.id) {
+      uiState.sourceControl.snapshot = {
+        ...uiState.sourceControl.snapshot,
+        task: {
+          ...uiState.sourceControl.snapshot.task,
+          canWriteInput: false,
+        },
+      };
+    }
     uiState.sourceControl.taskInput = "";
     requestRender(RENDER_MODAL);
   } catch (error) {
@@ -6863,6 +7100,8 @@ function normalizeRuntimeEvent(event) {
 
 function isDispatchActivityKind(kind) {
   return [
+    "paneReady",
+    "paneClosed",
     "paneFailed",
     "gitTaskSucceeded",
     "gitTaskFailed",
@@ -7347,7 +7586,7 @@ function ensureFrame() {
 
 function createWorkspaceScreenElement(
   workspace,
-  layoutSignature = workspaceLayoutSignature(workspace),
+  layoutSignature = workspaceStageSignature(workspace),
 ) {
   const template = document.createElement("template");
   template.innerHTML = renderWorkspace(workspace).trim();
@@ -7483,6 +7722,7 @@ function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskInterse
   pruneWorkspaceFileExplorerState(snapshot);
   pruneWorkspaceFileEditorState(snapshot);
   pruneCodexRestoreState(snapshot);
+  prunePaneAttentionState(snapshot);
   ensureFrame();
 
   const activeWorkspace = snapshot.activeWorkspace;
@@ -7697,7 +7937,8 @@ function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskInterse
     return;
   }
 
-  const nextLayoutSignature = workspaceLayoutSignature(activeWorkspace);
+  const nextLayoutSignature = workspaceStageSignature(activeWorkspace);
+  const expectedMountedPaneCount = getRenderedWorkspacePaneCount(activeWorkspace);
   if (uiState.mountedWorkspaceId && uiState.mountedWorkspaceId !== activeWorkspace.id) {
     stashMountedWorkspaceScreen(stageRegion);
   }
@@ -7707,7 +7948,7 @@ function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskInterse
     : 0;
   const mountedLayoutChanged = uiState.mountedWorkspaceId === activeWorkspace.id
     && (
-      mountedPaneCount !== activeWorkspace.panes.length
+      mountedPaneCount !== expectedMountedPaneCount
       || uiState.mountedLayoutSignature !== nextLayoutSignature
     );
   if (mountedLayoutChanged) {
@@ -7724,7 +7965,7 @@ function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskInterse
     const canReuseCachedScreen = Boolean(
       cachedScreen
         && cachedScreen.layoutSignature === nextLayoutSignature
-        && collectPaneIdsFromElement(cachedScreen.element).length === activeWorkspace.panes.length,
+        && collectPaneIdsFromElement(cachedScreen.element).length === expectedMountedPaneCount,
     );
 
     stageRegion.innerHTML = "";
@@ -9791,7 +10032,9 @@ function renderSourceControlBody(snapshot) {
               : renderSourceControlGraphTab(snapshot)
         }
       </div>
-      ${renderSourceControlTaskPanel(snapshot.task)}
+      <div data-scm-task-region>
+        ${renderSourceControlTaskPanel(snapshot.task)}
+      </div>
     </div>
   `;
 }
@@ -11139,17 +11382,15 @@ async function refreshActiveWorkspaceGitStatus({ force = false } = {}) {
 
   runtimeStore.gitRefreshInFlight = (async () => {
     try {
-      const snapshot = await bridge.refreshWorkspaceGitStatus(workspaceId);
-      uiState.snapshot = snapshot;
-      requestRender(
-        uiState.gitPanelVisible
-          ? RENDER_SOURCE_CONTROL_SURFACES
-          : (RENDER_STRIP | RENDER_STATUS),
-      );
+      const update = await bridge.refreshWorkspaceGitStatus(workspaceId);
+      const { handled, renderMask } = applyWorkspaceGitSummaryUpdate(update);
+      if (handled && renderMask) {
+        requestRender(renderMask);
+      }
       if (uiState.gitPanelVisible && uiState.sourceControl.lastLoadedWorkspaceId === workspaceId) {
         void loadActiveWorkspaceSourceControl({ force: true });
       }
-      return snapshot;
+      return update;
     } catch (error) {
       if (force) {
         console.error(error);
@@ -11580,9 +11821,7 @@ function renderWorkspaceOpenControl(workspace) {
 
 function renderWorkspace(workspace) {
   const paneLayout = resolveWorkspacePaneLayout(workspace);
-  const maximizedPane = uiState.maximizedPaneId
-    ? workspace.panes.find((pane) => pane.id === uiState.maximizedPaneId) || null
-    : null;
+  const maximizedPane = resolveWorkspaceMaximizedPane(workspace);
   const paneIndexById = new Map(workspace.panes.map((pane, index) => [pane.id, index]));
   const fileExplorerVisible = isWorkspaceFileExplorerVisible(workspace.id);
   const fileEditorVisible = isWorkspaceFileEditorVisible(workspace.id);
@@ -11945,6 +12184,18 @@ function resolveWorkspacePaneLayout(workspace) {
   );
 }
 
+function resolveWorkspaceMaximizedPane(workspace) {
+  if (!uiState.maximizedPaneId) {
+    return null;
+  }
+
+  return workspace?.panes?.find((pane) => pane.id === uiState.maximizedPaneId) || null;
+}
+
+function getRenderedWorkspacePaneCount(workspace) {
+  return resolveWorkspaceMaximizedPane(workspace) ? 1 : (workspace?.panes?.length || 0);
+}
+
 function normalizePaneLayoutNode(node) {
   if (!node) {
     return null;
@@ -11982,8 +12233,11 @@ function normalizePaneLayoutNode(node) {
   };
 }
 
-function workspaceLayoutSignature(workspace) {
-  return JSON.stringify(resolveWorkspacePaneLayout(workspace));
+function workspaceStageSignature(workspace) {
+  return JSON.stringify({
+    layout: resolveWorkspacePaneLayout(workspace),
+    maximizedPaneId: resolveWorkspaceMaximizedPane(workspace)?.id || null,
+  });
 }
 
 function renderPaneShell(pane, paneIndex) {
@@ -12008,7 +12262,9 @@ function renderPaneShell(pane, paneIndex) {
           ${renderPaneCodexRestoreStatus(pane.id)}
         </div>
       </header>
-      <div class="terminal-host" data-terminal-host="${escapeHtml(pane.id)}"></div>
+      <div class="terminal-host" data-terminal-host="${escapeHtml(pane.id)}">
+        <div class="terminal-fit-shell" data-terminal-surface="${escapeHtml(pane.id)}"></div>
+      </div>
     </article>
   `;
 }
@@ -12183,7 +12439,8 @@ function mountWorkspaceTerminals(workspace, root = document) {
 
   for (const pane of workspace.panes) {
     const host = root.querySelector(`[data-terminal-host="${pane.id}"]`);
-    if (!host) {
+    const surface = root.querySelector(`[data-terminal-surface="${pane.id}"]`);
+    if (!(host instanceof HTMLElement) || !(surface instanceof HTMLElement)) {
       continue;
     }
 
@@ -12202,12 +12459,13 @@ function mountWorkspaceTerminals(workspace, root = document) {
     });
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
-    terminal.open(host);
+    terminal.open(surface);
 
     const state = {
       terminal,
       fitAddon,
       observer: new ResizeObserver(() => fitTerminal(pane.id)),
+      postFitFrame: 0,
       size: { cols: 0, rows: 0 },
       themeId: theme.id,
       fontSize: terminalFontSize,
@@ -12218,7 +12476,7 @@ function mountWorkspaceTerminals(workspace, root = document) {
       setActivePaneId(pane.id, getActiveWorkspace() || workspace);
     };
 
-    state.observer.observe(host);
+    state.observer.observe(surface);
     host.addEventListener("focusin", syncPaneFocusState);
     host.addEventListener("pointerdown", syncPaneFocusState);
     terminal.textarea?.addEventListener("focus", syncPaneFocusState);
@@ -12226,7 +12484,7 @@ function mountWorkspaceTerminals(workspace, root = document) {
       bridge.writeToPane(pane.id, data).catch((error) => console.error(error));
     });
     terminal.onScroll(() => {
-      terminalViewportLines.set(pane.id, terminal.buffer.active.viewportY);
+      terminalViewportLines.set(pane.id, captureTerminalViewportLine(terminal));
     });
 
     paneTerminals.set(pane.id, state);
@@ -12435,14 +12693,115 @@ function fitAllTerminals() {
   }
 }
 
+function refreshVisibleTerminalMetrics() {
+  scheduleVisibleTerminalRefresh();
+}
+
+function bindTerminalFontMetricObservers() {
+  const fontSet = document.fonts;
+  if (!fontSet) {
+    return;
+  }
+
+  fontSet.ready
+    .then(() => {
+      refreshVisibleTerminalMetrics();
+    })
+    .catch(() => {});
+
+  if (typeof fontSet.addEventListener === "function") {
+    fontSet.addEventListener("loadingdone", refreshVisibleTerminalMetrics);
+  }
+}
+
 function fitTerminal(paneId) {
   const pane = paneTerminals.get(paneId);
   if (!pane || !isTerminalVisible(pane)) {
     return;
   }
 
+  terminalViewportLines.set(paneId, captureTerminalViewportLine(pane.terminal));
   syncPaneDensity(pane);
   pane.fitAddon.fit();
+  schedulePostFitTerminalResize(paneId);
+}
+
+function getTerminalViewportMetrics(pane) {
+  const terminalElement = pane?.terminal?.element;
+  if (!(terminalElement instanceof HTMLElement)) {
+    return null;
+  }
+
+  const viewport = terminalElement.querySelector(".xterm-viewport");
+  if (!(viewport instanceof HTMLElement)) {
+    return null;
+  }
+
+  const renderedRow = terminalElement.querySelector(".xterm-rows > div");
+  const textarea = terminalElement.querySelector(".xterm-helper-textarea");
+  const rowHeight = (
+    renderedRow instanceof HTMLElement
+      ? renderedRow.getBoundingClientRect().height
+      : 0
+  ) || (
+    textarea instanceof HTMLElement
+      ? textarea.getBoundingClientRect().height
+      : 0
+  ) || (
+    textarea instanceof HTMLElement
+      ? parseFloat(getComputedStyle(textarea).lineHeight)
+      : 0
+  );
+
+  if (!Number.isFinite(rowHeight) || rowHeight <= 0) {
+    return null;
+  }
+
+  return {
+    viewportHeight: viewport.clientHeight,
+    rowHeight,
+  };
+}
+
+function clampTerminalRowsToViewport(pane) {
+  const metrics = getTerminalViewportMetrics(pane);
+  if (!metrics) {
+    return false;
+  }
+
+  const maxRows = Math.max(1, Math.floor(metrics.viewportHeight / metrics.rowHeight));
+  if (maxRows < pane.terminal.rows) {
+    pane.terminal.resize(pane.terminal.cols, maxRows);
+    return true;
+  }
+
+  return false;
+}
+
+function schedulePostFitTerminalResize(paneId) {
+  const pane = paneTerminals.get(paneId);
+  if (!pane) {
+    return;
+  }
+
+  if (pane.postFitFrame) {
+    cancelAnimationFrame(pane.postFitFrame);
+  }
+
+  pane.postFitFrame = requestAnimationFrame(() => {
+    pane.postFitFrame = 0;
+    finalizeTerminalFit(paneId);
+  });
+}
+
+function finalizeTerminalFit(paneId) {
+  const pane = paneTerminals.get(paneId);
+  if (!pane || !isTerminalVisible(pane)) {
+    return;
+  }
+
+  clampTerminalRowsToViewport(pane);
+  restoreTerminalViewport(paneId);
   const nextCols = pane.terminal.cols;
   const nextRows = pane.terminal.rows;
 
@@ -12472,10 +12831,24 @@ function disposeTerminal(paneId) {
     return;
   }
 
-  terminalViewportLines.set(paneId, pane.terminal.buffer.active.viewportY);
+  terminalViewportLines.set(paneId, captureTerminalViewportLine(pane.terminal));
+  if (pane.postFitFrame) {
+    cancelAnimationFrame(pane.postFitFrame);
+  }
   pane.observer.disconnect();
   pane.terminal.dispose();
   paneTerminals.delete(paneId);
+}
+
+function captureTerminalViewportLine(terminal) {
+  const buffer = terminal?.buffer?.active;
+  if (!buffer) {
+    return 0;
+  }
+
+  return buffer.viewportY >= buffer.baseY
+    ? TERMINAL_VIEWPORT_PINNED_TO_BOTTOM
+    : buffer.viewportY;
 }
 
 function disposeAllTerminals() {
@@ -12492,6 +12865,11 @@ function restoreTerminalViewport(paneId) {
 
   const viewportLine = terminalViewportLines.get(paneId);
   if (!Number.isFinite(viewportLine)) {
+    return;
+  }
+
+  if (viewportLine === TERMINAL_VIEWPORT_PINNED_TO_BOTTOM) {
+    pane.terminal.scrollToBottom();
     return;
   }
 

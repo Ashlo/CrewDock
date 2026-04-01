@@ -3,9 +3,8 @@ use std::path::Path;
 use portable_pty::ChildKiller;
 
 use crate::{
-    build_balanced_pane_layout, collect_git_detail, layout_for_pane_count,
-    normalize_workspace_name, normalize_workspace_todo_text, relabel_panes,
-    remove_pane_from_layout, restore_pane_layout,
+    build_balanced_pane_layout, layout_for_pane_count, normalize_workspace_name,
+    normalize_workspace_todo_text, relabel_panes, remove_pane_from_layout, restore_pane_layout,
     session_manager::{prepare_workspace_launch, PaneJob},
     shift_pending_codex_starts_for_insert, shift_pending_codex_starts_for_remove,
     shift_workspace_codex_restore_bindings_for_insert,
@@ -50,17 +49,6 @@ pub(crate) fn build_workspace_record(
         codex_restore_bindings: Vec::new(),
         file_draft: None,
     })
-}
-
-pub(crate) fn refresh_workspace_git(
-    runtime: &mut RuntimeState,
-    workspace_id: &str,
-) -> Result<(), String> {
-    let workspace_index = find_workspace_index_by_id(runtime, workspace_id)
-        .ok_or_else(|| "workspace not found".to_string())?;
-    let workspace_path = std::path::PathBuf::from(runtime.workspaces[workspace_index].path.clone());
-    runtime.workspaces[workspace_index].git = Some(collect_git_detail(&workspace_path));
-    Ok(())
 }
 
 pub(crate) fn find_workspace_index_by_id(

@@ -1,4 +1,10 @@
-use std::{collections::HashSet, fs, path::PathBuf};
+use std::{
+    collections::HashSet,
+    fs,
+    path::PathBuf,
+    sync::{mpsc, Mutex},
+    thread::{self, JoinHandle},
+};
 
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Manager};
@@ -10,6 +16,76 @@ use crate::{
 
 const PERSISTENCE_FILE: &str = "workspaces.json";
 const MAX_PERSISTED_ACTIVITY_EVENTS: usize = 120;
+
+pub(crate) struct PersistenceCoordinator {
+    sender: mpsc::Sender<PersistenceMessage>,
+    worker: Mutex<Option<JoinHandle<()>>>,
+}
+
+struct PersistedWriteRequest {
+    path: PathBuf,
+    state: PersistedWorkspaceState,
+}
+
+enum PersistenceMessage {
+    Persist(PersistedWriteRequest),
+    Flush(mpsc::Sender<()>),
+    Shutdown,
+}
+
+impl Default for PersistenceCoordinator {
+    fn default() -> Self {
+        let (sender, receiver) = mpsc::channel();
+        let worker = thread::spawn(move || run_persistence_worker(receiver));
+        Self {
+            sender,
+            worker: Mutex::new(Some(worker)),
+        }
+    }
+}
+
+impl PersistenceCoordinator {
+    pub(crate) fn schedule(
+        &self,
+        path: PathBuf,
+        state: PersistedWorkspaceState,
+        flush_immediately: bool,
+    ) -> Result<(), String> {
+        self.sender
+            .send(PersistenceMessage::Persist(PersistedWriteRequest {
+                path,
+                state,
+            }))
+            .map_err(|_| "failed to queue workspace persistence".to_string())?;
+
+        if flush_immediately {
+            self.flush()?;
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn flush(&self) -> Result<(), String> {
+        let (sender, receiver) = mpsc::channel();
+        self.sender
+            .send(PersistenceMessage::Flush(sender))
+            .map_err(|_| "failed to flush workspace persistence".to_string())?;
+        receiver
+            .recv()
+            .map_err(|_| "failed to await workspace persistence flush".to_string())
+    }
+}
+
+impl Drop for PersistenceCoordinator {
+    fn drop(&mut self) {
+        let _ = self.sender.send(PersistenceMessage::Shutdown);
+        if let Ok(mut worker) = self.worker.lock() {
+            if let Some(handle) = worker.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+}
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -278,19 +354,76 @@ pub(crate) fn record_runtime_activity(
     Some(snapshot)
 }
 
+fn run_persistence_worker(receiver: mpsc::Receiver<PersistenceMessage>) {
+    let mut shutdown_requested = false;
+
+    loop {
+        let message = match receiver.recv() {
+            Ok(message) => message,
+            Err(_) => break,
+        };
+
+        match message {
+            PersistenceMessage::Persist(request) => {
+                let mut latest = request;
+                let mut flush_waiters = Vec::new();
+
+                loop {
+                    match receiver.try_recv() {
+                        Ok(PersistenceMessage::Persist(next)) => latest = next,
+                        Ok(PersistenceMessage::Flush(waiter)) => flush_waiters.push(waiter),
+                        Ok(PersistenceMessage::Shutdown) => {
+                            shutdown_requested = true;
+                            break;
+                        }
+                        Err(mpsc::TryRecvError::Empty) => break,
+                        Err(mpsc::TryRecvError::Disconnected) => {
+                            shutdown_requested = true;
+                            break;
+                        }
+                    }
+                }
+
+                if let Err(error) = write_persisted_request(latest) {
+                    eprintln!("{error}");
+                }
+
+                for waiter in flush_waiters {
+                    let _ = waiter.send(());
+                }
+
+                if shutdown_requested {
+                    break;
+                }
+            }
+            PersistenceMessage::Flush(waiter) => {
+                let _ = waiter.send(());
+            }
+            PersistenceMessage::Shutdown => break,
+        }
+    }
+}
+
+fn write_persisted_request(request: PersistedWriteRequest) -> Result<(), String> {
+    if let Some(parent) = request.path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create app data directory: {error}"))?;
+    }
+
+    let payload = serde_json::to_vec(&request.state)
+        .map_err(|error| format!("failed to serialize workspace state: {error}"))?;
+    fs::write(&request.path, payload)
+        .map_err(|error| format!("failed to persist workspace state: {error}"))
+}
+
 pub(crate) fn persist_to_disk(runtime: &RuntimeState) -> Result<(), String> {
     let Some(path) = runtime.persistence_path.as_ref() else {
         return Ok(());
     };
 
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|error| format!("failed to create app data directory: {error}"))?;
-    }
-
-    let payload = serde_json::to_vec_pretty(&runtime.persisted_state())
-        .map_err(|error| format!("failed to serialize workspace state: {error}"))?;
-    fs::write(path, payload).map_err(|error| format!("failed to persist workspace state: {error}"))
+    runtime
+        .persistence
+        .schedule(path.clone(), runtime.persisted_state(), cfg!(test))
 }
 
 pub(crate) fn load_persisted_from_disk(
@@ -558,4 +691,69 @@ fn normalize_persisted_workspace_file_draft(
         draft: draft.draft,
         base_version_token,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        PersistedSettings, PersistedWorkspace, PersistedWorkspaceState, PersistenceCoordinator,
+    };
+    use std::{
+        fs,
+        path::PathBuf,
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    fn unique_test_path() -> PathBuf {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!("crewdock-persistence-test-{}", std::process::id()))
+            .join(format!("{timestamp}.json"))
+    }
+
+    fn build_persisted_state(name: &str) -> PersistedWorkspaceState {
+        PersistedWorkspaceState {
+            settings: PersistedSettings::default(),
+            workspaces: vec![PersistedWorkspace {
+                path: format!("/tmp/{name}"),
+                name: Some(name.to_string()),
+                codex_session_id: None,
+                pane_restore_bindings: Vec::new(),
+                pane_count: Some(1),
+                layout_id: None,
+                pane_layout: None,
+                todos: Vec::new(),
+                file_draft: None,
+            }],
+            recent_activity: Vec::new(),
+            active_workspace_index: Some(0),
+            active_workspace_path: Some(format!("/tmp/{name}")),
+        }
+    }
+
+    #[test]
+    fn persistence_coordinator_flushes_latest_scheduled_state() {
+        let path = unique_test_path();
+        let coordinator = PersistenceCoordinator::default();
+
+        coordinator
+            .schedule(path.clone(), build_persisted_state("first"), false)
+            .expect("first state should queue");
+        coordinator
+            .schedule(path.clone(), build_persisted_state("second"), false)
+            .expect("second state should queue");
+        coordinator.flush().expect("flush should succeed");
+
+        let payload = fs::read_to_string(&path).expect("state file should exist");
+        assert!(payload.contains("second"));
+        assert!(!payload.contains("first"));
+
+        if let Some(parent) = path.parent() {
+            let _ = fs::remove_file(&path);
+            let _ = fs::remove_dir(parent);
+        }
+    }
 }

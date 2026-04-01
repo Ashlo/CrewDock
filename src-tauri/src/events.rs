@@ -1,9 +1,10 @@
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
 
-use super::{persistence::ActivityEventSnapshot, source_control::GitTaskSnapshot, AppSnapshot};
+use super::{
+    persistence::ActivityEventSnapshot, source_control::GitTaskSnapshot, GitSummarySnapshot,
+};
 
-const STATE_EVENT: &str = "crewdock://state-changed";
 const TERMINAL_DATA_EVENT: &str = "crewdock://terminal-data";
 const RUNTIME_EVENT: &str = "crewdock://runtime-event";
 
@@ -37,6 +38,10 @@ pub(crate) enum RuntimeEvent {
         workspace_id: String,
         task: GitTaskSnapshot,
     },
+    WorkspaceGitSummaryUpdated {
+        workspace_id: String,
+        summary: GitSummarySnapshot,
+    },
     ActivityRecorded {
         event: ActivityEventSnapshot,
     },
@@ -56,11 +61,6 @@ pub(crate) enum RuntimeEvent {
         session_id: Option<String>,
         error: String,
     },
-}
-
-pub(crate) fn emit_snapshot(app: &AppHandle, snapshot: &AppSnapshot) -> Result<(), String> {
-    app.emit(STATE_EVENT, snapshot)
-        .map_err(|error| error.to_string())
 }
 
 pub(crate) fn emit_terminal_data(

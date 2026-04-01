@@ -58,17 +58,17 @@ const FILE_EXPLORER_HIDDEN_NAMES: [&str; 14] = [
 const LOGIN_SHELL_PATH_START_MARKER: &[u8] = b"__CREWDOCK_PATH_START__";
 const LOGIN_SHELL_PATH_END_MARKER: &[u8] = b"__CREWDOCK_PATH_END__";
 
-use events::{emit_runtime_event, emit_snapshot};
+use events::emit_runtime_event;
 use persistence::resolve_persistence_path;
 use session_manager::{prepare_workspace_launch, spawn_pane_jobs, LiveSession, PaneJob};
 use source_control::{
     build_commit_message_generation_request, discard_paths, generate_commit_message_with_openai,
     git_task_write_stdin as write_git_task_input, load_git_remotes,
-    load_workspace_git_commit_detail as build_workspace_git_commit_detail,
-    load_workspace_git_diff as build_workspace_git_diff,
-    load_workspace_source_control as build_workspace_source_control, select_default_git_remote,
-    stage_paths, start_git_task, unstage_paths, GitCommitDetailSnapshot, GitDiffMode,
-    GitDiffSnapshot, GitTaskRecord, WorkspaceSourceControlSnapshot,
+    load_workspace_source_control as build_workspace_source_control,
+    load_workspace_source_control_from_context as build_workspace_source_control_from_context,
+    select_default_git_remote, stage_paths, start_git_task, unstage_paths,
+    workspace_source_control_context, GitCommitDetailSnapshot, GitDiffMode, GitDiffSnapshot,
+    GitTaskRecord, WorkspaceSourceControlSnapshot,
 };
 
 #[derive(Clone)]
@@ -110,6 +110,7 @@ struct RuntimeState {
     git_tasks: HashMap<String, GitTaskRecord>,
     pending_codex_starts: Vec<PendingCodexStartRecord>,
     persistence_path: Option<PathBuf>,
+    persistence: persistence::PersistenceCoordinator,
 }
 
 struct SystemHealthMonitor {
@@ -213,6 +214,7 @@ impl RuntimeState {
             git_tasks: HashMap::new(),
             pending_codex_starts: Vec::new(),
             persistence_path: None,
+            persistence: persistence::PersistenceCoordinator::default(),
         }
     }
 
@@ -288,10 +290,6 @@ impl RuntimeState {
         persisted_layout: Option<&PersistedPaneLayout>,
     ) -> Result<WorkspaceRecord, String> {
         workspace_manager::build_workspace_record(self, path, pane_count, persisted_layout)
-    }
-
-    fn refresh_workspace_git(&mut self, workspace_id: &str) -> Result<(), String> {
-        workspace_manager::refresh_workspace_git(self, workspace_id)
     }
 
     fn active_workspace_path(&self) -> Option<String> {
@@ -640,6 +638,13 @@ struct WorkspaceSnapshot {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct WorkspaceGitSummaryUpdateSnapshot {
+    workspace_id: String,
+    summary: GitSummarySnapshot,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct GitSummarySnapshot {
     state: GitState,
     branch: Option<String>,
@@ -817,12 +822,18 @@ struct ExternalWorkspaceTargetSpec {
     app_name: Option<&'static str>,
 }
 
-const EXTERNAL_WORKSPACE_TARGET_SPECS: [ExternalWorkspaceTargetSpec; 10] = [
+const EXTERNAL_WORKSPACE_TARGET_SPECS: [ExternalWorkspaceTargetSpec; 11] = [
     ExternalWorkspaceTargetSpec {
         id: "cursor",
         label: "Cursor",
         kind: ExternalWorkspaceTargetKind::Editor,
         app_name: Some("Cursor"),
+    },
+    ExternalWorkspaceTargetSpec {
+        id: "antigravity",
+        label: "Antigravity",
+        kind: ExternalWorkspaceTargetKind::Editor,
+        app_name: Some("Antigravity"),
     },
     ExternalWorkspaceTargetSpec {
         id: "vscode",
@@ -1603,7 +1614,13 @@ fn maybe_auto_restore_codex_for_ready_pane(
     workspace_id: &str,
     pane_id: &str,
 ) -> Result<(), String> {
-    let outcome = {
+    let outcome: (
+        Option<Arc<Mutex<Box<dyn Write + Send>>>>,
+        Option<String>,
+        Option<events::RuntimeEvent>,
+        Option<events::RuntimeEvent>,
+        Option<events::RuntimeEvent>,
+    ) = {
         let mut runtime = shared
             .lock()
             .map_err(|_| "failed to acquire application state".to_string())?;
@@ -1649,7 +1666,6 @@ fn maybe_auto_restore_codex_for_ready_pane(
                     session_id: Some(binding.session_id.clone()),
                     error,
                 }),
-                None,
             )
         } else if find_codex_session_meta_for_workspace(&binding.cwd, &binding.session_id).is_none()
         {
@@ -1658,7 +1674,6 @@ fn maybe_auto_restore_codex_for_ready_pane(
                 slot_index,
             );
             runtime.persist_to_disk()?;
-            let snapshot = runtime.build_snapshot();
             (
                 None,
                 None,
@@ -1670,7 +1685,6 @@ fn maybe_auto_restore_codex_for_ready_pane(
                     session_id: Some(binding.session_id.clone()),
                     error: "Saved Codex session is no longer present in local history.".to_string(),
                 }),
-                Some(snapshot),
             )
         } else {
             let codex_binary = runtime.codex_cli.effective_path.clone().unwrap_or_default();
@@ -1694,15 +1708,10 @@ fn maybe_auto_restore_codex_for_ready_pane(
                     session_id: binding.session_id.clone(),
                 }),
                 None,
-                None,
             )
         }
     };
-    let (writer, command, start_event, success_event, failure_event, snapshot) = outcome;
-
-    if let Some(snapshot) = snapshot.as_ref() {
-        emit_snapshot(app, snapshot)?;
-    }
+    let (writer, command, start_event, success_event, failure_event) = outcome;
     if let Some(event) = failure_event.as_ref() {
         emit_runtime_event(app, event)?;
         return Ok(());
@@ -1746,12 +1755,12 @@ fn maybe_auto_restore_codex_for_ready_pane(
 
 fn spawn_pending_codex_start_discovery(
     shared: Arc<Mutex<RuntimeState>>,
-    app: AppHandle,
+    _app: AppHandle,
     workspace_id: String,
 ) {
     std::thread::spawn(move || {
         for _ in 0..CODEX_PENDING_START_DISCOVERY_ATTEMPTS {
-            match try_bind_pending_codex_start(&shared, &app, &workspace_id) {
+            match try_bind_pending_codex_start(&shared, &workspace_id) {
                 Ok(true) => return,
                 Ok(false) => {
                     std::thread::sleep(std::time::Duration::from_millis(
@@ -1769,7 +1778,6 @@ fn spawn_pending_codex_start_discovery(
 
 fn try_bind_pending_codex_start(
     shared: &Arc<Mutex<RuntimeState>>,
-    app: &AppHandle,
     workspace_id: &str,
 ) -> Result<bool, String> {
     let pending = {
@@ -1825,7 +1833,7 @@ fn try_bind_pending_codex_start(
     }
 
     let discovered = new_sessions[0].clone();
-    let snapshot = {
+    {
         let mut runtime = shared
             .lock()
             .map_err(|_| "failed to acquire application state".to_string())?;
@@ -1870,10 +1878,8 @@ fn try_bind_pending_codex_start(
         runtime.workspaces[workspace_index].codex_session_id = Some(discovered.id.clone());
         runtime.clear_pending_codex_start_for_pane(&pending.pane_id);
         runtime.persist_to_disk()?;
-        runtime.build_snapshot()
     };
 
-    emit_snapshot(app, &snapshot)?;
     Ok(true)
 }
 
@@ -2196,25 +2202,48 @@ fn normalize_path_for_comparison(path: &str) -> String {
         .to_string()
 }
 
-fn load_workspace_file_explorer_directory_snapshot(
+fn resolve_workspace_root(
     runtime: &RuntimeState,
     workspace_id: &str,
-    relative_path: &str,
-) -> Result<WorkspaceFileExplorerDirectorySnapshot, String> {
+) -> Result<(String, PathBuf), String> {
     let workspace = runtime
         .workspaces
         .iter()
         .find(|workspace| workspace.id == workspace_id)
         .ok_or_else(|| "workspace not found".to_string())?;
-    let workspace_root = normalize_workspace_path(&workspace.path)?;
+
+    Ok((
+        workspace.id.clone(),
+        normalize_workspace_path(&workspace.path)?,
+    ))
+}
+
+#[cfg(test)]
+fn load_workspace_file_explorer_directory_snapshot(
+    runtime: &RuntimeState,
+    workspace_id: &str,
+    relative_path: &str,
+) -> Result<WorkspaceFileExplorerDirectorySnapshot, String> {
+    let (workspace_id, workspace_root) = resolve_workspace_root(runtime, workspace_id)?;
+    load_workspace_file_explorer_directory_snapshot_for_root(
+        &workspace_id,
+        &workspace_root,
+        relative_path,
+    )
+}
+
+fn load_workspace_file_explorer_directory_snapshot_for_root(
+    workspace_id: &str,
+    workspace_root: &Path,
+    relative_path: &str,
+) -> Result<WorkspaceFileExplorerDirectorySnapshot, String> {
     let normalized_relative_path = normalize_workspace_relative_path(relative_path)?;
-    let target =
-        resolve_workspace_file_explorer_target(&workspace_root, &normalized_relative_path)?;
+    let target = resolve_workspace_file_explorer_target(workspace_root, &normalized_relative_path)?;
     let entries =
-        list_workspace_file_explorer_entries(&workspace_root, &normalized_relative_path, &target)?;
+        list_workspace_file_explorer_entries(workspace_root, &normalized_relative_path, &target)?;
 
     Ok(WorkspaceFileExplorerDirectorySnapshot {
-        workspace_id: workspace.id.clone(),
+        workspace_id: workspace_id.to_string(),
         relative_path: normalized_relative_path,
         entries,
     })
@@ -2281,17 +2310,11 @@ struct ResolvedWorkspaceTextFileTarget {
     is_symlink: bool,
 }
 
-fn resolve_workspace_text_file_target(
-    runtime: &RuntimeState,
+fn resolve_workspace_text_file_target_for_root(
     workspace_id: &str,
+    workspace_root: &Path,
     relative_path: &str,
 ) -> Result<ResolvedWorkspaceTextFileTarget, String> {
-    let workspace = runtime
-        .workspaces
-        .iter()
-        .find(|workspace| workspace.id == workspace_id)
-        .ok_or_else(|| "workspace not found".to_string())?;
-    let workspace_root = normalize_workspace_path(&workspace.path)?;
     let normalized_relative_path = normalize_workspace_relative_path(relative_path)?;
     if normalized_relative_path.is_empty() {
         return Err("path must be workspace-relative".to_string());
@@ -2313,7 +2336,7 @@ fn resolve_workspace_text_file_target(
     }
 
     Ok(ResolvedWorkspaceTextFileTarget {
-        workspace_id: workspace.id.clone(),
+        workspace_id: workspace_id.to_string(),
         relative_path: normalized_relative_path,
         target_path,
         metadata,
@@ -2388,12 +2411,23 @@ fn detect_workspace_text_file_newline_style(
     })
 }
 
+#[cfg(test)]
 fn load_workspace_text_file_snapshot(
     runtime: &RuntimeState,
     workspace_id: &str,
     relative_path: &str,
 ) -> Result<WorkspaceTextFileSnapshot, String> {
-    let resolved = resolve_workspace_text_file_target(runtime, workspace_id, relative_path)?;
+    let (workspace_id, workspace_root) = resolve_workspace_root(runtime, workspace_id)?;
+    load_workspace_text_file_snapshot_for_root(&workspace_id, &workspace_root, relative_path)
+}
+
+fn load_workspace_text_file_snapshot_for_root(
+    workspace_id: &str,
+    workspace_root: &Path,
+    relative_path: &str,
+) -> Result<WorkspaceTextFileSnapshot, String> {
+    let resolved =
+        resolve_workspace_text_file_target_for_root(workspace_id, workspace_root, relative_path)?;
     let metadata_version_token = workspace_text_file_metadata_version_token(&resolved.metadata);
 
     if resolved.is_symlink {
@@ -2493,6 +2527,7 @@ fn load_workspace_text_file_snapshot(
     })
 }
 
+#[cfg(test)]
 fn save_workspace_text_file_snapshot(
     runtime: &RuntimeState,
     workspace_id: &str,
@@ -2500,7 +2535,25 @@ fn save_workspace_text_file_snapshot(
     content: &str,
     expected_version_token: &str,
 ) -> Result<WorkspaceTextFileSnapshot, String> {
-    let resolved = resolve_workspace_text_file_target(runtime, workspace_id, relative_path)?;
+    let (workspace_id, workspace_root) = resolve_workspace_root(runtime, workspace_id)?;
+    save_workspace_text_file_snapshot_for_root(
+        &workspace_id,
+        &workspace_root,
+        relative_path,
+        content,
+        expected_version_token,
+    )
+}
+
+fn save_workspace_text_file_snapshot_for_root(
+    workspace_id: &str,
+    workspace_root: &Path,
+    relative_path: &str,
+    content: &str,
+    expected_version_token: &str,
+) -> Result<WorkspaceTextFileSnapshot, String> {
+    let resolved =
+        resolve_workspace_text_file_target_for_root(workspace_id, workspace_root, relative_path)?;
     if resolved.is_symlink {
         return Err("symlinked files are not editable in CrewDock yet.".to_string());
     }
@@ -2528,7 +2581,7 @@ fn save_workspace_text_file_snapshot(
 
     fs::write(&resolved.target_path, content.as_bytes())
         .map_err(|error| format!("failed to save file: {error}"))?;
-    load_workspace_text_file_snapshot(runtime, workspace_id, relative_path)
+    load_workspace_text_file_snapshot_for_root(workspace_id, workspace_root, relative_path)
 }
 
 fn persist_workspace_file_draft_record(
@@ -2911,7 +2964,7 @@ fn load_system_health_snapshot(
 }
 
 #[tauri::command]
-fn reset_to_launcher(state: State<'_, AppState>, app: AppHandle) -> Result<AppSnapshot, String> {
+fn reset_to_launcher(state: State<'_, AppState>, _app: AppHandle) -> Result<AppSnapshot, String> {
     let (snapshot, killers) = {
         let mut runtime = state
             .inner
@@ -2926,7 +2979,6 @@ fn reset_to_launcher(state: State<'_, AppState>, app: AppHandle) -> Result<AppSn
     };
 
     terminate_sessions(killers);
-    emit_snapshot(&app, &snapshot)?;
     Ok(snapshot)
 }
 
@@ -2955,7 +3007,6 @@ fn create_workspace(
         (runtime.build_snapshot(), runtime.shell.clone(), pane_jobs)
     };
 
-    emit_snapshot(&app, &snapshot)?;
     spawn_pane_jobs(shared, app.clone(), shell, pane_jobs);
     Ok(snapshot)
 }
@@ -2965,7 +3016,7 @@ fn rename_workspace(
     workspace_id: String,
     name: String,
     state: State<'_, AppState>,
-    app: AppHandle,
+    _app: AppHandle,
 ) -> Result<AppSnapshot, String> {
     let snapshot = {
         let mut runtime = state
@@ -2976,8 +3027,6 @@ fn rename_workspace(
         workspace_manager::rename_workspace_in_runtime(&mut runtime, &workspace_id, &name)?;
         runtime.build_snapshot()
     };
-
-    emit_snapshot(&app, &snapshot)?;
     Ok(snapshot)
 }
 
@@ -2986,7 +3035,7 @@ fn add_workspace_todo(
     workspace_id: String,
     text: String,
     state: State<'_, AppState>,
-    app: AppHandle,
+    _app: AppHandle,
 ) -> Result<AppSnapshot, String> {
     let snapshot = {
         let mut runtime = state
@@ -2997,8 +3046,6 @@ fn add_workspace_todo(
         workspace_manager::add_workspace_todo_in_runtime(&mut runtime, &workspace_id, &text)?;
         runtime.build_snapshot()
     };
-
-    emit_snapshot(&app, &snapshot)?;
     Ok(snapshot)
 }
 
@@ -3008,7 +3055,7 @@ fn update_workspace_todo(
     todo_id: String,
     text: String,
     state: State<'_, AppState>,
-    app: AppHandle,
+    _app: AppHandle,
 ) -> Result<AppSnapshot, String> {
     let snapshot = {
         let mut runtime = state
@@ -3024,8 +3071,6 @@ fn update_workspace_todo(
         )?;
         runtime.build_snapshot()
     };
-
-    emit_snapshot(&app, &snapshot)?;
     Ok(snapshot)
 }
 
@@ -3035,7 +3080,7 @@ fn set_workspace_todo_done(
     todo_id: String,
     done: bool,
     state: State<'_, AppState>,
-    app: AppHandle,
+    _app: AppHandle,
 ) -> Result<AppSnapshot, String> {
     let snapshot = {
         let mut runtime = state
@@ -3051,8 +3096,6 @@ fn set_workspace_todo_done(
         )?;
         runtime.build_snapshot()
     };
-
-    emit_snapshot(&app, &snapshot)?;
     Ok(snapshot)
 }
 
@@ -3061,7 +3104,7 @@ fn delete_workspace_todo(
     workspace_id: String,
     todo_id: String,
     state: State<'_, AppState>,
-    app: AppHandle,
+    _app: AppHandle,
 ) -> Result<AppSnapshot, String> {
     let snapshot = {
         let mut runtime = state
@@ -3072,8 +3115,6 @@ fn delete_workspace_todo(
         workspace_manager::delete_workspace_todo_in_runtime(&mut runtime, &workspace_id, &todo_id)?;
         runtime.build_snapshot()
     };
-
-    emit_snapshot(&app, &snapshot)?;
     Ok(snapshot)
 }
 
@@ -3082,7 +3123,7 @@ fn reorder_workspace(
     workspace_id: String,
     target_index: usize,
     state: State<'_, AppState>,
-    app: AppHandle,
+    _app: AppHandle,
 ) -> Result<AppSnapshot, String> {
     let snapshot = {
         let mut runtime = state
@@ -3093,8 +3134,6 @@ fn reorder_workspace(
         workspace_manager::reorder_workspace_in_runtime(&mut runtime, &workspace_id, target_index)?;
         runtime.build_snapshot()
     };
-
-    emit_snapshot(&app, &snapshot)?;
     Ok(snapshot)
 }
 
@@ -3116,7 +3155,6 @@ fn switch_workspace(
         (runtime.build_snapshot(), runtime.shell.clone(), pane_jobs)
     };
 
-    emit_snapshot(&app, &snapshot)?;
     spawn_pane_jobs(shared, app.clone(), shell, pane_jobs);
     Ok(snapshot)
 }
@@ -3145,7 +3183,6 @@ fn close_workspace(
     };
 
     terminate_sessions(killers);
-    emit_snapshot(&app, &snapshot)?;
     spawn_pane_jobs(shared, app.clone(), shell, pane_jobs);
     Ok(snapshot)
 }
@@ -3170,7 +3207,6 @@ fn split_pane(
         (runtime.build_snapshot(), runtime.shell.clone(), pane_jobs)
     };
 
-    emit_snapshot(&app, &snapshot)?;
     spawn_pane_jobs(shared, app.clone(), shell, pane_jobs);
     Ok(snapshot)
 }
@@ -3179,7 +3215,7 @@ fn split_pane(
 fn close_pane(
     pane_id: String,
     state: State<'_, AppState>,
-    app: AppHandle,
+    _app: AppHandle,
 ) -> Result<AppSnapshot, String> {
     let (snapshot, killers) = {
         let mut runtime = state
@@ -3192,7 +3228,6 @@ fn close_pane(
     };
 
     terminate_sessions(killers);
-    emit_snapshot(&app, &snapshot)?;
     Ok(snapshot)
 }
 
@@ -3484,7 +3519,7 @@ fn set_settings(
     interface_text_scale: f64,
     terminal_font_size: f64,
     state: State<'_, AppState>,
-    app: AppHandle,
+    _app: AppHandle,
 ) -> Result<AppSnapshot, String> {
     let snapshot = {
         let mut runtime = state
@@ -3500,8 +3535,6 @@ fn set_settings(
         runtime.persist_to_disk()?;
         runtime.build_snapshot()
     };
-
-    emit_snapshot(&app, &snapshot)?;
     Ok(snapshot)
 }
 
@@ -3509,7 +3542,7 @@ fn set_settings(
 fn set_theme(
     theme_id: String,
     state: State<'_, AppState>,
-    app: AppHandle,
+    _app: AppHandle,
 ) -> Result<AppSnapshot, String> {
     let snapshot = {
         let mut runtime = state
@@ -3522,8 +3555,6 @@ fn set_theme(
         runtime.persist_to_disk()?;
         runtime.build_snapshot()
     };
-
-    emit_snapshot(&app, &snapshot)?;
     Ok(snapshot)
 }
 
@@ -3531,7 +3562,7 @@ fn set_theme(
 fn set_interface_text_scale(
     interface_text_scale: f64,
     state: State<'_, AppState>,
-    app: AppHandle,
+    _app: AppHandle,
 ) -> Result<AppSnapshot, String> {
     let snapshot = {
         let mut runtime = state
@@ -3544,8 +3575,6 @@ fn set_interface_text_scale(
         runtime.persist_to_disk()?;
         runtime.build_snapshot()
     };
-
-    emit_snapshot(&app, &snapshot)?;
     Ok(snapshot)
 }
 
@@ -3553,7 +3582,7 @@ fn set_interface_text_scale(
 fn set_terminal_font_size(
     terminal_font_size: f64,
     state: State<'_, AppState>,
-    app: AppHandle,
+    _app: AppHandle,
 ) -> Result<AppSnapshot, String> {
     let snapshot = {
         let mut runtime = state
@@ -3565,8 +3594,6 @@ fn set_terminal_font_size(
         runtime.persist_to_disk()?;
         runtime.build_snapshot()
     };
-
-    emit_snapshot(&app, &snapshot)?;
     Ok(snapshot)
 }
 
@@ -3574,7 +3601,7 @@ fn set_terminal_font_size(
 fn set_openai_api_key(
     openai_api_key: Option<String>,
     state: State<'_, AppState>,
-    app: AppHandle,
+    _app: AppHandle,
 ) -> Result<AppSnapshot, String> {
     let snapshot = {
         let mut runtime = state
@@ -3586,8 +3613,6 @@ fn set_openai_api_key(
         runtime.persist_to_disk()?;
         runtime.build_snapshot()
     };
-
-    emit_snapshot(&app, &snapshot)?;
     Ok(snapshot)
 }
 
@@ -3595,7 +3620,7 @@ fn set_openai_api_key(
 fn set_codex_cli_path(
     codex_cli_path: Option<String>,
     state: State<'_, AppState>,
-    app: AppHandle,
+    _app: AppHandle,
 ) -> Result<AppSnapshot, String> {
     let snapshot = {
         let mut runtime = state
@@ -3614,15 +3639,13 @@ fn set_codex_cli_path(
         runtime.persist_to_disk()?;
         runtime.build_snapshot()
     };
-
-    emit_snapshot(&app, &snapshot)?;
     Ok(snapshot)
 }
 
 #[tauri::command]
 fn refresh_codex_cli_catalog(
     state: State<'_, AppState>,
-    app: AppHandle,
+    _app: AppHandle,
 ) -> Result<AppSnapshot, String> {
     let snapshot = {
         let mut runtime = state
@@ -3633,8 +3656,6 @@ fn refresh_codex_cli_catalog(
         runtime.refresh_codex_cli();
         runtime.build_snapshot()
     };
-
-    emit_snapshot(&app, &snapshot)?;
     Ok(snapshot)
 }
 
@@ -3675,7 +3696,7 @@ fn resume_workspace_codex_session(
     pane_id: String,
     session_id: String,
     state: State<'_, AppState>,
-    app: AppHandle,
+    _app: AppHandle,
 ) -> Result<AppSnapshot, String> {
     let session_id = normalize_optional_codex_session_id(Some(session_id))
         .ok_or_else(|| "session id is required".to_string())?;
@@ -3734,7 +3755,6 @@ fn resume_workspace_codex_session(
     };
 
     write_shell_command(&writer, &command)?;
-    emit_snapshot(&app, &snapshot)?;
     Ok(snapshot)
 }
 
@@ -3838,19 +3858,42 @@ fn refresh_workspace_git_status(
     workspace_id: String,
     state: State<'_, AppState>,
     app: AppHandle,
-) -> Result<AppSnapshot, String> {
-    let snapshot = {
+) -> Result<WorkspaceGitSummaryUpdateSnapshot, String> {
+    let workspace_path = {
+        let runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+        source_control::workspace_path(&runtime, &workspace_id)?
+    };
+    let detail = collect_git_detail(Path::new(&workspace_path));
+    let summary = detail.summary.clone();
+
+    {
         let mut runtime = state
             .inner
             .lock()
             .map_err(|_| "failed to acquire application state".to_string())?;
+        let workspace = runtime
+            .workspaces
+            .iter_mut()
+            .find(|workspace| workspace.id == workspace_id)
+            .ok_or_else(|| "workspace not found".to_string())?;
+        workspace.git = Some(detail);
+    }
 
-        runtime.refresh_workspace_git(&workspace_id)?;
-        runtime.build_snapshot()
-    };
+    emit_runtime_event(
+        &app,
+        &events::RuntimeEvent::WorkspaceGitSummaryUpdated {
+            workspace_id: workspace_id.clone(),
+            summary: summary.clone(),
+        },
+    )?;
 
-    emit_snapshot(&app, &snapshot)?;
-    Ok(snapshot)
+    Ok(WorkspaceGitSummaryUpdateSnapshot {
+        workspace_id,
+        summary,
+    })
 }
 
 #[tauri::command]
@@ -3859,11 +3902,14 @@ fn load_workspace_source_control(
     graph_cursor: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<WorkspaceSourceControlSnapshot, String> {
-    let runtime = state
-        .inner
-        .lock()
-        .map_err(|_| "failed to acquire application state".to_string())?;
-    build_workspace_source_control(&runtime, &workspace_id, graph_cursor)
+    let context = {
+        let runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+        workspace_source_control_context(&runtime, &workspace_id)?
+    };
+    build_workspace_source_control_from_context(&context, graph_cursor)
 }
 
 #[tauri::command]
@@ -3872,11 +3918,18 @@ fn load_workspace_file_explorer_directory(
     relative_path: String,
     state: State<'_, AppState>,
 ) -> Result<WorkspaceFileExplorerDirectorySnapshot, String> {
-    let runtime = state
-        .inner
-        .lock()
-        .map_err(|_| "failed to acquire application state".to_string())?;
-    load_workspace_file_explorer_directory_snapshot(&runtime, &workspace_id, &relative_path)
+    let (workspace_id, workspace_root) = {
+        let runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+        resolve_workspace_root(&runtime, &workspace_id)?
+    };
+    load_workspace_file_explorer_directory_snapshot_for_root(
+        &workspace_id,
+        &workspace_root,
+        &relative_path,
+    )
 }
 
 #[tauri::command]
@@ -3885,11 +3938,14 @@ fn load_workspace_text_file(
     relative_path: String,
     state: State<'_, AppState>,
 ) -> Result<WorkspaceTextFileSnapshot, String> {
-    let runtime = state
-        .inner
-        .lock()
-        .map_err(|_| "failed to acquire application state".to_string())?;
-    load_workspace_text_file_snapshot(&runtime, &workspace_id, &relative_path)
+    let (workspace_id, workspace_root) = {
+        let runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+        resolve_workspace_root(&runtime, &workspace_id)?
+    };
+    load_workspace_text_file_snapshot_for_root(&workspace_id, &workspace_root, &relative_path)
 }
 
 #[tauri::command]
@@ -3900,13 +3956,16 @@ fn save_workspace_text_file(
     expected_version_token: String,
     state: State<'_, AppState>,
 ) -> Result<WorkspaceTextFileSnapshot, String> {
-    let runtime = state
-        .inner
-        .lock()
-        .map_err(|_| "failed to acquire application state".to_string())?;
-    save_workspace_text_file_snapshot(
-        &runtime,
+    let (workspace_id, workspace_root) = {
+        let runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+        resolve_workspace_root(&runtime, &workspace_id)?
+    };
+    save_workspace_text_file_snapshot_for_root(
         &workspace_id,
+        &workspace_root,
         &relative_path,
         &content,
         &expected_version_token,
@@ -3958,11 +4017,14 @@ fn load_workspace_git_diff(
         _ => GitDiffMode::WorkingTree,
     };
 
-    let runtime = state
-        .inner
-        .lock()
-        .map_err(|_| "failed to acquire application state".to_string())?;
-    build_workspace_git_diff(&runtime, &workspace_id, &path, mode)
+    let workspace_path = {
+        let runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+        source_control::workspace_path(&runtime, &workspace_id)?
+    };
+    source_control::load_workspace_git_diff_for_path(&workspace_path, &path, mode)
 }
 
 #[tauri::command]
@@ -3971,11 +4033,14 @@ fn load_workspace_git_commit_detail(
     oid: String,
     state: State<'_, AppState>,
 ) -> Result<GitCommitDetailSnapshot, String> {
-    let runtime = state
-        .inner
-        .lock()
-        .map_err(|_| "failed to acquire application state".to_string())?;
-    build_workspace_git_commit_detail(&runtime, &workspace_id, &oid)
+    let workspace_path = {
+        let runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+        source_control::workspace_path(&runtime, &workspace_id)?
+    };
+    source_control::load_workspace_git_commit_detail_for_path(&workspace_path, &oid)
 }
 
 fn validate_git_cli_arg(value: String, label: &str) -> Result<String, String> {
@@ -4005,19 +4070,16 @@ fn git_stage_paths(
     workspace_id: String,
     paths: Vec<String>,
     state: State<'_, AppState>,
-    app: AppHandle,
+    _app: AppHandle,
 ) -> Result<WorkspaceSourceControlSnapshot, String> {
-    let (snapshot, source_control) = {
+    let source_control = {
         let mut runtime = state
             .inner
             .lock()
             .map_err(|_| "failed to acquire application state".to_string())?;
         stage_paths(&mut runtime, &workspace_id, &paths)?;
-        let source_control = build_workspace_source_control(&runtime, &workspace_id, None)?;
-        (runtime.build_snapshot(), source_control)
+        build_workspace_source_control(&runtime, &workspace_id, None)?
     };
-
-    emit_snapshot(&app, &snapshot)?;
     Ok(source_control)
 }
 
@@ -4026,19 +4088,16 @@ fn git_unstage_paths(
     workspace_id: String,
     paths: Vec<String>,
     state: State<'_, AppState>,
-    app: AppHandle,
+    _app: AppHandle,
 ) -> Result<WorkspaceSourceControlSnapshot, String> {
-    let (snapshot, source_control) = {
+    let source_control = {
         let mut runtime = state
             .inner
             .lock()
             .map_err(|_| "failed to acquire application state".to_string())?;
         unstage_paths(&mut runtime, &workspace_id, &paths)?;
-        let source_control = build_workspace_source_control(&runtime, &workspace_id, None)?;
-        (runtime.build_snapshot(), source_control)
+        build_workspace_source_control(&runtime, &workspace_id, None)?
     };
-
-    emit_snapshot(&app, &snapshot)?;
     Ok(source_control)
 }
 
@@ -4047,19 +4106,16 @@ fn git_discard_paths(
     workspace_id: String,
     paths: Vec<String>,
     state: State<'_, AppState>,
-    app: AppHandle,
+    _app: AppHandle,
 ) -> Result<WorkspaceSourceControlSnapshot, String> {
-    let (snapshot, source_control) = {
+    let source_control = {
         let mut runtime = state
             .inner
             .lock()
             .map_err(|_| "failed to acquire application state".to_string())?;
         discard_paths(&mut runtime, &workspace_id, &paths)?;
-        let source_control = build_workspace_source_control(&runtime, &workspace_id, None)?;
-        (runtime.build_snapshot(), source_control)
+        build_workspace_source_control(&runtime, &workspace_id, None)?
     };
-
-    emit_snapshot(&app, &snapshot)?;
     Ok(source_control)
 }
 
@@ -4077,15 +4133,13 @@ fn git_commit(
     }
 
     if commit_all.unwrap_or(false) {
-        let snapshot = {
+        {
             let mut runtime = state
                 .inner
                 .lock()
                 .map_err(|_| "failed to acquire application state".to_string())?;
             source_control::stage_all_changes(&mut runtime, &workspace_id)?;
-            runtime.build_snapshot()
-        };
-        emit_snapshot(&app, &snapshot)?;
+        }
     }
 
     start_git_task(
@@ -4304,11 +4358,11 @@ fn git_task_write_stdin(
     data: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    let runtime = state
+    let mut runtime = state
         .inner
         .lock()
         .map_err(|_| "failed to acquire application state".to_string())?;
-    write_git_task_input(&runtime, &workspace_id, &data)
+    write_git_task_input(&mut runtime, &workspace_id, &data)
 }
 
 #[tauri::command]
@@ -5843,10 +5897,14 @@ mod tests {
     }
 
     #[test]
-    fn external_workspace_targets_include_cursor_and_finder() {
+    fn external_workspace_targets_include_antigravity_cursor_and_finder() {
+        let antigravity =
+            external_workspace_target_spec("antigravity").expect("antigravity target should exist");
         let cursor = external_workspace_target_spec("cursor").expect("cursor target should exist");
         let finder = external_workspace_target_spec("finder").expect("finder target should exist");
 
+        assert_eq!(antigravity.label, "Antigravity");
+        assert_eq!(antigravity.kind, ExternalWorkspaceTargetKind::Editor);
         assert_eq!(cursor.label, "Cursor");
         assert_eq!(cursor.kind, ExternalWorkspaceTargetKind::Editor);
         assert_eq!(finder.kind, ExternalWorkspaceTargetKind::System);

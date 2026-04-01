@@ -271,6 +271,7 @@ function createMockBridge({
     `)}`;
   const mockExternalWorkspaceTargets = [
     { id: "cursor", label: "Cursor", kind: "editor", iconDataUrl: createMockWorkspaceTargetIconDataUrl("C", "#24262c") },
+    { id: "antigravity", label: "Antigravity", kind: "editor", iconDataUrl: createMockWorkspaceTargetIconDataUrl("A", "#1a2338") },
     { id: "vscode", label: "VS Code", kind: "editor", iconDataUrl: createMockWorkspaceTargetIconDataUrl("VS", "#1264d1") },
     { id: "windsurf", label: "Windsurf", kind: "editor", iconDataUrl: createMockWorkspaceTargetIconDataUrl("W", "#1766d6") },
     { id: "zed", label: "Zed", kind: "editor", iconDataUrl: createMockWorkspaceTargetIconDataUrl("Z", "#1d2128") },
@@ -342,6 +343,19 @@ function createMockBridge({
     }
   }
 
+  function emitWorkspaceGitSummaryUpdated(workspace) {
+    const summary = workspace?.gitDetail?.summary || null;
+    if (!workspace?.id || !summary) {
+      return;
+    }
+
+    emitRuntimeEvent({
+      kind: "workspaceGitSummaryUpdated",
+      workspaceId: workspace.id,
+      summary,
+    });
+  }
+
   function normalizeMockActivityEvent(event) {
     if (!event || !event.workspaceId || typeof event.kind !== "string") {
       return null;
@@ -394,8 +408,13 @@ function createMockBridge({
         }
 
         currentPane.status = "ready";
-        emitState();
         emitRuntimeEvent({
+          kind: "paneReady",
+          workspaceId: workspace.id,
+          paneId: currentPane.id,
+          label: currentPane.label,
+        });
+        emitActivityRecorded({
           kind: "paneReady",
           workspaceId: workspace.id,
           paneId: currentPane.id,
@@ -868,12 +887,12 @@ function createMockBridge({
     if (status === "succeeded") {
       syncMockGitDetail(workspace);
     }
-    emitState();
     emitRuntimeEvent({
       kind: "gitTaskSnapshot",
       workspaceId: workspace.id,
       task: workspace.gitTask,
     });
+    emitWorkspaceGitSummaryUpdated(workspace);
     emitActivityRecorded({
       kind: status === "failed" ? "gitTaskFailed" : "gitTaskSucceeded",
       workspaceId: workspace.id,
@@ -1128,8 +1147,15 @@ function createMockBridge({
       const workspace = workspaces.find((entry) => entry.id === workspaceId);
       if (workspace) {
         syncMockGitDetail(workspace);
+        return {
+          workspaceId: workspace.id,
+          summary: workspace.gitDetail?.summary || null,
+        };
       }
-      return emitState();
+      return {
+        workspaceId,
+        summary: null,
+      };
     },
     loadWorkspaceSourceControl: async (workspaceId, graphCursor = null) => {
       const workspace = workspaces.find((entry) => entry.id === workspaceId);
@@ -1341,8 +1367,13 @@ function createMockBridge({
       if (workspace.started) {
         window.setTimeout(() => {
           pane.status = "ready";
-          emitState();
           emitRuntimeEvent({
+            kind: "paneReady",
+            workspaceId: workspace.id,
+            paneId: pane.id,
+            label: pane.label,
+          });
+          emitActivityRecorded({
             kind: "paneReady",
             workspaceId: workspace.id,
             paneId: pane.id,
@@ -1389,6 +1420,12 @@ function createMockBridge({
       const snapshot = emitState();
       if (closedPane) {
         emitRuntimeEvent({
+          kind: "paneClosed",
+          workspaceId: currentWorkspace.id,
+          paneId,
+          label: closedPane.label,
+        });
+        emitActivityRecorded({
           kind: "paneClosed",
           workspaceId: currentWorkspace.id,
           paneId,

@@ -8,9 +8,7 @@ use portable_pty::{native_pty_system, Child, ChildKiller, CommandBuilder, Master
 use tauri::AppHandle;
 
 use super::{
-    events::{
-        emit_runtime_event, emit_snapshot, emit_terminal_data, RuntimeEvent, TerminalDataPayload,
-    },
+    events::{emit_runtime_event, emit_terminal_data, RuntimeEvent, TerminalDataPayload},
     persistence::{self, ActivityEventKind},
     PaneStatus, RuntimeState,
 };
@@ -140,7 +138,7 @@ fn spawn_terminal_session(
     let master = Arc::new(Mutex::new(pair.master));
     let writer = Arc::new(Mutex::new(writer));
 
-    let snapshot = {
+    let activity_event = {
         let mut runtime = shared
             .lock()
             .map_err(|_| "failed to acquire application state".to_string())?;
@@ -160,6 +158,14 @@ fn spawn_terminal_session(
         };
 
         pane.status = PaneStatus::Ready;
+        let activity_event = persistence::record_runtime_activity(
+            &mut runtime,
+            &workspace_id,
+            Some(&pane_id),
+            ActivityEventKind::PaneReady,
+            &label,
+            None,
+        );
         runtime.sessions.insert(
             pane_id.clone(),
             LiveSession {
@@ -170,10 +176,9 @@ fn spawn_terminal_session(
             },
         );
         runtime.persist_to_disk()?;
-        runtime.build_snapshot()
+        activity_event
     };
 
-    emit_snapshot(app, &snapshot)?;
     emit_runtime_event(
         app,
         &RuntimeEvent::PaneReady {
@@ -182,6 +187,14 @@ fn spawn_terminal_session(
             label: label.clone(),
         },
     )?;
+    if let Some(activity_event) = activity_event {
+        emit_runtime_event(
+            app,
+            &RuntimeEvent::ActivityRecorded {
+                event: activity_event,
+            },
+        )?;
+    }
     if let Err(error) =
         super::maybe_auto_restore_codex_for_ready_pane(shared, app, &workspace_id, &pane_id)
     {
@@ -214,14 +227,19 @@ fn stream_terminal_output(
     child: &mut Box<dyn Child + Send + Sync>,
 ) {
     let mut buffer = [0u8; 8192];
+    let mut pending_utf8 = Vec::new();
 
     loop {
         match reader.read(&mut buffer) {
             Ok(0) => break,
             Ok(read) => {
+                let data = decode_terminal_utf8_chunk(&mut pending_utf8, &buffer[..read]);
+                if data.is_empty() {
+                    continue;
+                }
                 let payload = TerminalDataPayload {
                     pane_id: pane_id.clone(),
-                    data: String::from_utf8_lossy(&buffer[..read]).into_owned(),
+                    data,
                 };
                 if let Err(error) = emit_terminal_data(&app, &payload) {
                     eprintln!("failed to emit terminal data: {error}");
@@ -235,6 +253,17 @@ fn stream_terminal_output(
                 return;
             }
         }
+    }
+
+    let trailing = flush_terminal_utf8_buffer(&mut pending_utf8);
+    if !trailing.is_empty() {
+        let _ = emit_terminal_data(
+            &app,
+            &TerminalDataPayload {
+                pane_id: pane_id.clone(),
+                data: trailing,
+            },
+        );
     }
 
     match child.wait() {
@@ -264,13 +293,15 @@ fn mark_pane_closed(
     app: &AppHandle,
     pane_id: &str,
 ) -> Result<(), String> {
-    let (snapshot, event) = {
+    let (event, activity_event) = {
         let mut runtime = shared
             .lock()
             .map_err(|_| "failed to acquire application state".to_string())?;
 
         let mut event = None;
+        let mut activity_event = None;
         runtime.sessions.remove(pane_id);
+        let mut closed_pane = None;
         if let Some(workspace) = runtime
             .workspaces
             .iter_mut()
@@ -278,22 +309,41 @@ fn mark_pane_closed(
         {
             if let Some(pane) = workspace.panes.iter_mut().find(|pane| pane.id == pane_id) {
                 pane.status = PaneStatus::Closed;
-                event = Some(RuntimeEvent::PaneClosed {
-                    workspace_id: workspace.id.clone(),
-                    pane_id: pane_id.to_string(),
-                    label: pane.label.clone(),
-                });
+                closed_pane = Some((workspace.id.clone(), pane.label.clone()));
             }
+        }
+
+        if let Some((workspace_id, pane_label)) = closed_pane {
+            activity_event = persistence::record_runtime_activity(
+                &mut runtime,
+                &workspace_id,
+                Some(pane_id),
+                ActivityEventKind::PaneClosed,
+                &pane_label,
+                None,
+            );
+            event = Some(RuntimeEvent::PaneClosed {
+                workspace_id,
+                pane_id: pane_id.to_string(),
+                label: pane_label,
+            });
         }
 
         runtime.persist_to_disk()?;
 
-        (runtime.build_snapshot(), event)
+        (event, activity_event)
     };
 
-    emit_snapshot(app, &snapshot)?;
     if let Some(event) = event {
         emit_runtime_event(app, &event)?;
+    }
+    if let Some(activity_event) = activity_event {
+        emit_runtime_event(
+            app,
+            &RuntimeEvent::ActivityRecorded {
+                event: activity_event,
+            },
+        )?;
     }
     Ok(())
 }
@@ -304,7 +354,7 @@ fn fail_pane(
     pane_id: &str,
     error: String,
 ) -> Result<(), String> {
-    let (snapshot, event, activity_event) = {
+    let (event, activity_event) = {
         let mut runtime = shared
             .lock()
             .map_err(|_| "failed to acquire application state".to_string())?;
@@ -342,10 +392,9 @@ fn fail_pane(
             runtime.persist_to_disk()?;
         }
 
-        (runtime.build_snapshot(), event, activity_event)
+        (event, activity_event)
     };
 
-    emit_snapshot(app, &snapshot)?;
     if let Some(event) = event {
         emit_runtime_event(app, &event)?;
     }
@@ -364,4 +413,102 @@ fn fail_pane(
             data: format!("\r\n[session error: {error}]\r\n"),
         },
     )
+}
+
+fn decode_terminal_utf8_chunk(pending: &mut Vec<u8>, chunk: &[u8]) -> String {
+    pending.extend_from_slice(chunk);
+    decode_terminal_utf8_buffer(pending, false)
+}
+
+fn flush_terminal_utf8_buffer(pending: &mut Vec<u8>) -> String {
+    decode_terminal_utf8_buffer(pending, true)
+}
+
+fn decode_terminal_utf8_buffer(buffer: &mut Vec<u8>, flush_incomplete: bool) -> String {
+    if buffer.is_empty() {
+        return String::new();
+    }
+
+    let mut decoded = String::new();
+    let mut consumed = 0usize;
+    let mut slice = buffer.as_slice();
+
+    while !slice.is_empty() {
+        match std::str::from_utf8(slice) {
+            Ok(valid) => {
+                decoded.push_str(valid);
+                consumed = buffer.len();
+                break;
+            }
+            Err(error) => {
+                let valid_up_to = error.valid_up_to();
+                if valid_up_to > 0 {
+                    if let Ok(valid) = std::str::from_utf8(&slice[..valid_up_to]) {
+                        decoded.push_str(valid);
+                    }
+                    consumed += valid_up_to;
+                    slice = &slice[valid_up_to..];
+                }
+
+                match error.error_len() {
+                    Some(error_len) => {
+                        decoded.push_str(&String::from_utf8_lossy(&slice[..error_len]));
+                        consumed += error_len;
+                        slice = &slice[error_len..];
+                    }
+                    None if flush_incomplete => {
+                        decoded.push_str(&String::from_utf8_lossy(slice));
+                        consumed = buffer.len();
+                        break;
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+
+    if consumed > 0 {
+        buffer.drain(..consumed);
+    }
+
+    decoded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_terminal_utf8_chunk, flush_terminal_utf8_buffer};
+
+    #[test]
+    fn terminal_utf8_decoder_preserves_split_multibyte_sequences() {
+        let mut pending = Vec::new();
+
+        let first = decode_terminal_utf8_chunk(&mut pending, &[0xE2, 0x96]);
+        let second = decode_terminal_utf8_chunk(&mut pending, &[0x88, b'\n']);
+
+        assert!(first.is_empty());
+        assert_eq!(second, "█\n");
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn terminal_utf8_decoder_keeps_valid_text_after_invalid_bytes() {
+        let mut pending = Vec::new();
+
+        let decoded = decode_terminal_utf8_chunk(&mut pending, &[0xFF, b'A', 0xC3, 0xA9]);
+
+        assert_eq!(decoded, "\u{FFFD}Aé");
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn terminal_utf8_decoder_flushes_trailing_incomplete_sequence_lossily() {
+        let mut pending = Vec::new();
+
+        let decoded = decode_terminal_utf8_chunk(&mut pending, &[b'O', b'K', 0xE2, 0x96]);
+        let flushed = flush_terminal_utf8_buffer(&mut pending);
+
+        assert_eq!(decoded, "OK");
+        assert_eq!(flushed, "\u{FFFD}");
+        assert!(pending.is_empty());
+    }
 }
