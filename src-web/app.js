@@ -6028,7 +6028,6 @@ function handleSourceControlRuntimeEvent(event) {
   }
 
   const sourceControl = uiState.sourceControl;
-  let render = true;
   let renderMask = 0;
   if (sourceControl.snapshot?.workspaceId === event.workspaceId) {
     const previousTask = sourceControl.snapshot.task || null;
@@ -6037,15 +6036,14 @@ function handleSourceControlRuntimeEvent(event) {
       task: event.task,
     };
     syncSourceControlTaskTray(event.task, previousTask);
-    if (syncSourceControlTaskRegionDom()) {
-      render = false;
-    }
     if (
       uiState.gitPanelVisible
       && uiState.snapshot?.activeWorkspaceId === event.workspaceId
-      && render
     ) {
-      renderMask = RENDER_SOURCE_CONTROL_SURFACES;
+      // Prefer the existing modal rerender path for live git-task output.
+      // It is scoped to the open source-control surfaces, coalesced through
+      // requestRender(), and preserves focus/scroll state across updates.
+      renderMask = RENDER_MODAL;
     }
   } else if (uiState.gitPanelVisible && uiState.snapshot?.activeWorkspaceId === event.workspaceId) {
     void loadWorkspaceSourceControlFor(event.workspaceId);
@@ -6189,31 +6187,6 @@ function handlePaneLifecycleRuntimeEvent(event) {
 
   pane.status = paneStatusForRuntimeKind(normalizedEvent.kind);
   syncActiveWorkspacePaneStatusDom(normalizedEvent.workspaceId, normalizedEvent.paneId);
-  return true;
-}
-
-function syncSourceControlTaskRegionDom(root = app) {
-  if (!uiState.gitPanelVisible) {
-    return false;
-  }
-
-  const taskRegion = root?.querySelector("[data-scm-task-region]");
-  if (!(taskRegion instanceof HTMLElement)) {
-    return false;
-  }
-
-  const previousOutput = taskRegion.querySelector(".workspace-scm-task-tray-output");
-  const shouldFollowOutput = previousOutput
-    ? isElementScrolledNearBottom(previousOutput)
-    : true;
-
-  taskRegion.innerHTML = renderSourceControlTaskPanel(uiState.sourceControl.snapshot?.task || null);
-
-  const nextOutput = taskRegion.querySelector(".workspace-scm-task-tray-output");
-  if (shouldFollowOutput && nextOutput instanceof HTMLElement) {
-    scrollElementToBottom(nextOutput);
-  }
-
   return true;
 }
 
