@@ -32,6 +32,7 @@ const PANE_ATTENTION_LIFETIME_MS = 4500;
 const LAUNCHER_CARD_TRANSITION_MS = 360;
 const SYSTEM_HEALTH_IDLE_REFRESH_MS = 5000;
 const SYSTEM_HEALTH_PANEL_REFRESH_MS = 1000;
+const SOURCE_CONTROL_TASK_REFRESH_MS = 320;
 const DEFAULT_THEME_ID = "one-dark";
 const DEFAULT_INTERFACE_TEXT_SCALE = 1;
 const MIN_INTERFACE_TEXT_SCALE = 0.85;
@@ -7999,6 +8000,7 @@ function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskInterse
   }
   syncPaneAttentionDom();
   syncGitRefreshLoop();
+  syncSourceControlTaskLoop();
   syncSystemHealthLoop();
 
   if (!renderMaskIntersects(mask, RENDER_STAGE | RENDER_EXPLORER)) {
@@ -11414,6 +11416,85 @@ function formatGitFileStatusLabel(status) {
 
 function syncGitRefreshLoop() {
   // Git refresh is explicit now so workspace navigation is not blocked by background status checks.
+}
+
+function clearSourceControlTaskLoop() {
+  if (runtimeStore.sourceControlTaskRefreshTimer) {
+    clearTimeout(runtimeStore.sourceControlTaskRefreshTimer);
+    runtimeStore.sourceControlTaskRefreshTimer = 0;
+  }
+}
+
+function shouldRefreshSourceControlTask() {
+  const workspaceId = uiState.snapshot?.activeWorkspaceId || "";
+  const snapshot = uiState.sourceControl.snapshot;
+  const task = snapshot?.task || null;
+
+  return Boolean(
+    uiState.gitPanelVisible
+    && workspaceId
+    && snapshot?.workspaceId === workspaceId
+    && task?.status === "running"
+    && bridge.loadWorkspaceSourceControl,
+  );
+}
+
+function syncSourceControlTaskLoop() {
+  if (!shouldRefreshSourceControlTask()) {
+    clearSourceControlTaskLoop();
+    return;
+  }
+
+  if (
+    runtimeStore.sourceControlTaskRefreshTimer
+    || runtimeStore.sourceControlTaskRefreshInFlight
+  ) {
+    return;
+  }
+
+  runtimeStore.sourceControlTaskRefreshTimer = window.setTimeout(() => {
+    runtimeStore.sourceControlTaskRefreshTimer = 0;
+
+    if (!shouldRefreshSourceControlTask()) {
+      syncSourceControlTaskLoop();
+      return;
+    }
+
+    const workspaceId = uiState.snapshot?.activeWorkspaceId || "";
+    if (!workspaceId) {
+      syncSourceControlTaskLoop();
+      return;
+    }
+
+    runtimeStore.sourceControlTaskRefreshInFlight = (async () => {
+      try {
+        const snapshot = await bridge.loadWorkspaceSourceControl(workspaceId);
+        if (!snapshot || uiState.sourceControl.snapshot?.workspaceId !== workspaceId) {
+          return;
+        }
+
+        const previousTask = uiState.sourceControl.snapshot?.task || null;
+        const nextTask = snapshot.task || null;
+        if (nextTask) {
+          uiState.sourceControl.snapshot = {
+            ...uiState.sourceControl.snapshot,
+            task: nextTask,
+          };
+          syncSourceControlTaskTray(nextTask, previousTask);
+          requestSourceControlModalSync();
+        }
+
+        if (!nextTask || nextTask.status !== "running") {
+          applySourceControlSnapshot(snapshot);
+        }
+      } catch (error) {
+        console.error(error);
+      } finally {
+        runtimeStore.sourceControlTaskRefreshInFlight = null;
+        syncSourceControlTaskLoop();
+      }
+    })();
+  }, SOURCE_CONTROL_TASK_REFRESH_MS);
 }
 
 function clearSystemHealthLoop() {
