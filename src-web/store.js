@@ -118,6 +118,7 @@ export function createRuntimeStore() {
     launcherCardTransitionTimer: 0,
     launcherCardAnimationFrame: 0,
     launcherParticles: null,
+    sourceControlModalSyncFrame: 0,
     gitRefreshInFlight: null,
     gitRefreshQueuedWorkspaceId: null,
     systemHealthRefreshTimer: 0,

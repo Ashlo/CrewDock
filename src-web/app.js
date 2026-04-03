@@ -24,6 +24,7 @@ import {
 const MAX_PENDING_TERMINAL_BYTES = 4 * 1024 * 1024;
 const MAX_RUNTIME_ACTIVITY_ITEMS = 120;
 const MAX_WORKSPACE_ATTENTION_COUNT = 99;
+const DISPATCH_FEATURE_ENABLED = false;
 const TERMINAL_VIEWPORT_PINNED_TO_BOTTOM = -1;
 const MAX_DISPATCH_TOASTS = 4;
 const DISPATCH_TOAST_LIFETIME_MS = 5000;
@@ -835,6 +836,20 @@ function prunePaneAttentionState(snapshot = uiState.snapshot) {
       runtimeStore.paneAttentionTimers.delete(paneId);
     }
   }
+}
+
+function resetDispatchUiState() {
+  uiState.activityRailVisible = false;
+  uiState.runtimeAttentionByWorkspace = new Map();
+  uiState.runtimeActivity = [];
+  uiState.dispatchToasts = [];
+  uiState.paneAttentionById.clear();
+
+  for (const timeoutId of runtimeStore.paneAttentionTimers.values()) {
+    clearTimeout(timeoutId);
+  }
+  runtimeStore.paneAttentionTimers.clear();
+  syncDispatchToastTimer();
 }
 
 function normalizeWorkspaceFileExplorerRelativePath(value) {
@@ -4811,7 +4826,12 @@ async function handleKeyDown(event) {
     return;
   }
 
-  if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key.toLowerCase() === "a") {
+  if (
+    DISPATCH_FEATURE_ENABLED
+    && (event.metaKey || event.ctrlKey)
+    && event.shiftKey
+    && event.key.toLowerCase() === "a"
+  ) {
     event.preventDefault();
     toggleActivityRail();
     requestPanelSurfacesRender();
@@ -5778,6 +5798,40 @@ function restoreTodoFocusState(state, root = document) {
   }
 }
 
+function syncOpenSourceControlPanelDom(root = app) {
+  if (!uiState.gitPanelVisible) {
+    return false;
+  }
+
+  const activeWorkspace = getActiveWorkspace();
+  if (!activeWorkspace) {
+    return false;
+  }
+
+  const modalRegion = root?.querySelector?.('[data-region="modal"]');
+  if (!(modalRegion instanceof HTMLElement)) {
+    return false;
+  }
+
+  const sourceControlFocusState = captureSourceControlFocusState(modalRegion);
+  const sourceControlScrollState = captureSourceControlScrollState(modalRegion);
+
+  modalRegion.innerHTML = renderGitPanel(activeWorkspace);
+  modalRegion.classList.toggle("is-active", true);
+
+  if (sourceControlScrollState.length) {
+    restoreSourceControlScrollState(sourceControlScrollState, modalRegion);
+  }
+  if (sourceControlFocusState) {
+    restoreSourceControlFocusState(sourceControlFocusState, modalRegion);
+  }
+  if (uiState.sourceControl.publishModalVisible) {
+    focusSourceControlPublishModal(modalRegion);
+  }
+
+  return true;
+}
+
 function restoreSettingsFocusState(state, root = document) {
   if (!state?.selector) {
     return;
@@ -6040,10 +6094,8 @@ function handleSourceControlRuntimeEvent(event) {
       uiState.gitPanelVisible
       && uiState.snapshot?.activeWorkspaceId === event.workspaceId
     ) {
-      // Prefer the existing modal rerender path for live git-task output.
-      // It is scoped to the open source-control surfaces, coalesced through
-      // requestRender(), and preserves focus/scroll state across updates.
-      renderMask = RENDER_MODAL;
+      requestSourceControlModalSync();
+      renderMask = 0;
     }
   } else if (uiState.gitPanelVisible && uiState.snapshot?.activeWorkspaceId === event.workspaceId) {
     void loadWorkspaceSourceControlFor(event.workspaceId);
@@ -6838,6 +6890,11 @@ function getWorkspaceById(workspaceId, snapshot = uiState.snapshot) {
 }
 
 function syncRuntimeActivityState(snapshot = uiState.snapshot) {
+  if (!DISPATCH_FEATURE_ENABLED) {
+    resetDispatchUiState();
+    return;
+  }
+
   const workspaceIds = new Set((snapshot?.workspaces || []).map((workspace) => workspace.id));
 
   for (const workspaceId of uiState.runtimeAttentionByWorkspace.keys()) {
@@ -6859,6 +6916,11 @@ function syncRuntimeActivityState(snapshot = uiState.snapshot) {
 }
 
 function hydrateRuntimeActivityFromSnapshot(snapshot = uiState.snapshot) {
+  if (!DISPATCH_FEATURE_ENABLED) {
+    resetDispatchUiState();
+    return;
+  }
+
   const recentEvents = Array.isArray(snapshot?.activity?.recentEvents)
     ? snapshot.activity.recentEvents
     : [];
@@ -6912,6 +6974,11 @@ function normalizeActivityScope(scope, snapshot = uiState.snapshot) {
 }
 
 function toggleActivityRail(forceVisible = !uiState.activityRailVisible) {
+  if (!DISPATCH_FEATURE_ENABLED) {
+    uiState.activityRailVisible = false;
+    return;
+  }
+
   if (!forceVisible) {
     uiState.activityRailVisible = false;
     return;
@@ -6930,6 +6997,10 @@ function toggleActivityRail(forceVisible = !uiState.activityRailVisible) {
 }
 
 function recordRuntimeEvent(event) {
+  if (!DISPATCH_FEATURE_ENABLED) {
+    return false;
+  }
+
   const normalizedEvent = normalizeRuntimeEvent(event);
   if (!normalizedEvent) {
     return false;
@@ -7123,6 +7194,10 @@ function formatRuntimeEventMessage(event) {
 }
 
 function getWorkspaceAttention(workspaceId) {
+  if (!DISPATCH_FEATURE_ENABLED) {
+    return null;
+  }
+
   return uiState.runtimeAttentionByWorkspace.get(workspaceId) || null;
 }
 
@@ -7142,6 +7217,15 @@ function activityToneRank(tone) {
 }
 
 function getRuntimeActivitySummary(snapshot = uiState.snapshot) {
+  if (!DISPATCH_FEATURE_ENABLED) {
+    return {
+      totalUnreadCount: 0,
+      unreadWorkspaceCount: 0,
+      tone: "neutral",
+      hasActivity: false,
+    };
+  }
+
   const workspaceIds = new Set((snapshot?.workspaces || []).map((workspace) => workspace.id));
   let totalUnreadCount = 0;
   let unreadWorkspaceCount = 0;
@@ -7271,6 +7355,10 @@ function buildRuntimeActivityEntry(event) {
 }
 
 function buildDispatchToasts(snapshot = uiState.snapshot) {
+  if (!DISPATCH_FEATURE_ENABLED) {
+    return [];
+  }
+
   const workspaces = snapshot?.workspaces || [];
   const labels = buildWorkspaceTabLabels(workspaces);
 
@@ -7291,6 +7379,10 @@ function buildDispatchToasts(snapshot = uiState.snapshot) {
 }
 
 function resolveDispatchToastSpec(event) {
+  if (!DISPATCH_FEATURE_ENABLED) {
+    return null;
+  }
+
   if (uiState.activityRailVisible) {
     return null;
   }
@@ -7432,6 +7524,12 @@ function clearPaneAttention(paneId) {
 
 function syncPaneAttentionDom() {
   for (const paneElement of document.querySelectorAll("[data-pane-id]")) {
+    if (!DISPATCH_FEATURE_ENABLED) {
+      paneElement.dataset.dispatchAttention = "false";
+      paneElement.dataset.dispatchTone = "";
+      continue;
+    }
+
     const tone = uiState.paneAttentionById.get(paneElement.dataset.paneId || "") || "";
     paneElement.dataset.dispatchAttention = tone ? "true" : "false";
     paneElement.dataset.dispatchTone = tone;
@@ -7444,6 +7542,10 @@ async function openDispatchItem({
   kind = "",
   toastId = "",
 } = {}) {
+  if (!DISPATCH_FEATURE_ENABLED) {
+    return;
+  }
+
   if (!workspaceId) {
     return;
   }
@@ -7665,6 +7767,19 @@ function requestTodoRender() {
   requestRender(RENDER_TODO_SURFACES);
 }
 
+function requestSourceControlModalSync() {
+  if (runtimeStore.sourceControlModalSyncFrame) {
+    return;
+  }
+
+  runtimeStore.sourceControlModalSyncFrame = requestAnimationFrame(() => {
+    runtimeStore.sourceControlModalSyncFrame = 0;
+    if (!syncOpenSourceControlPanelDom()) {
+      requestRender(RENDER_MODAL);
+    }
+  });
+}
+
 function requestSourceControlRender() {
   requestRender(RENDER_SOURCE_CONTROL_SURFACES);
 }
@@ -7770,17 +7885,21 @@ function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskInterse
     recordRenderMetric("status");
   }
   if (renderMaskIncludes(mask, RENDER_ACTIVITY)) {
-    const activityVisible = uiState.activityRailVisible;
-    activityRegion.innerHTML = renderActivityRail({
-      visible: activityVisible,
-      scope: normalizeActivityScope(uiState.activityRailScope, snapshot),
-      hasActiveWorkspace: Boolean(snapshot.activeWorkspaceId),
-      ...getRuntimeActivitySummary(snapshot),
-      workspaceSummaries: activityVisible ? buildActivityWorkspaceSummaries(snapshot) : [],
-      items: activityVisible ? buildActivityFeedItems(snapshot) : [],
-      toasts: activityVisible ? [] : buildDispatchToasts(snapshot),
-      escapeHtml,
-    });
+    if (!DISPATCH_FEATURE_ENABLED) {
+      activityRegion.innerHTML = "";
+    } else {
+      const activityVisible = uiState.activityRailVisible;
+      activityRegion.innerHTML = renderActivityRail({
+        visible: activityVisible,
+        scope: normalizeActivityScope(uiState.activityRailScope, snapshot),
+        hasActiveWorkspace: Boolean(snapshot.activeWorkspaceId),
+        ...getRuntimeActivitySummary(snapshot),
+        workspaceSummaries: activityVisible ? buildActivityWorkspaceSummaries(snapshot) : [],
+        items: activityVisible ? buildActivityFeedItems(snapshot) : [],
+        toasts: activityVisible ? [] : buildDispatchToasts(snapshot),
+        escapeHtml,
+      });
+    }
     recordRenderMetric("activity");
   }
   if (renderMaskIncludes(mask, RENDER_MODAL)) {
@@ -8101,7 +8220,9 @@ function renderWorkspaceStatusBar(snapshot, activeWorkspace) {
     if (shouldShowSystemHealth) {
       leftItems.push(renderStatusBarSystemHealthButton());
     }
-    leftItems.push(renderStatusBarActivityButton(activitySummary));
+    if (DISPATCH_FEATURE_ENABLED) {
+      leftItems.push(renderStatusBarActivityButton(activitySummary));
+    }
 
     if (snapshot.workspaces.length > 0) {
       rightItems.push(
@@ -8127,7 +8248,9 @@ function renderWorkspaceStatusBar(snapshot, activeWorkspace) {
     if (shouldShowSystemHealth) {
       leftItems.push(renderStatusBarSystemHealthButton());
     }
-    leftItems.push(renderStatusBarActivityButton(activitySummary));
+    if (DISPATCH_FEATURE_ENABLED) {
+      leftItems.push(renderStatusBarActivityButton(activitySummary));
+    }
 
     const stateLabel = formatStatusBarState(summary);
     if (stateLabel) {
@@ -9476,11 +9599,15 @@ function renderSettingsGuide(primaryModifier) {
       copy: "Bring up the Git drawer for the active workspace.",
       keys: [primaryModifier, "Shift", "G"],
     },
-    {
-      label: "Open dispatch",
-      copy: "Review unread workspace updates without leaving the keyboard.",
-      keys: [primaryModifier, "Shift", "A"],
-    },
+    ...(
+      DISPATCH_FEATURE_ENABLED
+        ? [{
+            label: "Open dispatch",
+            copy: "Review unread workspace updates without leaving the keyboard.",
+            keys: [primaryModifier, "Shift", "A"],
+          }]
+        : []
+    ),
     {
       label: "Complete launcher paths",
       copy: "Autocomplete folders while using the launcher command bar.",
