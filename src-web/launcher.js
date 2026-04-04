@@ -40,44 +40,126 @@ export function formatLauncherCompletionMatches(matches) {
 export function launcherStageSignature(basePath, launcherState) {
   return JSON.stringify({
     basePath,
-    mode: "static-home",
+    mode: "interactive-home",
+    commandValue: launcherState?.launcherCommandValue || "",
+    currentEntry: serializeLauncherEntry(launcherState?.launcherLatestCard?.current || null),
+    previousEntry: serializeLauncherEntry(launcherState?.launcherLatestCard?.previous || null),
+    phase: launcherState?.launcherLatestCard?.phase || "idle",
   });
 }
 
-export function renderEmptyState() {
+function serializeLauncherEntry(entry) {
+  if (!entry) {
+    return null;
+  }
+
+  return {
+    input: String(entry.input || ""),
+    output: Array.isArray(entry.output) ? entry.output.map((line) => String(line || "")) : [],
+    tone: entry.tone === "error" ? "error" : "normal",
+  };
+}
+
+export function renderEmptyState({
+  basePath = "",
+  commandValue = "",
+  latestEntry = null,
+  escapeHtml = (value) => String(value ?? ""),
+} = {}) {
   return `
     <div class="workspace-empty">
+      <div class="workspace-empty-background" aria-hidden="true">
+        <canvas class="workspace-empty-particles" data-launcher-particles></canvas>
+      </div>
       <div class="workspace-empty-panel">
         <p class="workspace-empty-mark">CrewDock</p>
         <h1>Open a folder to start a workspace.</h1>
         <p class="workspace-empty-copy">Each workspace becomes a focused dock for your files, tools, and crew.</p>
         <button class="workspace-empty-action" data-action="open-workspace">Open workspace</button>
-        <div class="workspace-launch-shell" aria-hidden="true">
-          ${renderLauncherHeroVisual()}
+        <div class="workspace-launch-shell">
+          ${renderLauncherShell({
+            basePath,
+            commandValue,
+            latestEntry,
+            escapeHtml,
+          })}
         </div>
       </div>
     </div>
   `;
 }
 
-function renderLauncherHeroVisual() {
+function renderLauncherShell({
+  basePath,
+  commandValue,
+  latestEntry,
+  escapeHtml,
+}) {
   return `
-    <div class="workspace-launch-visual workspace-launch-visual-static">
-      <div class="workspace-launch-hero-mark">CrewDock</div>
-      <div class="workspace-launch-hero-orbit workspace-launch-hero-orbit-primary"></div>
-      <div class="workspace-launch-hero-orbit workspace-launch-hero-orbit-secondary"></div>
-      <div class="workspace-launch-hero-core">
-        <span class="workspace-launch-hero-core-ring"></span>
-        <span class="workspace-launch-hero-core-ring is-offset"></span>
-        <span class="workspace-launch-hero-core-dot"></span>
+    <div class="workspace-launch-terminal">
+      <div class="workspace-launch-terminal-screen">
+        ${
+          latestEntry
+            ? renderLauncherLatestEntry(latestEntry, escapeHtml)
+            : renderLauncherCommandHints(basePath, escapeHtml)
+        }
+        <form class="workspace-launch-command" data-action="run-launcher-command" novalidate>
+          <span class="workspace-launch-command-prefix">$</span>
+          <input
+            class="workspace-launch-command-input"
+            data-launcher-path-input
+            type="text"
+            value="${escapeHtml(commandValue)}"
+            placeholder="Type a command"
+            autocomplete="off"
+            autocapitalize="off"
+            spellcheck="false"
+          />
+        </form>
       </div>
-      <div class="workspace-launch-hero-grid">
-        <span></span>
-        <span></span>
-        <span></span>
-        <span></span>
+      <div class="workspace-launch-terminal-footer">
+        <span class="workspace-launch-terminal-path">${escapeHtml(basePath)}</span>
+        <span class="workspace-launch-terminal-tip">Try: <code>pwd</code>, <code>ls</code>, <code>cd ..</code>, <code>open .</code></span>
       </div>
-      <p class="workspace-launch-hero-kicker">Focused docks for code, context, and execution.</p>
+    </div>
+  `;
+}
+
+function renderLauncherLatestEntry(entry, escapeHtml) {
+  const toneClass = entry?.tone === "error" ? "is-error" : "is-normal";
+  const output = Array.isArray(entry?.output) && entry.output.length
+    ? entry.output
+    : ["Command finished with no output."];
+
+  return `
+    <div class="workspace-launch-transcript ${toneClass}">
+      <div class="workspace-launch-transcript-line is-command">
+        <span class="workspace-launch-command-prefix">$</span>
+        <span>${escapeHtml(entry?.input || "")}</span>
+      </div>
+      <div class="workspace-launch-transcript-output">
+        ${output.map((line) => `<div class="workspace-launch-transcript-line">${escapeHtml(line)}</div>`).join("")}
+      </div>
+    </div>
+  `;
+}
+
+function renderLauncherCommandHints(basePath, escapeHtml) {
+  return `
+    <div class="workspace-launch-hints">
+      <div class="workspace-launch-transcript-line is-command">
+        <span class="workspace-launch-command-prefix">$</span>
+        <span><strong>open .</strong> opens the current folder as a workspace</span>
+      </div>
+      <p class="workspace-launch-hints-copy">
+        Navigate from <code>${escapeHtml(basePath)}</code>, inspect folders, then open the one you want.
+      </p>
+      <div class="workspace-launch-command-list">
+        <span><code>pwd</code> show current path</span>
+        <span><code>ls</code> list folders</span>
+        <span><code>cd ..</code> move up</span>
+        <span><code>open ./my-folder</code> start a workspace</span>
+      </div>
     </div>
   `;
 }

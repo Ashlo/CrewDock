@@ -30,7 +30,7 @@ multiple contexts, but you still want everything to feel immediate.
 - Docked file explorer per workspace with lazy directory loading
 - Built-in text editor for workspace files with save, reload, conflict handling, and recovery drafts
 - Workspace-scoped task list for next steps and reminders
-- Quick switching, activity tracking, and attention badges across workspaces
+- Quick switching and per-workspace context across multiple repos
 - Codex session resume with context-aware titles and pane-level restore bindings
 - Built-in source control for changes, branches, commit history, and sync
 - Built-in launcher commands with path completion for opening and navigating folders quickly
@@ -101,7 +101,7 @@ flowchart TD
 
 ## Current Capabilities
 
-- Top workspace strip with folder-backed tabs, rename actions, git state, unread activity badges, and unsaved editor draft indicators
+- Top workspace strip with folder-backed tabs, rename actions, git state, and unsaved editor draft indicators
 - Inline workspace rename in the tab bar
 - Workspace creation flow with launcher-based navigation, path completion, and 1 to 16 starting terminals
 - Real directional pane splitting, pane maximize / restore, and pane close actions
@@ -113,12 +113,17 @@ flowchart TD
 - Source control drawer with staged / modified / untracked / conflicted sections, diff preview, commit entry, branch actions, commit graph history, and direct open-in-editor / reveal-in-explorer actions
 - Git actions for stage, unstage, discard, commit, commit-all, fetch, pull, push, publish, upstream wiring, and branch management
 - AI-assisted commit message generation using a saved key or `OPENAI_API_KEY`
-- Quick switcher and activity rail for moving between busy workspaces
+- Quick switcher for moving between busy workspaces
 - Settings for theme, interface text scale, terminal font size, and OpenAI API key storage
-- Local persistence across app relaunches for workspaces, pane layouts, active workspace, settings, recent activity, workspace tasks, file recovery drafts, and Codex restore bindings
+- Local persistence across app relaunches for workspaces, pane layouts, active workspace, settings, workspace tasks, file recovery drafts, and Codex restore bindings
 - Six built-in themes
 
 ## Getting Started
+
+### Download
+
+Download the latest macOS build from the
+[GitHub Releases page](https://github.com/Ashlo/CrewDock/releases).
 
 ### Prerequisites
 
@@ -149,7 +154,7 @@ npm run dev
 8. Open source control with the footer action or `Cmd/Ctrl+Shift+G` to review diffs, branches, commit history, or jump directly into the editor.
 9. Use `Tasks` to keep workspace-specific next steps visible.
 10. Use `Codex` to resume the right session back into the right pane.
-11. Use `Cmd/Ctrl+K` to quick-switch workspaces and `Cmd/Ctrl+Shift+A` to review unread activity.
+11. Use `Cmd/Ctrl+K` to quick-switch workspaces.
 12. Open settings with the gear icon or `Cmd/Ctrl+,` to switch themes, adjust sizing, and manage the local OpenAI key used for AI commit messages.
 
 ## Launcher Commands
@@ -174,7 +179,6 @@ npm run dev
 | `Cmd/Ctrl+,` | Open settings |
 | `Cmd/Ctrl+K` | Open the quick switcher |
 | `Cmd/Ctrl+Shift+G` | Open source control for the active workspace |
-| `Cmd/Ctrl+Shift+A` | Toggle the activity rail |
 | `Tab` | Complete launcher paths |
 | `Cmd/Ctrl+D` | Split the active pane to the right |
 | `Cmd/Ctrl+Shift+D` | Split the active pane downward |

@@ -13,10 +13,10 @@ use tauri::AppHandle;
 
 use crate::{
     collect_git_detail,
-    events::{emit_runtime_event, emit_snapshot, RuntimeEvent},
+    events::{emit_runtime_event, RuntimeEvent},
     persistence::{self, ActivityEventKind},
-    run_git_command, validate_git_cli_arg, AppSnapshot, GitFileSnapshot, GitState,
-    GitSummarySnapshot, RuntimeState,
+    run_git_command, validate_git_cli_arg, GitFileSnapshot, GitState, GitSummarySnapshot,
+    RuntimeState,
 };
 
 const GRAPH_PAGE_SIZE: usize = 120;
@@ -52,6 +52,14 @@ pub(crate) struct WorkspaceSourceControlSnapshot {
     pub(crate) local_branches: Vec<GitBranchSnapshot>,
     pub(crate) remote_branches: Vec<GitBranchSnapshot>,
     pub(crate) graph: GitGraphSnapshot,
+    pub(crate) task: Option<GitTaskSnapshot>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct WorkspaceSourceControlContext {
+    pub(crate) workspace_id: String,
+    pub(crate) workspace_name: String,
+    pub(crate) workspace_path: String,
     pub(crate) task: Option<GitTaskSnapshot>,
 }
 
@@ -207,12 +215,35 @@ pub(crate) fn load_workspace_source_control(
     workspace_id: &str,
     graph_cursor: Option<String>,
 ) -> Result<WorkspaceSourceControlSnapshot, String> {
+    let context = workspace_source_control_context(runtime, workspace_id)?;
+    load_workspace_source_control_from_context(&context, graph_cursor)
+}
+
+pub(crate) fn workspace_source_control_context(
+    runtime: &RuntimeState,
+    workspace_id: &str,
+) -> Result<WorkspaceSourceControlContext, String> {
     let workspace = runtime
         .workspaces
         .iter()
         .find(|workspace| workspace.id == workspace_id)
         .ok_or_else(|| "workspace not found".to_string())?;
-    let detail = collect_git_detail(Path::new(&workspace.path));
+    Ok(WorkspaceSourceControlContext {
+        workspace_id: workspace.id.clone(),
+        workspace_name: workspace.name.clone(),
+        workspace_path: workspace.path.clone(),
+        task: runtime
+            .git_tasks
+            .get(workspace_id)
+            .map(|task| task.snapshot.clone()),
+    })
+}
+
+pub(crate) fn load_workspace_source_control_from_context(
+    context: &WorkspaceSourceControlContext,
+    graph_cursor: Option<String>,
+) -> Result<WorkspaceSourceControlSnapshot, String> {
+    let detail = collect_git_detail(Path::new(&context.workspace_path));
     let graph_skip = graph_cursor
         .as_deref()
         .and_then(|raw| raw.parse::<usize>().ok())
@@ -246,9 +277,9 @@ pub(crate) fn load_workspace_source_control(
         };
 
     Ok(WorkspaceSourceControlSnapshot {
-        workspace_id: workspace.id.clone(),
-        workspace_name: workspace.name.clone(),
-        workspace_path: workspace.path.clone(),
+        workspace_id: context.workspace_id.clone(),
+        workspace_name: context.workspace_name.clone(),
+        workspace_path: context.workspace_path.clone(),
         repo_root: detail.repo_root.clone(),
         workspace_relative_path: detail.workspace_relative_path.clone(),
         summary: detail.summary.clone(),
@@ -258,25 +289,25 @@ pub(crate) fn load_workspace_source_control(
         local_branches,
         remote_branches,
         graph,
-        task: runtime
-            .git_tasks
-            .get(workspace_id)
-            .map(|task| task.snapshot.clone()),
+        task: context.task.clone(),
     })
 }
 
-pub(crate) fn load_workspace_git_diff(
-    runtime: &RuntimeState,
-    workspace_id: &str,
-    path: &str,
-    mode: GitDiffMode,
-) -> Result<GitDiffSnapshot, String> {
-    let workspace = runtime
+pub(crate) fn workspace_path(runtime: &RuntimeState, workspace_id: &str) -> Result<String, String> {
+    runtime
         .workspaces
         .iter()
         .find(|workspace| workspace.id == workspace_id)
-        .ok_or_else(|| "workspace not found".to_string())?;
-    let detail = collect_git_detail(Path::new(&workspace.path));
+        .map(|workspace| workspace.path.clone())
+        .ok_or_else(|| "workspace not found".to_string())
+}
+
+pub(crate) fn load_workspace_git_diff_for_path(
+    workspace_path: &str,
+    path: &str,
+    mode: GitDiffMode,
+) -> Result<GitDiffSnapshot, String> {
+    let detail = collect_git_detail(Path::new(workspace_path));
     let repo_root = detail
         .repo_root
         .as_deref()
@@ -322,18 +353,12 @@ pub(crate) fn load_workspace_git_diff(
     })
 }
 
-pub(crate) fn load_workspace_git_commit_detail(
-    runtime: &RuntimeState,
-    workspace_id: &str,
+pub(crate) fn load_workspace_git_commit_detail_for_path(
+    workspace_path: &str,
     oid: &str,
 ) -> Result<GitCommitDetailSnapshot, String> {
     let oid = validate_git_cli_arg(oid.to_string(), "commit id")?;
-    let workspace = runtime
-        .workspaces
-        .iter()
-        .find(|workspace| workspace.id == workspace_id)
-        .ok_or_else(|| "workspace not found".to_string())?;
-    let detail = collect_git_detail(Path::new(&workspace.path));
+    let detail = collect_git_detail(Path::new(workspace_path));
     let repo_root = detail
         .repo_root
         .as_deref()
@@ -634,13 +659,13 @@ pub(crate) fn stage_all_changes(
 }
 
 pub(crate) fn git_task_write_stdin(
-    runtime: &RuntimeState,
+    runtime: &mut RuntimeState,
     workspace_id: &str,
     data: &str,
 ) -> Result<(), String> {
     let task = runtime
         .git_tasks
-        .get(workspace_id)
+        .get_mut(workspace_id)
         .ok_or_else(|| "no git task for workspace".to_string())?;
     let writer = task
         .writer
@@ -655,6 +680,7 @@ pub(crate) fn git_task_write_stdin(
     writer
         .flush()
         .map_err(|error| format!("failed to flush git task input: {error}"))?;
+    task.snapshot.can_write_input = false;
     Ok(())
 }
 
@@ -742,6 +768,34 @@ pub(crate) fn start_git_task(
 
 fn format_git_task_start_output(args: &[String]) -> String {
     format!("$ git {}\n\nStarting task...\n", args.join(" "))
+}
+
+fn git_task_output_requests_input(output: &str) -> bool {
+    let last_line = output.lines().rev().map(str::trim).find(|line| {
+        !line.is_empty() && !line.starts_with("$ git ") && *line != "Starting task..."
+    });
+    let Some(last_line) = last_line else {
+        return false;
+    };
+
+    let normalized = last_line.to_ascii_lowercase();
+    [
+        "username for ",
+        "password for ",
+        "passphrase for ",
+        "enter passphrase",
+        "enter pin",
+        "enter otp",
+        "one-time password",
+        "two-factor",
+        "2fa",
+        "(yes/no",
+        "[y/n",
+        "continue connecting",
+        "are you sure you want to continue connecting",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle))
 }
 
 fn record_git_task_activity(
@@ -906,7 +960,9 @@ fn stream_git_task_output(
             Ok(0) => break,
             Ok(read) => {
                 let chunk = String::from_utf8_lossy(&buffer[..read]).into_owned();
-                if let Ok(task) = append_git_task_output(&shared, &workspace_id, &chunk) {
+                if let Ok((task, needs_input)) =
+                    append_git_task_output(&shared, &workspace_id, &chunk)
+                {
                     let _ = emit_runtime_event(
                         &app,
                         &RuntimeEvent::GitTaskSnapshot {
@@ -914,6 +970,18 @@ fn stream_git_task_output(
                             task: task.clone(),
                         },
                     );
+                    if needs_input {
+                        if let Ok(Some(activity_event)) =
+                            record_git_task_activity(&shared, &workspace_id, &task)
+                        {
+                            let _ = emit_runtime_event(
+                                &app,
+                                &RuntimeEvent::ActivityRecorded {
+                                    event: activity_event,
+                                },
+                            );
+                        }
+                    }
                 }
             }
             Err(error) => {
@@ -937,8 +1005,14 @@ fn stream_git_task_output(
                             },
                         );
                     }
-                    if let Ok(snapshot) = rebuild_app_snapshot(&shared, &workspace_id) {
-                        let _ = emit_snapshot(&app, &snapshot);
+                    if let Ok(summary) = rebuild_workspace_git_summary(&shared, &workspace_id) {
+                        let _ = emit_runtime_event(
+                            &app,
+                            &RuntimeEvent::WorkspaceGitSummaryUpdated {
+                                workspace_id: workspace_id.clone(),
+                                summary,
+                            },
+                        );
                     }
                 }
                 return;
@@ -973,27 +1047,38 @@ fn stream_git_task_output(
         }
     }
 
-    if let Ok(snapshot) = rebuild_app_snapshot(&shared, &workspace_id) {
-        let _ = emit_snapshot(&app, &snapshot);
+    if let Ok(summary) = rebuild_workspace_git_summary(&shared, &workspace_id) {
+        let _ = emit_runtime_event(
+            &app,
+            &RuntimeEvent::WorkspaceGitSummaryUpdated {
+                workspace_id: workspace_id.clone(),
+                summary,
+            },
+        );
     }
 }
 
-fn rebuild_app_snapshot(
+fn rebuild_workspace_git_summary(
     shared: &Arc<Mutex<RuntimeState>>,
     workspace_id: &str,
-) -> Result<AppSnapshot, String> {
+) -> Result<GitSummarySnapshot, String> {
     let mut runtime = shared
         .lock()
         .map_err(|_| "failed to acquire application state".to_string())?;
     refresh_workspace_cache(&mut runtime, workspace_id)?;
-    Ok(runtime.build_snapshot())
+    runtime
+        .workspaces
+        .iter()
+        .find(|workspace| workspace.id == workspace_id)
+        .and_then(|workspace| workspace.git.as_ref().map(|git| git.summary.clone()))
+        .ok_or_else(|| "workspace not found".to_string())
 }
 
 fn append_git_task_output(
     shared: &Arc<Mutex<RuntimeState>>,
     workspace_id: &str,
     chunk: &str,
-) -> Result<GitTaskSnapshot, String> {
+) -> Result<(GitTaskSnapshot, bool), String> {
     let mut runtime = shared
         .lock()
         .map_err(|_| "failed to acquire application state".to_string())?;
@@ -1003,7 +1088,11 @@ fn append_git_task_output(
         .ok_or_else(|| "git task not found".to_string())?;
     task.snapshot.output.push_str(chunk);
     trim_task_output(&mut task.snapshot.output);
-    Ok(task.snapshot.clone())
+    let should_accept_input =
+        task.writer.is_some() && git_task_output_requests_input(&task.snapshot.output);
+    let did_enable_input = should_accept_input && !task.snapshot.can_write_input;
+    task.snapshot.can_write_input = should_accept_input;
+    Ok((task.snapshot.clone(), did_enable_input))
 }
 
 fn finish_git_task(
@@ -1678,9 +1767,10 @@ mod tests {
 
     use super::{
         build_commit_message_generation_request, extract_openai_response_text,
-        format_git_task_start_output, load_git_remotes, parse_commit_detail,
-        record_git_task_activity, resolve_repo_relative_existing_path, run_git_task_blocking,
-        select_default_git_remote, GitTaskRecoveryKind, GitTaskSnapshot, GitTaskStatus,
+        format_git_task_start_output, git_task_output_requests_input, load_git_remotes,
+        parse_commit_detail, record_git_task_activity, resolve_repo_relative_existing_path,
+        run_git_task_blocking, select_default_git_remote, GitTaskRecoveryKind, GitTaskSnapshot,
+        GitTaskStatus,
     };
 
     #[test]
@@ -2198,6 +2288,26 @@ mod tests {
             extract_openai_response_text(&payload).as_deref(),
             Some("{\"message\":\"refine source control ui\"}")
         );
+    }
+
+    #[test]
+    fn git_task_output_requests_input_detects_known_prompts() {
+        assert!(git_task_output_requests_input(
+            "$ git push\n\nUsername for 'https://github.com': "
+        ));
+        assert!(git_task_output_requests_input(
+            "$ git fetch\n\nAre you sure you want to continue connecting (yes/no/[fingerprint])?"
+        ));
+    }
+
+    #[test]
+    fn git_task_output_requests_input_ignores_regular_progress_output() {
+        assert!(!git_task_output_requests_input(
+            "$ git push\n\nremote: Enumerating objects: 12, done.\n"
+        ));
+        assert!(!git_task_output_requests_input(
+            "$ git pull\n\nStarting task...\n"
+        ));
     }
 
     #[test]
