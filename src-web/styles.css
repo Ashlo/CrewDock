@@ -7520,14 +7520,21 @@ button {
   height: 100%;
   min-height: 0;
   min-width: 0;
+  background: var(--pane-bg);
 }
 
 .terminal-host .xterm {
   height: 100%;
   padding: 0;
+  background: var(--pane-bg);
+}
+
+.terminal-host .xterm-screen {
+  background: var(--pane-bg);
 }
 
 .terminal-host .xterm-viewport {
+  background: var(--pane-bg);
   overflow-x: hidden;
   overflow-y: auto;
   scrollbar-width: thin;
