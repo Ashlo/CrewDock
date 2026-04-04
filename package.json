@@ -7,7 +7,9 @@
   "scripts": {
     "postinstall": "npm run sync:xterm",
     "sync:xterm": "mkdir -p src-web/vendor && cp node_modules/@xterm/xterm/lib/xterm.mjs src-web/vendor/xterm.mjs && cp node_modules/@xterm/xterm/css/xterm.css src-web/vendor/xterm.css && cp node_modules/@xterm/addon-fit/lib/addon-fit.mjs src-web/vendor/addon-fit.mjs",
-    "dev": "cargo run --manifest-path src-tauri/Cargo.toml",
+    "dev": "bash scripts/run-macos-dev-app.sh",
+    "dev:bin": "cargo run --manifest-path src-tauri/Cargo.toml",
+    "dev:build-app": "bash scripts/run-macos-dev-app.sh --build-only",
     "build:mac": "bash scripts/build-macos-dmg.sh",
     "check": "cargo check --manifest-path src-tauri/Cargo.toml",
     "fmt": "cargo fmt --manifest-path src-tauri/Cargo.toml --all"
