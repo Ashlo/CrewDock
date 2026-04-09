@@ -154,7 +154,7 @@ npm run dev
 8. Open source control with the footer action or `Cmd/Ctrl+Shift+G` to review diffs, branches, commit history, or jump directly into the editor.
 9. Use `Tasks` to keep workspace-specific next steps visible.
 10. Use `Codex` to resume the right session back into the right pane.
-11. Use `Cmd/Ctrl+K` to quick-switch workspaces.
+11. Use `Cmd/Ctrl+1..9` to jump straight to workspace positions, or `Cmd/Ctrl+K` to quick-switch by search.
 12. Open settings with the gear icon or `Cmd/Ctrl+,` to switch themes, adjust sizing, and manage the local OpenAI key used for AI commit messages.
 
 ## Launcher Commands
@@ -177,6 +177,8 @@ npm run dev
 | Shortcut | What it does |
 | --- | --- |
 | `Cmd/Ctrl+,` | Open settings |
+| `Cmd/Ctrl+1..8` | Jump to workspace tabs 1 through 8 |
+| `Cmd/Ctrl+9` | Jump to the last workspace tab |
 | `Cmd/Ctrl+K` | Open the quick switcher |
 | `Cmd/Ctrl+Shift+G` | Open source control for the active workspace |
 | `Tab` | Complete launcher paths |

@@ -4975,6 +4975,18 @@ async function handleKeyDown(event) {
     return;
   }
 
+  if ((event.metaKey || event.ctrlKey) && !event.shiftKey && !event.altKey) {
+    const workspaceId = resolveWorkspaceShortcutTarget(event.key);
+    if (workspaceId) {
+      event.preventDefault();
+      if (workspaceId !== uiState.snapshot?.activeWorkspaceId) {
+        await activateWorkspace(workspaceId);
+        render();
+      }
+      return;
+    }
+  }
+
   const workspace = getActiveWorkspace();
   const activePaneId = resolveActivePaneId(workspace);
   if (!workspace || !activePaneId || !(event.metaKey || event.ctrlKey) || event.altKey) {
@@ -5029,6 +5041,21 @@ async function beginWorkspaceCreation() {
   closeQuickSwitcher();
   closeCodexModal();
   render();
+}
+
+function resolveWorkspaceShortcutTarget(key, snapshot = uiState.snapshot) {
+  const workspaces = snapshot?.workspaces || [];
+  if (!workspaces.length) {
+    return null;
+  }
+
+  const slot = Number.parseInt(key, 10);
+  if (!Number.isInteger(slot) || slot < 1 || slot > 9) {
+    return null;
+  }
+
+  const index = slot === 9 ? workspaces.length - 1 : slot - 1;
+  return workspaces[index]?.id || null;
 }
 
 async function activateWorkspace(workspaceId) {
@@ -9595,6 +9622,11 @@ function renderSettingsGuide(primaryModifier) {
       label: "Quick switch workspaces",
       copy: "Search workspaces by name or path and jump instantly.",
       keys: [primaryModifier, "K"],
+    },
+    {
+      label: "Jump to workspace positions",
+      copy: "Go straight to tabs one through eight, or jump to the last workspace with 9.",
+      keys: [primaryModifier, "1-9"],
     },
     {
       label: "Open source control",
