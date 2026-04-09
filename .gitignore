@@ -9,3 +9,6 @@ node_modules/
 
 # local Playwright MCP page snapshots
 .playwright-mcp/
+
+# local marketing/video workspaces
+marketing/

@@ -171,34 +171,44 @@ export function renderLayoutPicker({ presets, draft, basename, escapeHtml }) {
     <div class="workspace-modal-backdrop">
       <div class="workspace-modal">
         <div class="workspace-modal-header">
-          <div>
+          <div class="workspace-modal-header-copy">
             <p class="workspace-modal-mark">New workspace</p>
             <h2>${escapeHtml(basename(draft.path))}</h2>
-            <p class="workspace-modal-path">${escapeHtml(draft.path)}</p>
+            <div class="workspace-modal-subline">
+              <p class="workspace-modal-path">${escapeHtml(draft.path)}</p>
+              <span class="workspace-modal-subline-separator" aria-hidden="true"></span>
+              <span class="workspace-modal-subline-copy">CrewDock will balance the layout automatically.</span>
+            </div>
           </div>
           <button class="workspace-modal-cancel" data-action="cancel-layout-picker">Cancel</button>
         </div>
         <div class="workspace-layout-builder">
           <section class="workspace-layout-controls">
-            <p class="workspace-layout-kicker">Terminal count</p>
-            <div class="workspace-count-stepper">
-              <button class="workspace-count-button" data-action="adjust-terminal-count" data-delta="-1" aria-label="Decrease terminal count">-</button>
-              <label class="workspace-count-input-shell">
-                <input
-                  class="workspace-count-input"
-                  data-terminal-count-input
-                  type="number"
-                  min="1"
-                  max="16"
-                  value="${draft.paneCount}"
-                />
-              </label>
-              <button class="workspace-count-button" data-action="adjust-terminal-count" data-delta="1" aria-label="Increase terminal count">+</button>
+            <div class="workspace-layout-section-head">
+              <p class="workspace-layout-kicker">Terminal count</p>
+              <p class="workspace-layout-section-copy">Choose how many live shells you want. The dock shape will follow.</p>
             </div>
-            <div class="workspace-count-presets">
-              ${presets.map((preset) => renderCountPreset(preset, draft.paneCount)).join("")}
+            <div class="workspace-count-panel">
+              <div class="workspace-count-stepper">
+                <button class="workspace-count-button" data-action="adjust-terminal-count" data-delta="-1" aria-label="Decrease terminal count">-</button>
+                <label class="workspace-count-input-shell">
+                  <span class="workspace-count-input-label">Shells</span>
+                  <input
+                    class="workspace-count-input"
+                    data-terminal-count-input
+                    type="number"
+                    min="1"
+                    max="16"
+                    value="${draft.paneCount}"
+                  />
+                </label>
+                <button class="workspace-count-button" data-action="adjust-terminal-count" data-delta="1" aria-label="Increase terminal count">+</button>
+              </div>
+              <div class="workspace-count-presets">
+                ${presets.map((preset) => renderCountPreset(preset, draft.paneCount)).join("")}
+              </div>
             </div>
-            <p class="workspace-layout-note">CrewDock balances the grid automatically so you can choose the count first and worry about layout later.</p>
+            <p class="workspace-layout-note">Pick the count first. CrewDock keeps the grid balanced so you can start quickly and refine the workspace later.</p>
           </section>
           <section class="workspace-layout-preview-card">
             <div class="workspace-layout-preview-head">
@@ -208,8 +218,11 @@ export function renderLayoutPicker({ presets, draft, basename, escapeHtml }) {
                 <span>${layout.columns} columns</span>
               </div>
             </div>
-            <div class="workspace-layout-preview" style="--rows:${layout.rows}; --columns:${layout.columns};">
-              ${previewCells}
+            <div class="workspace-layout-preview-stage">
+              <div class="workspace-layout-preview-count">${draft.paneCount}</div>
+              <div class="workspace-layout-preview" style="--rows:${layout.rows}; --columns:${layout.columns};">
+                ${previewCells}
+              </div>
             </div>
             <div class="workspace-layout-summary">
               <strong>${draft.paneCount}</strong>

@@ -9,6 +9,17 @@ Use this checklist for every public GitHub Release.
 - Decide whether the release is public source or source-available and add a `LICENSE` file before calling it open source.
 - Confirm the README matches the shipped product and screenshots.
 - Confirm the release notes markdown for the target version exists in `docs/releases/`.
+- Confirm the local Mac has a valid `Developer ID Application` signing identity:
+
+```sh
+security find-identity -v -p codesigning
+```
+
+- Confirm the notarization keychain profile is available:
+
+```sh
+xcrun notarytool history --keychain-profile "crewdock-notary"
+```
 
 ## Validation
 
@@ -25,7 +36,22 @@ Use this checklist for every public GitHub Release.
 ## Build
 
 - Build the macOS artifact with `npm run build:mac`.
+- The release build now signs with the local `Developer ID Application` certificate, notarizes the app and DMG, and staples both tickets.
+- To use a non-default setup, override:
+
+```sh
+APPLE_SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)" \
+APPLE_NOTARY_PROFILE="crewdock-notary" \
+npm run build:mac
+```
+
 - Verify the generated DMG exists under `src-tauri/target/release/bundle/dmg/`.
+- Verify notarization on the finished artifact:
+
+```sh
+spctl -a -vv -t open src-tauri/target/release/bundle/dmg/CrewDock_<version>_<arch>.dmg
+```
+
 - Generate a SHA-256 checksum:
 
 ```sh

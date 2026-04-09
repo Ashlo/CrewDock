@@ -2180,20 +2180,21 @@ button {
 }
 
 .workspace-modal {
-  width: min(860px, 100%);
+  width: min(920px, 100%);
   max-height: min(760px, calc(100vh - 32px));
   display: grid;
-  gap: 22px;
-  padding: 22px;
+  gap: 24px;
+  padding: 26px;
   overflow: auto;
-  border-radius: 24px;
-  border: 1px solid var(--surface-card-border);
+  border-radius: 30px;
+  border: 1px solid color-mix(in srgb, var(--surface-card-border) 78%, transparent);
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.04), transparent 34%),
-    var(--modal-bg);
+    radial-gradient(circle at 50% 0%, rgba(112, 137, 255, 0.08), transparent 34%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.045), transparent 28%),
+    color-mix(in srgb, var(--modal-bg) 96%, transparent);
   box-shadow:
-    0 28px 80px rgba(0, 0, 0, 0.34),
-    inset 0 1px 0 rgba(255, 255, 255, 0.03);
+    0 30px 88px rgba(0, 0, 0, 0.36),
+    inset 0 1px 0 rgba(255, 255, 255, 0.045);
   scrollbar-width: thin;
   scrollbar-color: var(--scrollbar-thumb) transparent;
 }
@@ -2433,30 +2434,66 @@ button {
   gap: 16px;
 }
 
+.workspace-modal-header-copy {
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+}
+
 .workspace-modal h2 {
   font-family: "SF Pro Display", "Avenir Next", sans-serif;
-  font-size: clamp(1.9rem, 4vw, 3rem);
+  font-size: clamp(2.1rem, 4.6vw, 3.45rem);
   font-weight: 600;
   letter-spacing: -0.06em;
-  line-height: 0.96;
+  line-height: 0.9;
+}
+
+.workspace-modal-subline {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  row-gap: 8px;
 }
 
 .workspace-modal-path {
-  margin-top: 10px;
-  display: inline-flex;
-  max-width: min(100%, 64ch);
-  min-height: 34px;
-  align-items: center;
-  padding: 0 12px;
-  border-radius: 999px;
-  border: 1px solid var(--surface-card-border);
-  background: var(--surface-pill-bg);
-  color: var(--surface-soft-text);
-  font-size: 0.9rem;
-  letter-spacing: -0.01em;
+  max-width: min(100%, 56ch);
+  min-width: 0;
+  display: block;
+  color: color-mix(in srgb, var(--text) 58%, var(--muted));
+  font-size: 0.92rem;
+  letter-spacing: -0.015em;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.workspace-modal-subline-separator {
+  width: 4px;
+  height: 4px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--surface-soft-text) 58%, transparent);
+}
+
+.workspace-modal-subline-copy {
+  color: var(--surface-soft-text);
+  font-size: 0.88rem;
+  letter-spacing: -0.01em;
+}
+
+.workspace-modal-cancel {
+  flex: 0 0 auto;
+  align-self: flex-start;
+  min-height: 48px;
+  padding: 0 18px;
+  border-color: color-mix(in srgb, var(--control-border) 84%, transparent);
+  background: color-mix(in srgb, var(--control-bg) 88%, transparent);
+}
+
+.workspace-modal-cancel:hover {
+  border-color: var(--control-border-strong);
 }
 
 .workspace-codex-modal {
@@ -2700,23 +2737,38 @@ button {
 .workspace-layout-builder {
   width: 100%;
   display: grid;
-  grid-template-columns: minmax(0, 1.1fr) minmax(280px, 320px);
-  gap: 18px;
+  grid-template-columns: minmax(0, 1fr) minmax(290px, 336px);
+  gap: 24px;
   align-items: start;
 }
 
-.workspace-layout-controls,
+.workspace-layout-controls {
+  display: grid;
+  gap: 18px;
+  align-content: start;
+  padding: 2px 2px 2px 0;
+}
+
 .workspace-layout-preview-card {
   display: grid;
-  gap: 14px;
+  gap: 16px;
   align-content: start;
-  align-self: start;
-  padding: 16px;
-  border-radius: 22px;
-  border: 1px solid var(--surface-card-border);
+  align-self: stretch;
+  padding: 18px 18px 20px;
+  border-radius: 28px;
+  border: 1px solid color-mix(in srgb, var(--surface-card-border) 78%, transparent);
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 24%),
-    var(--surface-card-bg);
+    linear-gradient(180deg, rgba(255, 255, 255, 0.042), transparent 34%),
+    radial-gradient(circle at 50% 0%, rgba(112, 137, 255, 0.08), transparent 42%),
+    color-mix(in srgb, var(--surface-card-bg) 92%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.036),
+    0 16px 36px rgba(0, 0, 0, 0.12);
+}
+
+.workspace-layout-section-head {
+  display: grid;
+  gap: 6px;
 }
 
 .workspace-layout-kicker {
@@ -2727,20 +2779,42 @@ button {
   text-transform: uppercase;
 }
 
+.workspace-layout-section-copy {
+  margin: 0;
+  max-width: 34ch;
+  color: var(--surface-soft-text);
+  font-size: 0.96rem;
+  line-height: 1.55;
+}
+
+.workspace-count-panel {
+  display: grid;
+  gap: 16px;
+  max-width: 500px;
+  padding: 18px;
+  border-radius: 28px;
+  border: 1px solid color-mix(in srgb, var(--surface-card-border) 76%, transparent);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.028), transparent 28%),
+    color-mix(in srgb, var(--surface-card-bg) 84%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.03),
+    0 12px 28px rgba(0, 0, 0, 0.08);
+}
+
 .workspace-count-stepper {
   display: grid;
   grid-template-columns: 42px minmax(0, 1fr) 42px;
-  gap: 10px;
+  gap: 12px;
   align-items: center;
-  max-width: 430px;
 }
 
 .workspace-count-button {
   width: 42px;
   height: 42px;
   border-radius: 999px;
-  border: 1px solid var(--control-border);
-  background: var(--control-bg);
+  border: 1px solid color-mix(in srgb, var(--control-border) 82%, transparent);
+  background: color-mix(in srgb, var(--control-bg) 80%, transparent);
   color: var(--control-text);
   font-size: 1.1rem;
   transition:
@@ -2752,21 +2826,30 @@ button {
 .workspace-count-button:hover {
   transform: translateY(-1px);
   border-color: var(--control-border-strong);
-  background: var(--control-bg-hover);
+  background: color-mix(in srgb, var(--control-bg-hover) 88%, transparent);
 }
 
 .workspace-count-input-shell {
   min-width: 0;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
-  gap: 12px;
-  min-height: 50px;
-  padding: 0 14px 0 16px;
-  border-radius: 16px;
-  border: 1px solid var(--control-border);
-  background: var(--surface-input-bg);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+  gap: 14px;
+  min-height: 60px;
+  padding: 0 18px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--control-border) 78%, transparent);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.026), transparent 30%),
+    color-mix(in srgb, var(--surface-input-bg) 92%, transparent);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.workspace-count-input-label {
+  color: var(--surface-soft-text);
+  font-size: 0.74rem;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
 }
 
 .workspace-count-input {
@@ -2775,9 +2858,10 @@ button {
   background: transparent;
   color: var(--text);
   font: inherit;
-  font-size: 1.5rem;
+  font-size: 1.85rem;
   font-weight: 600;
   letter-spacing: -0.05em;
+  text-align: right;
   outline: none;
   appearance: textfield;
 }
@@ -2788,29 +2872,22 @@ button {
   -webkit-appearance: none;
 }
 
-.workspace-count-input-shell span {
-  color: var(--surface-soft-text);
-  font-size: 0.76rem;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-}
-
 .workspace-count-presets {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
+  gap: 8px;
   align-items: center;
 }
 
 .workspace-count-preset {
   min-width: 46px;
-  min-height: 36px;
-  padding: 0 15px;
+  min-height: 34px;
+  padding: 0 14px;
   border-radius: 999px;
-  border: 1px solid var(--control-border);
-  background: var(--surface-pill-bg);
+  border: 1px solid color-mix(in srgb, var(--control-border) 72%, transparent);
+  background: color-mix(in srgb, var(--surface-pill-bg) 78%, transparent);
   color: var(--surface-soft-text);
-  font-size: 0.86rem;
+  font-size: 0.82rem;
   align-self: center;
   transition:
     transform 160ms ease,
@@ -2830,9 +2907,9 @@ button {
 .workspace-layout-note {
   margin: 0;
   color: var(--surface-soft-text);
-  font-size: 0.92rem;
+  font-size: 0.93rem;
   line-height: 1.55;
-  max-width: 36ch;
+  max-width: 32ch;
 }
 
 .workspace-layout-preview-head {
@@ -2855,33 +2932,63 @@ button {
   align-items: center;
   padding: 0 9px;
   border-radius: 999px;
-  background: var(--surface-pill-bg);
+  background: color-mix(in srgb, var(--surface-pill-bg) 78%, transparent);
   color: var(--surface-soft-text);
   font-size: 0.78rem;
 }
 
+.workspace-layout-preview-stage {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-height: 310px;
+  border-radius: 24px;
+  overflow: hidden;
+  background:
+    radial-gradient(circle at 50% 28%, rgba(111, 136, 255, 0.12), transparent 42%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.022), transparent 24%),
+    color-mix(in srgb, var(--pane-bg) 72%, transparent);
+}
+
+.workspace-layout-preview-count {
+  position: absolute;
+  left: 18px;
+  bottom: 10px;
+  font-family: "SF Pro Display", "Avenir Next", sans-serif;
+  font-size: clamp(4.2rem, 9vw, 6.5rem);
+  font-weight: 600;
+  letter-spacing: -0.08em;
+  line-height: 0.86;
+  color: rgba(255, 255, 255, 0.06);
+  pointer-events: none;
+}
+
 .workspace-layout-preview {
-  width: min(100%, 248px);
+  position: relative;
+  z-index: 1;
+  width: min(100%, 236px);
   aspect-ratio: 1 / 1;
   display: grid;
   grid-template-columns: repeat(var(--columns), minmax(0, 1fr));
   grid-template-rows: repeat(var(--rows), minmax(0, 1fr));
-  gap: 8px;
-  padding: 10px;
-  border-radius: 18px;
-  border: 1px solid var(--surface-card-border);
+  gap: 9px;
+  padding: 12px;
+  border-radius: 24px;
+  border: 1px solid color-mix(in srgb, var(--surface-card-border) 78%, transparent);
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 18%),
-    var(--pane-bg);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+    linear-gradient(180deg, rgba(255, 255, 255, 0.026), transparent 18%),
+    color-mix(in srgb, var(--pane-bg) 88%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.03),
+    0 16px 36px rgba(0, 0, 0, 0.12);
 }
 
 .preset-cell {
-  border-radius: 10px;
-  border: 1px solid var(--surface-card-border);
+  border-radius: 14px;
+  border: 1px solid color-mix(in srgb, var(--surface-card-border) 74%, transparent);
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent),
-    rgba(255, 255, 255, 0.015);
+    linear-gradient(180deg, rgba(255, 255, 255, 0.038), transparent),
+    rgba(255, 255, 255, 0.018);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
 }
 
@@ -2908,12 +3015,12 @@ button {
 }
 
 .workspace-create-button {
-  min-height: 46px;
+  min-height: 48px;
   border-radius: 999px;
-  border: 1px solid var(--surface-pill-active-border);
+  border: 1px solid color-mix(in srgb, var(--surface-pill-active-border) 90%, transparent);
   background:
-    linear-gradient(180deg, var(--surface-pill-active-bg), rgba(255, 255, 255, 0.01)),
-    var(--control-bg);
+    linear-gradient(180deg, rgba(140, 158, 255, 0.16), rgba(255, 255, 255, 0.02)),
+    color-mix(in srgb, var(--control-bg) 90%, transparent);
   color: var(--create-button-text);
   font-weight: 600;
   transition:
@@ -8014,19 +8121,29 @@ button {
   }
 
   .workspace-modal {
-    padding: 18px;
-    border-radius: 20px;
+    padding: 20px;
+    border-radius: 24px;
+  }
+
+  .workspace-modal-subline {
+    align-items: flex-start;
   }
 
   .workspace-modal-path {
     max-width: 100%;
     font-size: 0.84rem;
+    white-space: normal;
+    overflow: visible;
   }
 
-  .workspace-layout-controls,
   .workspace-layout-preview-card {
     padding: 14px;
     border-radius: 18px;
+  }
+
+  .workspace-count-panel {
+    padding: 14px;
+    border-radius: 22px;
   }
 
   .workspace-count-stepper {
@@ -8045,6 +8162,16 @@ button {
 
   .workspace-layout-meta {
     justify-content: flex-start;
+  }
+
+  .workspace-layout-preview-stage {
+    min-height: 248px;
+  }
+
+  .workspace-layout-preview-count {
+    left: 14px;
+    bottom: 8px;
+    font-size: 4.4rem;
   }
 
   .workspace-layout-preview {
