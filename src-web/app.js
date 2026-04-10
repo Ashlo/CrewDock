@@ -26,6 +26,7 @@ const MAX_RUNTIME_ACTIVITY_ITEMS = 120;
 const MAX_WORKSPACE_ATTENTION_COUNT = 99;
 const DISPATCH_FEATURE_ENABLED = false;
 const TERMINAL_VIEWPORT_PINNED_TO_BOTTOM = -1;
+const TERMINAL_VIEWPORT_BOTTOM_THRESHOLD_ROWS = 2;
 const MAX_DISPATCH_TOASTS = 4;
 const DISPATCH_TOAST_LIFETIME_MS = 5000;
 const PANE_ATTENTION_LIFETIME_MS = 4500;
@@ -13075,9 +13076,19 @@ function captureTerminalViewportLine(terminal) {
     return 0;
   }
 
-  return buffer.viewportY >= buffer.baseY
+  return isTerminalViewportNearBottom(buffer)
     ? TERMINAL_VIEWPORT_PINNED_TO_BOTTOM
     : buffer.viewportY;
+}
+
+function isTerminalViewportNearBottom(buffer) {
+  if (!buffer) {
+    return false;
+  }
+
+  const baseY = Number(buffer.baseY || 0);
+  const viewportY = Number(buffer.viewportY || 0);
+  return baseY - viewportY <= TERMINAL_VIEWPORT_BOTTOM_THRESHOLD_ROWS;
 }
 
 function disposeAllTerminals() {
@@ -13097,7 +13108,10 @@ function restoreTerminalViewport(paneId) {
     return;
   }
 
-  if (viewportLine === TERMINAL_VIEWPORT_PINNED_TO_BOTTOM) {
+  if (
+    viewportLine === TERMINAL_VIEWPORT_PINNED_TO_BOTTOM
+    || isTerminalViewportNearBottom(pane.terminal?.buffer?.active)
+  ) {
     pane.terminal.scrollToBottom();
     return;
   }
