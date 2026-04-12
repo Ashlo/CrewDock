@@ -1150,11 +1150,13 @@ function createMockBridge({
         return {
           workspaceId: workspace.id,
           summary: workspace.gitDetail?.summary || null,
+          files: workspace.gitDetail?.files || [],
         };
       }
       return {
         workspaceId,
         summary: null,
+        files: [],
       };
     },
     loadWorkspaceSourceControl: async (workspaceId, graphCursor = null) => {

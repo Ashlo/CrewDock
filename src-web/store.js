@@ -49,6 +49,7 @@ export function createUiState() {
       graphLoadingMore: false,
       createBranchName: "",
       createBranchStartPoint: "",
+      pendingCreateBranch: null,
       commitMessage: "",
       generatingCommitMessage: false,
       branchSearch: "",

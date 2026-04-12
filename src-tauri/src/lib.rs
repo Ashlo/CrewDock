@@ -641,6 +641,7 @@ struct WorkspaceSnapshot {
 struct WorkspaceGitSummaryUpdateSnapshot {
     workspace_id: String,
     summary: GitSummarySnapshot,
+    files: Vec<GitFileSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3868,6 +3869,7 @@ fn refresh_workspace_git_status(
     };
     let detail = collect_git_detail(Path::new(&workspace_path));
     let summary = detail.summary.clone();
+    let files = detail.files.clone();
 
     {
         let mut runtime = state
@@ -3893,6 +3895,7 @@ fn refresh_workspace_git_status(
     Ok(WorkspaceGitSummaryUpdateSnapshot {
         workspace_id,
         summary,
+        files,
     })
 }
 

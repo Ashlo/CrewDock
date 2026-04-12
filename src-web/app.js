@@ -84,6 +84,24 @@ const WORKSPACE_OPEN_TARGET_META = Object.freeze({
   iterm2: { label: "iTerm2", kind: "system", shortLabel: "I" },
   warp: { label: "Warp", kind: "system", shortLabel: "W" },
 });
+const EXPLORER_GIT_TONE_PRIORITY = Object.freeze({
+  conflicted: 6,
+  deleted: 5,
+  modified: 4,
+  renamed: 3,
+  added: 2,
+  untracked: 2,
+  staged: 1,
+});
+const EXPLORER_GIT_BADGE_META = Object.freeze({
+  conflicted: { badge: "!", label: "Conflict" },
+  deleted: { badge: "D", label: "Deleted" },
+  modified: { badge: "M", label: "Modified" },
+  renamed: { badge: "R", label: "Renamed" },
+  added: { badge: "A", label: "Added" },
+  untracked: { badge: "U", label: "Untracked" },
+  staged: { badge: "S", label: "Staged" },
+});
 
 const THEME_REGISTRY = Object.freeze({
   "one-dark": {
@@ -873,6 +891,124 @@ function isWorkspaceFileExplorerVisible(workspaceId = getActiveWorkspace()?.id |
 
 function requestWorkspaceFileExplorerRender(mask = RENDER_FILE_EXPLORER_SURFACES) {
   requestRender(mask);
+}
+
+function getExplorerGitTonePriority(tone) {
+  return EXPLORER_GIT_TONE_PRIORITY[String(tone || "")] || 0;
+}
+
+function chooseExplorerGitDecoration(current, next) {
+  if (!next) {
+    return current || null;
+  }
+  if (!current) {
+    return next;
+  }
+  return getExplorerGitTonePriority(next.tone) > getExplorerGitTonePriority(current.tone)
+    ? next
+    : current;
+}
+
+function resolveExplorerGitTone(file) {
+  const kind = String(file?.kind || "");
+  const indexStatus = String(file?.indexStatus || "");
+  const worktreeStatus = String(file?.worktreeStatus || "");
+
+  if (kind === "conflicted" || indexStatus === "unmerged" || worktreeStatus === "unmerged") {
+    return "conflicted";
+  }
+  if (kind === "deleted" || indexStatus === "deleted" || worktreeStatus === "deleted") {
+    return "deleted";
+  }
+  if (kind === "renamed" || indexStatus === "renamed" || worktreeStatus === "renamed") {
+    return "renamed";
+  }
+  if (kind === "untracked") {
+    return "untracked";
+  }
+  if ((kind === "staged" || indexStatus) && !worktreeStatus) {
+    return indexStatus === "added" ? "added" : "staged";
+  }
+  if (indexStatus === "added" || worktreeStatus === "added") {
+    return "added";
+  }
+  return "modified";
+}
+
+function buildExplorerGitDecoration(file) {
+  const tone = resolveExplorerGitTone(file);
+  const badgeMeta = EXPLORER_GIT_BADGE_META[tone] || EXPLORER_GIT_BADGE_META.modified;
+  return {
+    tone,
+    badge: badgeMeta.badge,
+    label: badgeMeta.label,
+  };
+}
+
+function collectExplorerGitDecorationPaths(file) {
+  const unique = new Set();
+  const paths = [];
+  for (const value of [file?.path, file?.originalPath]) {
+    const normalized = normalizeWorkspaceFileExplorerRelativePath(value);
+    if (!normalized || unique.has(normalized)) {
+      continue;
+    }
+    unique.add(normalized);
+    paths.push(normalized);
+  }
+  return paths;
+}
+
+function parentExplorerRelativePath(relativePath) {
+  const normalized = normalizeWorkspaceFileExplorerRelativePath(relativePath);
+  if (!normalized) {
+    return "";
+  }
+  const lastSlash = normalized.lastIndexOf("/");
+  return lastSlash === -1 ? "" : normalized.slice(0, lastSlash);
+}
+
+function getWorkspaceExplorerGitFiles(workspace) {
+  if (!workspace?.id) {
+    return [];
+  }
+  if (uiState.sourceControl.snapshot?.workspaceId === workspace.id) {
+    return Array.isArray(uiState.sourceControl.snapshot.changes)
+      ? uiState.sourceControl.snapshot.changes
+      : [];
+  }
+  return Array.isArray(workspace.gitDetail?.files) ? workspace.gitDetail.files : [];
+}
+
+function buildWorkspaceExplorerGitDecorations(workspace) {
+  const files = getWorkspaceExplorerGitFiles(workspace);
+  const fileDecorations = new Map();
+  const directoryDecorations = new Map();
+
+  for (const file of files) {
+    const decoration = buildExplorerGitDecoration(file);
+    const paths = collectExplorerGitDecorationPaths(file);
+    for (const relativePath of paths) {
+      fileDecorations.set(
+        relativePath,
+        chooseExplorerGitDecoration(fileDecorations.get(relativePath) || null, decoration),
+      );
+
+      let directoryPath = parentExplorerRelativePath(relativePath);
+      while (directoryPath) {
+        directoryDecorations.set(
+          directoryPath,
+          chooseExplorerGitDecoration(directoryDecorations.get(directoryPath) || null, decoration),
+        );
+        directoryPath = parentExplorerRelativePath(directoryPath);
+      }
+    }
+  }
+
+  return {
+    fileDecorations,
+    directoryDecorations,
+  };
 }
 
 function clearWorkspaceFileExplorerCache(workspaceId) {
@@ -5494,6 +5630,32 @@ function syncSourceControlTaskTray(task, previousTask = null) {
   }
 }
 
+function syncPendingSourceControlCreateBranch(task, snapshot = uiState.sourceControl.snapshot) {
+  const pending = uiState.sourceControl.pendingCreateBranch;
+  if (!pending) {
+    return;
+  }
+
+  if (pending.workspaceId !== (snapshot?.workspaceId || "")) {
+    return;
+  }
+
+  if (!task || task.id !== pending.taskId || task.status === "running") {
+    return;
+  }
+
+  if (task.status === "succeeded") {
+    if (uiState.sourceControl.createBranchName.trim() === pending.branchName) {
+      uiState.sourceControl.createBranchName = "";
+    }
+    if (uiState.sourceControl.createBranchStartPoint.trim() === pending.startPoint) {
+      uiState.sourceControl.createBranchStartPoint = "";
+    }
+  }
+
+  uiState.sourceControl.pendingCreateBranch = null;
+}
+
 function normalizeSourceControlRemoteOptions(remotes = [], defaultRemote = "") {
   const seen = new Set();
   const normalized = (Array.isArray(remotes) ? remotes : [])
@@ -6018,6 +6180,7 @@ function resetSourceControlState({ keepTab = true } = {}) {
     graphLoadingMore: false,
     createBranchName: "",
     createBranchStartPoint: "",
+    pendingCreateBranch: null,
     commitMessage: "",
     generatingCommitMessage: false,
     branchSearch: "",
@@ -6051,13 +6214,21 @@ function applySourceControlSnapshot(snapshot, { appendGraph = false } = {}) {
     : snapshot;
 
   uiState.sourceControl.snapshot = nextSnapshot;
+  syncWorkspaceGitDetail(nextSnapshot.workspaceId, {
+    summary: nextSnapshot.summary,
+    repoRoot: nextSnapshot.repoRoot || null,
+    workspaceRelativePath: nextSnapshot.workspaceRelativePath || null,
+    files: Array.isArray(nextSnapshot.changes) ? nextSnapshot.changes.map((file) => ({ ...file })) : [],
+  });
   applyWorkspaceGitSummaryUpdate({
     workspaceId: nextSnapshot.workspaceId,
     summary: nextSnapshot.summary,
+    files: nextSnapshot.changes || [],
   });
   uiState.sourceControl.lastLoadedWorkspaceId = nextSnapshot.workspaceId || "";
   uiState.sourceControl.graphLoadingMore = false;
   syncSourceControlTaskTray(nextSnapshot.task || null, previousTask);
+  syncPendingSourceControlCreateBranch(nextSnapshot.task || null, nextSnapshot);
 
   if (
     uiState.sourceControl.selectedPath
@@ -6092,6 +6263,9 @@ function applySourceControlSnapshot(snapshot, { appendGraph = false } = {}) {
     void loadSourceControlDiff(firstFile.path, uiState.sourceControl.selectedDiffMode);
   }
 
+  if (uiState.snapshot?.activeWorkspaceId === nextSnapshot.workspaceId) {
+    requestWorkspaceFileExplorerRender(RENDER_EXPLORER);
+  }
   requestSourceControlRender();
   return nextSnapshot;
 }
@@ -6119,6 +6293,7 @@ function handleSourceControlRuntimeEvent(event) {
       task: event.task,
     };
     syncSourceControlTaskTray(event.task, previousTask);
+    syncPendingSourceControlCreateBranch(event.task, sourceControl.snapshot);
     if (
       uiState.gitPanelVisible
       && uiState.snapshot?.activeWorkspaceId === event.workspaceId
@@ -6132,6 +6307,29 @@ function handleSourceControlRuntimeEvent(event) {
   }
 
   return { handled: true, renderMask };
+}
+
+function syncWorkspaceGitDetail(workspaceId, detailPatch) {
+  if (!uiState.snapshot || !workspaceId || !detailPatch || typeof detailPatch !== "object") {
+    return false;
+  }
+
+  const applyPatch = (workspace) => {
+    if (!workspace) {
+      return false;
+    }
+    workspace.gitDetail = {
+      ...(workspace.gitDetail || {}),
+      ...detailPatch,
+    };
+    return true;
+  };
+
+  let handled = applyPatch(getWorkspaceById(workspaceId));
+  if (uiState.snapshot.activeWorkspace?.id === workspaceId) {
+    handled = applyPatch(uiState.snapshot.activeWorkspace) || handled;
+  }
+  return handled;
 }
 
 function cloneGitSummarySnapshot(summary) {
@@ -6166,6 +6364,7 @@ function applyWorkspaceGitSummaryUpdate(update) {
 
   const workspaceId = String(update.workspaceId || "");
   const summary = cloneGitSummarySnapshot(update.summary);
+  const files = Array.isArray(update.files) ? update.files.map((file) => ({ ...file })) : null;
   if (!summary) {
     return { handled: false, renderMask: 0 };
   }
@@ -6175,18 +6374,17 @@ function applyWorkspaceGitSummaryUpdate(update) {
   const workspaceTab = getWorkspaceById(workspaceId);
   if (workspaceTab) {
     workspaceTab.gitSummary = summary;
+    if (files) {
+      syncWorkspaceGitDetail(workspaceId, { summary, files });
+    }
     handled = true;
     renderMask |= RENDER_STRIP;
   }
 
   if (uiState.snapshot.activeWorkspace?.id === workspaceId) {
-    const activeWorkspace = uiState.snapshot.activeWorkspace;
-    activeWorkspace.gitDetail = {
-      ...(activeWorkspace.gitDetail || {}),
-      summary,
-    };
+    syncWorkspaceGitDetail(workspaceId, files ? { summary, files } : { summary });
     handled = true;
-    renderMask |= RENDER_STATUS;
+    renderMask |= RENDER_STATUS | (files ? RENDER_EXPLORER : 0);
   }
 
   if (uiState.sourceControl.snapshot?.workspaceId === workspaceId) {
@@ -6649,9 +6847,14 @@ async function submitSourceControlCreateBranch() {
     () => bridge.gitCreateBranch(workspaceId, branchName, startPoint || null),
     { resetGraphSelection: true },
   );
-  if (snapshot) {
-    uiState.sourceControl.createBranchName = "";
-    uiState.sourceControl.createBranchStartPoint = "";
+  if (snapshot?.task?.id) {
+    uiState.sourceControl.pendingCreateBranch = {
+      workspaceId,
+      taskId: snapshot.task.id,
+      branchName,
+      startPoint,
+    };
+    syncPendingSourceControlCreateBranch(snapshot.task, snapshot);
     requestRender(RENDER_MODAL);
   }
 }
@@ -11514,6 +11717,7 @@ function syncSourceControlTaskLoop() {
             task: nextTask,
           };
           syncSourceControlTaskTray(nextTask, previousTask);
+          syncPendingSourceControlCreateBranch(nextTask, uiState.sourceControl.snapshot);
           requestSourceControlModalSync();
         }
 
@@ -12088,6 +12292,7 @@ function renderWorkspaceFileExplorer(workspace) {
   const rootSnapshot = explorerState?.directories.get("") || null;
   const rootLoading = Boolean(explorerState?.loadingPaths.has(""));
   const rootError = explorerState?.errorByPath.get("") || "";
+  const gitDecorations = buildWorkspaceExplorerGitDecorations(workspace);
 
   return `
     <div class="workspace-file-explorer-panel">
@@ -12122,6 +12327,7 @@ function renderWorkspaceFileExplorer(workspace) {
             rootSnapshot,
             rootLoading,
             rootError,
+            gitDecorations,
             explorerState,
             selectedPath: explorerState?.selectedPath || "",
           })}
@@ -12135,6 +12341,7 @@ function renderWorkspaceFileExplorerTree({
   rootSnapshot,
   rootLoading,
   rootError,
+  gitDecorations,
   explorerState,
   selectedPath,
 }) {
@@ -12152,10 +12359,10 @@ function renderWorkspaceFileExplorerTree({
     );
   }
 
-  return renderWorkspaceFileExplorerEntries(rootSnapshot.entries, explorerState, selectedPath, 0);
+  return renderWorkspaceFileExplorerEntries(rootSnapshot.entries, explorerState, selectedPath, 0, gitDecorations);
 }
 
-function renderWorkspaceFileExplorerEntries(entries, explorerState, selectedPath, depth) {
+function renderWorkspaceFileExplorerEntries(entries, explorerState, selectedPath, depth, gitDecorations) {
   return entries
     .map((entry) => {
       const kind = entry.kind === "directory" || entry.kind === "symlink" ? entry.kind : "file";
@@ -12165,6 +12372,9 @@ function renderWorkspaceFileExplorerEntries(entries, explorerState, selectedPath
       const childSnapshot = explorerState?.directories.get(entry.relativePath) || null;
       const childLoading = Boolean(explorerState?.loadingPaths.has(entry.relativePath));
       const childError = explorerState?.errorByPath.get(entry.relativePath) || "";
+      const gitDecoration = isDirectory
+        ? gitDecorations?.directoryDecorations.get(entry.relativePath) || null
+        : gitDecorations?.fileDecorations.get(entry.relativePath) || null;
       
       const disclosure = isDirectory
         ? `
@@ -12181,6 +12391,20 @@ function renderWorkspaceFileExplorerEntries(entries, explorerState, selectedPath
       const badge = kind === "symlink"
         ? `<span class="workspace-file-explorer-badge">Link</span>`
         : "";
+      const gitBadge = gitDecoration
+        ? `
+            <span
+              class="workspace-file-explorer-git-badge is-${escapeHtml(gitDecoration.tone)}"
+              title="${escapeHtml(gitDecoration.label)}"
+              aria-label="${escapeHtml(gitDecoration.label)}"
+            >
+              ${escapeHtml(gitDecoration.badge)}
+            </span>
+          `
+        : "";
+      const gitToneAttribute = gitDecoration
+        ? ` data-git-tone="${escapeHtml(gitDecoration.tone)}"`
+        : "";
 
       const childContent = !isExpanded
         ? ""
@@ -12194,6 +12418,7 @@ function renderWorkspaceFileExplorerEntries(entries, explorerState, selectedPath
                   explorerState,
                   selectedPath,
                   depth + 1,
+                  gitDecorations,
                 )
               : renderWorkspaceFileExplorerState("Empty", {
                   tone: "muted",
@@ -12205,16 +12430,18 @@ function renderWorkspaceFileExplorerEntries(entries, explorerState, selectedPath
           <div 
             class="workspace-file-explorer-row ${isSelected ? "is-selected" : ""}" 
             style="--explorer-depth:${depth}"
+            ${gitToneAttribute}
             data-action="${isDirectory ? "toggle-file-explorer-directory" : "select-file-explorer-entry"}"
             data-relative-path="${escapeHtml(entry.relativePath)}"
           >
             ${disclosure}
-            <div class="workspace-file-explorer-entry is-${escapeHtml(kind)}">
+            <div class="workspace-file-explorer-entry is-${escapeHtml(kind)} ${gitDecoration ? `is-git-${escapeHtml(gitDecoration.tone)}` : ""}">
               <span class="workspace-file-explorer-entry-icon">
                 ${kind === "directory" ? renderFolderIcon() : renderFileIcon()}
               </span>
               <span class="workspace-file-explorer-entry-label">${escapeHtml(entry.name)}</span>
               ${badge}
+              ${gitBadge}
             </div>
           </div>
           ${isExpanded ? `<div class="workspace-file-explorer-children" style="--explorer-depth:${depth}">${childContent}</div>` : ""}

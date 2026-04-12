@@ -6965,6 +6965,40 @@ button {
   color: var(--tab-text-active);
 }
 
+.workspace-file-explorer-row[data-git-tone="modified"] .workspace-file-explorer-entry-label,
+.workspace-file-explorer-row[data-git-tone="modified"] .workspace-file-explorer-entry-icon {
+  color: #e5c07b;
+}
+
+.workspace-file-explorer-row[data-git-tone="added"] .workspace-file-explorer-entry-label,
+.workspace-file-explorer-row[data-git-tone="added"] .workspace-file-explorer-entry-icon,
+.workspace-file-explorer-row[data-git-tone="untracked"] .workspace-file-explorer-entry-label,
+.workspace-file-explorer-row[data-git-tone="untracked"] .workspace-file-explorer-entry-icon,
+.workspace-file-explorer-row[data-git-tone="staged"] .workspace-file-explorer-entry-label,
+.workspace-file-explorer-row[data-git-tone="staged"] .workspace-file-explorer-entry-icon {
+  color: #98c379;
+}
+
+.workspace-file-explorer-row[data-git-tone="renamed"] .workspace-file-explorer-entry-label,
+.workspace-file-explorer-row[data-git-tone="renamed"] .workspace-file-explorer-entry-icon {
+  color: #61afef;
+}
+
+.workspace-file-explorer-row[data-git-tone="deleted"] .workspace-file-explorer-entry-label,
+.workspace-file-explorer-row[data-git-tone="deleted"] .workspace-file-explorer-entry-icon {
+  color: #e06c75;
+}
+
+.workspace-file-explorer-row[data-git-tone="conflicted"] .workspace-file-explorer-entry-label,
+.workspace-file-explorer-row[data-git-tone="conflicted"] .workspace-file-explorer-entry-icon {
+  color: #ff9e64;
+}
+
+.workspace-file-explorer-row.is-selected[data-git-tone] .workspace-file-explorer-entry-label,
+.workspace-file-explorer-row.is-selected[data-git-tone] .workspace-file-explorer-entry-icon {
+  filter: saturate(1.06) brightness(1.04);
+}
+
 .workspace-file-explorer-entry-icon {
   width: 16px;
   height: 16px;
@@ -7022,6 +7056,54 @@ button {
   color: var(--muted);
   font-size: 10px;
   font-weight: 600;
+}
+
+.workspace-file-explorer-git-badge {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.workspace-file-explorer-git-badge.is-modified {
+  color: #e5c07b;
+  border-color: rgba(229, 192, 123, 0.26);
+  background: rgba(229, 192, 123, 0.08);
+}
+
+.workspace-file-explorer-git-badge.is-added,
+.workspace-file-explorer-git-badge.is-untracked,
+.workspace-file-explorer-git-badge.is-staged {
+  color: #98c379;
+  border-color: rgba(152, 195, 121, 0.24);
+  background: rgba(152, 195, 121, 0.08);
+}
+
+.workspace-file-explorer-git-badge.is-renamed {
+  color: #61afef;
+  border-color: rgba(97, 175, 239, 0.24);
+  background: rgba(97, 175, 239, 0.08);
+}
+
+.workspace-file-explorer-git-badge.is-deleted {
+  color: #e06c75;
+  border-color: rgba(224, 108, 117, 0.24);
+  background: rgba(224, 108, 117, 0.08);
+}
+
+.workspace-file-explorer-git-badge.is-conflicted {
+  color: #ff9e64;
+  border-color: rgba(255, 158, 100, 0.28);
+  background: rgba(255, 158, 100, 0.1);
 }
 
 .workspace-file-explorer-children {
