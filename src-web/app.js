@@ -47,6 +47,70 @@ const WORKSPACE_TAB_DRAG_THRESHOLD_PX = 6;
 const WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX = 32;
 const WORKSPACE_TAB_EDGE_SCROLL_MAX_PX_PER_FRAME = 18;
 const WORKSPACE_TAB_CLICK_SUPPRESS_MS = 250;
+const MARKDOWN_VIEW_MODES = new Set(["write", "preview", "split"]);
+const MARKDOWN_RAW_HTML_ALLOWED_TAGS = new Set([
+  "a",
+  "blockquote",
+  "br",
+  "code",
+  "del",
+  "em",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "hr",
+  "img",
+  "li",
+  "ol",
+  "p",
+  "pre",
+  "strong",
+  "table",
+  "tbody",
+  "td",
+  "th",
+  "thead",
+  "tr",
+  "ul",
+]);
+const MARKDOWN_RAW_HTML_BLOCK_TAGS = new Set([
+  "blockquote",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "hr",
+  "img",
+  "ol",
+  "p",
+  "pre",
+  "table",
+  "tbody",
+  "thead",
+  "tr",
+  "ul",
+]);
+const MARKDOWN_RAW_HTML_ALLOWED_ATTRIBUTES = Object.freeze({
+  a: new Set(["href", "title"]),
+  blockquote: new Set(["align"]),
+  h1: new Set(["align"]),
+  h2: new Set(["align"]),
+  h3: new Set(["align"]),
+  h4: new Set(["align"]),
+  h5: new Set(["align"]),
+  h6: new Set(["align"]),
+  img: new Set(["src", "alt", "title", "width", "height", "align"]),
+  p: new Set(["align"]),
+  table: new Set(["width", "align"]),
+  td: new Set(["width", "height", "align", "colspan", "rowspan"]),
+  th: new Set(["width", "height", "align", "colspan", "rowspan"]),
+  tr: new Set(["align"]),
+});
 const LAUNCHER_COMMANDS = Object.freeze(["help", "pwd", "ls", "cd", "open", "clear"]);
 const PATH_AWARE_LAUNCHER_COMMANDS = new Set(["ls", "cd", "open"]);
 const RENDER_STRIP = 1 << 0;
@@ -1034,6 +1098,34 @@ function workspacePathDirname(relativePath) {
   return normalizedPath.split("/").slice(0, -1).join("/");
 }
 
+function resolveWorkspaceRelativePath(baseRelativePath, targetPath) {
+  const basePath = normalizeWorkspaceFileExplorerRelativePath(baseRelativePath);
+  const normalizedTarget = String(targetPath || "").replaceAll("\\", "/").trim();
+  if (!normalizedTarget) {
+    return "";
+  }
+
+  const segments = normalizedTarget.startsWith("/")
+    ? []
+    : basePath
+      ? basePath.split("/").filter(Boolean)
+      : [];
+
+  for (const rawSegment of normalizedTarget.split("/")) {
+    const segment = rawSegment.trim();
+    if (!segment || segment === ".") {
+      continue;
+    }
+    if (segment === "..") {
+      segments.pop();
+      continue;
+    }
+    segments.push(segment);
+  }
+
+  return segments.join("/");
+}
+
 function buildWorkspaceExplorerAncestorPaths(relativePath, { includeSelf = false } = {}) {
   const normalizedPath = normalizeWorkspaceFileExplorerRelativePath(relativePath);
   if (!normalizedPath) {
@@ -1275,6 +1367,7 @@ function createWorkspaceFileEditorState() {
     activePath: "",
     snapshot: null,
     draft: "",
+    markdownViewMode: "preview",
     dirty: false,
     loading: false,
     saving: false,
@@ -1479,6 +1572,36 @@ function normalizeWorkspaceTextFileSnapshot(snapshot, workspaceId, relativePath 
 
 function normalizeWorkspaceTextContentForComparison(value) {
   return String(value || "").replaceAll("\r\n", "\n").replaceAll("\r", "\n");
+}
+
+function isMarkdownFilePath(relativePath) {
+  const normalized = normalizeWorkspaceFileExplorerRelativePath(relativePath).toLowerCase();
+  if (!normalized) {
+    return false;
+  }
+
+  return /\.(md|markdown|mdown|mkd|mkdn|mdtxt)$/i.test(normalized)
+    || /(^|\/)(readme|changelog|contributing|notes)\.md$/i.test(normalized);
+}
+
+function getWorkspaceFileEditorMarkdownMode(editorState) {
+  if (!isMarkdownFilePath(editorState?.activePath)) {
+    return "write";
+  }
+
+  return MARKDOWN_VIEW_MODES.has(editorState?.markdownViewMode)
+    ? editorState.markdownViewMode
+    : "preview";
+}
+
+function workspaceFileEditorShowsMarkdownPreview(editorState) {
+  const mode = getWorkspaceFileEditorMarkdownMode(editorState);
+  return mode === "preview" || mode === "split";
+}
+
+function workspaceFileEditorShowsMarkdownWrite(editorState) {
+  const mode = getWorkspaceFileEditorMarkdownMode(editorState);
+  return mode === "write" || mode === "split";
 }
 
 function applyWorkspaceTextFileNewlineStyle(value, newlineStyle = "lf") {
@@ -3394,6 +3517,19 @@ async function handleClick(event) {
     return;
   }
 
+  if (target.dataset.action === "set-workspace-file-editor-markdown-mode") {
+    const workspace = getActiveWorkspace();
+    const editorState = getWorkspaceFileEditorState(workspace?.id, { create: false });
+    const nextMode = String(target.dataset.mode || "");
+    if (!workspace || !editorState || !isMarkdownFilePath(editorState.activePath) || !MARKDOWN_VIEW_MODES.has(nextMode)) {
+      return;
+    }
+    editorState.markdownViewMode = nextMode;
+    editorState.shouldFocus = nextMode !== "preview";
+    requestRender(RENDER_EXPLORER | RENDER_TERMINALS);
+    return;
+  }
+
   if (target.dataset.action === "reveal-workspace-file-in-explorer") {
     const workspace = getActiveWorkspace();
     const editorState = getWorkspaceFileEditorState(workspace?.id, { create: false });
@@ -4740,12 +4876,15 @@ function handleInput(event) {
       const shouldRefreshSurface = Boolean(
         editorState.notice || (!editorState.conflict && editorState.saveError),
       );
+      const shouldRefreshMarkdownPreview = workspaceFileEditorShowsMarkdownPreview(editorState);
       editorState.notice = "";
       if (!editorState.conflict) {
         editorState.saveError = "";
       }
       const dirtyDidChange = syncWorkspaceFileEditorDirtyState(editorState);
       if (shouldRefreshSurface) {
+        requestRender(RENDER_EXPLORER | (dirtyDidChange ? (RENDER_STRIP | RENDER_STATUS) : 0));
+      } else if (shouldRefreshMarkdownPreview) {
         requestRender(RENDER_EXPLORER | (dirtyDidChange ? (RENDER_STRIP | RENDER_STATUS) : 0));
       } else {
         syncWorkspaceFileEditorLiveDom(workspace?.id);
@@ -12459,11 +12598,504 @@ function renderWorkspaceFileExplorerState(message, { tone = "muted", depth = 0 }
   `;
 }
 
+function buildWorkspaceAbsolutePath(workspacePath, relativePath = "") {
+  const normalizedWorkspacePath = String(workspacePath || "").replaceAll("\\", "/").replace(/\/+$/, "");
+  const normalizedRelativePath = normalizeWorkspaceFileExplorerRelativePath(relativePath);
+  if (!normalizedRelativePath) {
+    return normalizedWorkspacePath || "/";
+  }
+  if (!normalizedWorkspacePath || normalizedWorkspacePath === "/") {
+    return `/${normalizedRelativePath}`;
+  }
+  return `${normalizedWorkspacePath}/${normalizedRelativePath}`;
+}
+
+function convertWorkspaceFilePathToAssetUrl(absolutePath) {
+  const normalizedPath = String(absolutePath || "").trim();
+  if (!normalizedPath) {
+    return "";
+  }
+
+  const tauriApi = window.__TAURI__;
+  const convertFileSrc = tauriApi?.core?.convertFileSrc
+    || tauriApi?.tauri?.convertFileSrc
+    || window.__TAURI_INTERNALS__?.convertFileSrc;
+
+  if (typeof convertFileSrc === "function") {
+    try {
+      return String(convertFileSrc(normalizedPath) || "");
+    } catch (_error) {
+      return "";
+    }
+  }
+
+  return "";
+}
+
+function resolveMarkdownWorkspaceAssetUrl(url, context = {}) {
+  const normalized = String(url || "").trim();
+  if (!normalized) {
+    return "";
+  }
+  if (
+    normalized.startsWith("#")
+    || /^https?:\/\//i.test(normalized)
+    || /^mailto:/i.test(normalized)
+    || /^tel:/i.test(normalized)
+  ) {
+    return normalized;
+  }
+
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(normalized)) {
+    return "";
+  }
+
+  const workspacePath = String(context.workspacePath || "").trim();
+  if (!workspacePath) {
+    return "";
+  }
+
+  const baseRelativePath = workspacePathDirname(context.relativePath || "");
+  const resolvedRelativePath = resolveWorkspaceRelativePath(baseRelativePath, normalized);
+  if (!resolvedRelativePath) {
+    return "";
+  }
+
+  return convertWorkspaceFilePathToAssetUrl(
+    buildWorkspaceAbsolutePath(workspacePath, resolvedRelativePath),
+  );
+}
+
+function sanitizeMarkdownLinkUrl(url, context = {}, { allowHash = true } = {}) {
+  const normalized = String(url || "").trim();
+  if (!normalized) {
+    return "";
+  }
+  if (allowHash && normalized.startsWith("#")) {
+    return normalized;
+  }
+  if (/^https?:\/\//i.test(normalized) || /^mailto:/i.test(normalized) || /^tel:/i.test(normalized)) {
+    return normalized;
+  }
+  return resolveMarkdownWorkspaceAssetUrl(normalized, context);
+}
+
+function parseMarkdownRawHtmlAttributes(source) {
+  const normalizedSource = String(source || "");
+  const attributes = [];
+  const pattern = /([^\s=/>]+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g;
+  let match = pattern.exec(normalizedSource);
+  while (match) {
+    attributes.push({
+      name: String(match[1] || ""),
+      value: match[2] ?? match[3] ?? match[4] ?? "",
+    });
+    match = pattern.exec(normalizedSource);
+  }
+  return attributes;
+}
+
+function sanitizeMarkdownRawHtmlTag(rawTag, context = {}) {
+  const trimmed = String(rawTag || "").trim();
+  const match = /^<\s*(\/)?\s*([a-zA-Z][\w:-]*)([^>]*?)(\/?)\s*>$/.exec(trimmed);
+  if (!match) {
+    return escapeHtml(trimmed);
+  }
+
+  const isClosing = Boolean(match[1]);
+  const tagName = String(match[2] || "").toLowerCase();
+  const attributeSource = String(match[3] || "");
+  const isSelfClosing = Boolean(match[4]) || tagName === "br" || tagName === "hr" || tagName === "img";
+
+  if (!MARKDOWN_RAW_HTML_ALLOWED_TAGS.has(tagName)) {
+    return escapeHtml(trimmed);
+  }
+
+  if (isClosing) {
+    return `</${tagName}>`;
+  }
+
+  const allowedAttributes = MARKDOWN_RAW_HTML_ALLOWED_ATTRIBUTES[tagName] || new Set();
+  const serializedAttributes = [];
+  for (const attribute of parseMarkdownRawHtmlAttributes(attributeSource)) {
+    const name = String(attribute.name || "").toLowerCase();
+    if (!allowedAttributes.has(name)) {
+      continue;
+    }
+
+    const rawValue = String(attribute.value || "");
+    let safeValue = rawValue;
+    if (name === "href") {
+      safeValue = sanitizeMarkdownLinkUrl(rawValue, context);
+    } else if (name === "src") {
+      safeValue = sanitizeMarkdownLinkUrl(rawValue, context, { allowHash: false });
+    } else if (name === "align") {
+      const normalizedAlign = rawValue.toLowerCase();
+      if (!["left", "center", "right"].includes(normalizedAlign)) {
+        continue;
+      }
+      safeValue = normalizedAlign;
+    } else if (["width", "height", "colspan", "rowspan"].includes(name)) {
+      const normalizedNumericValue = rawValue.trim();
+      if (!/^\d+%?$/.test(normalizedNumericValue)) {
+        continue;
+      }
+      safeValue = normalizedNumericValue;
+    }
+
+    if (!safeValue) {
+      continue;
+    }
+
+    serializedAttributes.push(`${name}="${escapeHtml(safeValue)}"`);
+  }
+
+  if (tagName === "a") {
+    serializedAttributes.push('target="_blank"', 'rel="noreferrer noopener"');
+  }
+
+  const attributeText = serializedAttributes.length > 0
+    ? ` ${serializedAttributes.join(" ")}`
+    : "";
+  return `<${tagName}${attributeText}${isSelfClosing ? " />" : ">"}>`;
+}
+
+function sanitizeMarkdownHtmlFragment(value, context = {}) {
+  const source = String(value || "");
+  const parts = [];
+  const pattern = /<\/?[a-zA-Z][^>]*>/g;
+  let lastIndex = 0;
+  let match = pattern.exec(source);
+
+  while (match) {
+    parts.push(escapeHtml(source.slice(lastIndex, match.index)));
+    parts.push(sanitizeMarkdownRawHtmlTag(match[0], context));
+    lastIndex = match.index + match[0].length;
+    match = pattern.exec(source);
+  }
+
+  parts.push(escapeHtml(source.slice(lastIndex)));
+  return parts.join("");
+}
+
+function isMarkdownRawHtmlBlockStart(line) {
+  const match = /^<\s*\/?\s*([a-zA-Z][\w:-]*)\b/i.exec(String(line || "").trim());
+  return Boolean(match && MARKDOWN_RAW_HTML_BLOCK_TAGS.has(String(match[1] || "").toLowerCase()));
+}
+
+function renderMarkdownInline(value, context = {}) {
+  const placeholders = [];
+  const stash = (html) => {
+    const token = `\u0000${placeholders.length}\u0000`;
+    placeholders.push(html);
+    return token;
+  };
+
+  let html = String(value || "").replace(/<\/?[a-zA-Z][^>]*>/g, (rawTag) => (
+    stash(sanitizeMarkdownRawHtmlTag(rawTag, context))
+  ));
+  html = escapeHtml(html);
+
+  html = html.replace(/!\[([^\]]*)\]\(([^)\s]+)(?:\s+"([^"]*)")?\)/g, (_match, altText, url, title) => {
+    const safeUrl = sanitizeMarkdownLinkUrl(url, context, { allowHash: false });
+    const safeTitle = title ? ` title="${escapeHtml(title)}"` : "";
+    const label = escapeHtml(String(altText || "").trim() || String(url || "").trim());
+    if (!safeUrl) {
+      return stash(`
+        <span class="workspace-file-editor-markdown-inline-media"${safeTitle}>
+          Image: ${label}
+        </span>
+      `);
+    }
+    return stash(`
+      <img
+        class="workspace-file-editor-markdown-image"
+        src="${escapeHtml(safeUrl)}"
+        alt="${label}"
+        loading="lazy"${safeTitle}
+      />
+    `);
+  });
+
+  html = html.replace(/`([^`\n]+)`/g, (_match, code) => stash(`<code>${code}</code>`));
+
+  html = html.replace(/\[([^\]]+)\]\(([^)\s]+)(?:\s+"([^"]*)")?\)/g, (_match, label, url, title) => {
+    const safeUrl = sanitizeMarkdownLinkUrl(url, context);
+    const safeTitle = title ? ` title="${escapeHtml(title)}"` : "";
+    if (!safeUrl) {
+      return stash(`<span class="workspace-file-editor-markdown-link-disabled"${safeTitle}>${label}</span>`);
+    }
+    return stash(`
+      <a href="${escapeHtml(safeUrl)}" target="_blank" rel="noreferrer noopener"${safeTitle}>
+        ${label}
+      </a>
+    `);
+  });
+
+  html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  html = html.replace(/__([^_]+)__/g, "<strong>$1</strong>");
+  html = html.replace(/~~([^~]+)~~/g, "<del>$1</del>");
+  html = html.replace(/(^|[\s(])\*([^*\n]+)\*(?=[\s).,!?:;]|$)/g, "$1<em>$2</em>");
+  html = html.replace(/(^|[\s(])_([^_\n]+)_(?=[\s).,!?:;]|$)/g, "$1<em>$2</em>");
+
+  return html.replace(/\u0000(\d+)\u0000/g, (_match, index) => placeholders[Number(index)] || "");
+}
+
+function splitMarkdownTableRow(line) {
+  return String(line || "")
+    .trim()
+    .replace(/^\|/, "")
+    .replace(/\|$/, "")
+    .split("|")
+    .map((cell) => cell.trim());
+}
+
+function isMarkdownTableDivider(line) {
+  return /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(String(line || ""));
+}
+
+function isMarkdownListLine(line) {
+  return /^(\s*)([-*+]\s+|\d+\.\s+)/.test(String(line || ""));
+}
+
+function isMarkdownSpecialBlockStart(line, nextLine = "") {
+  const normalized = String(line || "");
+  if (!normalized.trim()) {
+    return true;
+  }
+  return /^```/.test(normalized)
+    || /^(#{1,6})\s+/.test(normalized)
+    || /^>\s?/.test(normalized)
+    || /^([-*_])(?:\s*\1){2,}\s*$/.test(normalized.trim())
+    || isMarkdownRawHtmlBlockStart(normalized)
+    || isMarkdownListLine(normalized)
+    || (normalized.includes("|") && isMarkdownTableDivider(nextLine));
+}
+
+function renderMarkdownCodeBlock(language, content) {
+  const languageLabel = String(language || "").trim();
+  return `
+    <pre class="workspace-file-editor-markdown-code"><code${languageLabel ? ` data-language="${escapeHtml(languageLabel)}"` : ""}>${escapeHtml(content)}</code></pre>
+  `;
+}
+
+function renderMarkdownTable(lines, context = {}) {
+  const [headerLine, , ...bodyLines] = lines;
+  const headerCells = splitMarkdownTableRow(headerLine);
+  const bodyRows = bodyLines
+    .map((line) => splitMarkdownTableRow(line))
+    .filter((cells) => cells.length > 0);
+
+  return `
+    <div class="workspace-file-editor-markdown-table-shell">
+      <table>
+        <thead>
+          <tr>${headerCells.map((cell) => `<th>${renderMarkdownInline(cell, context)}</th>`).join("")}</tr>
+        </thead>
+        <tbody>
+          ${bodyRows.map((cells) => `<tr>${cells.map((cell) => `<td>${renderMarkdownInline(cell, context)}</td>`).join("")}</tr>`).join("")}
+        </tbody>
+      </table>
+    </div>
+  `;
+}
+
+function renderMarkdownList(items, context = {}, { ordered = false } = {}) {
+  const tag = ordered ? "ol" : "ul";
+  return `
+    <${tag}>
+      ${items.map((item) => {
+        if (item.kind === "task") {
+          return `
+            <li class="is-task">
+              <span class="workspace-file-editor-markdown-checkbox ${item.checked ? "is-checked" : ""}" aria-hidden="true"></span>
+              <span>${renderMarkdownInline(item.content, context)}</span>
+            </li>
+          `;
+        }
+        return `<li>${renderMarkdownInline(item.content, context)}</li>`;
+      }).join("")}
+    </${tag}>
+  `;
+}
+
+function renderMarkdownPreviewHtml(value, context = {}) {
+  const lines = normalizeWorkspaceTextContentForComparison(value).split("\n");
+  const blocks = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index];
+    const trimmed = line.trim();
+    const nextLine = index + 1 < lines.length ? lines[index + 1] : "";
+
+    if (!trimmed) {
+      index += 1;
+      continue;
+    }
+
+    const headingMatch = /^(#{1,6})\s+(.*)$/.exec(trimmed);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      blocks.push(`<h${level}>${renderMarkdownInline(headingMatch[2], context)}</h${level}>`);
+      index += 1;
+      continue;
+    }
+
+    if (/^([-*_])(?:\s*\1){2,}\s*$/.test(trimmed)) {
+      blocks.push("<hr />");
+      index += 1;
+      continue;
+    }
+
+    if (/^```/.test(trimmed)) {
+      const language = trimmed.replace(/^```/, "").trim();
+      const content = [];
+      index += 1;
+      while (index < lines.length && !/^```/.test(lines[index].trim())) {
+        content.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) {
+        index += 1;
+      }
+      blocks.push(renderMarkdownCodeBlock(language, content.join("\n")));
+      continue;
+    }
+
+    if (isMarkdownRawHtmlBlockStart(trimmed)) {
+      const htmlLines = [line];
+      index += 1;
+      while (index < lines.length && lines[index].trim()) {
+        if (isMarkdownSpecialBlockStart(lines[index], index + 1 < lines.length ? lines[index + 1] : "")
+          && !isMarkdownRawHtmlBlockStart(lines[index])) {
+          break;
+        }
+        htmlLines.push(lines[index]);
+        index += 1;
+      }
+      blocks.push(sanitizeMarkdownHtmlFragment(htmlLines.join("\n"), context));
+      continue;
+    }
+
+    if (trimmed.includes("|") && isMarkdownTableDivider(nextLine)) {
+      const tableLines = [line, nextLine];
+      index += 2;
+      while (index < lines.length && lines[index].trim() && lines[index].includes("|")) {
+        tableLines.push(lines[index]);
+        index += 1;
+      }
+      blocks.push(renderMarkdownTable(tableLines, context));
+      continue;
+    }
+
+    if (/^>\s?/.test(trimmed)) {
+      const quoteLines = [];
+      while (index < lines.length && /^>\s?/.test(lines[index].trim())) {
+        quoteLines.push(lines[index].replace(/^>\s?/, ""));
+        index += 1;
+      }
+      blocks.push(`<blockquote>${renderMarkdownPreviewHtml(quoteLines.join("\n"), context)}</blockquote>`);
+      continue;
+    }
+
+    const unorderedMatch = /^[-*+]\s+(.*)$/.exec(trimmed);
+    const orderedMatch = /^\d+\.\s+(.*)$/.exec(trimmed);
+    if (unorderedMatch || orderedMatch) {
+      const ordered = Boolean(orderedMatch);
+      const items = [];
+      while (index < lines.length) {
+        const candidate = lines[index].trim();
+        const match = ordered
+          ? /^\d+\.\s+(.*)$/.exec(candidate)
+          : /^[-*+]\s+(.*)$/.exec(candidate);
+        if (!match) {
+          break;
+        }
+        const content = match[1];
+        const taskMatch = /^\[( |x|X)\]\s+(.*)$/.exec(content);
+        if (taskMatch) {
+          items.push({
+            kind: "task",
+            checked: taskMatch[1].toLowerCase() === "x",
+            content: taskMatch[2],
+          });
+        } else {
+          items.push({ kind: "item", content });
+        }
+        index += 1;
+      }
+      blocks.push(renderMarkdownList(items, context, { ordered }));
+      continue;
+    }
+
+    const paragraphLines = [line];
+    index += 1;
+    while (index < lines.length) {
+      const candidate = lines[index];
+      if (isMarkdownSpecialBlockStart(candidate, index + 1 < lines.length ? lines[index + 1] : "")) {
+        break;
+      }
+      paragraphLines.push(candidate);
+      index += 1;
+    }
+    blocks.push(`<p>${renderMarkdownInline(paragraphLines.join(" ").trim(), context)}</p>`);
+  }
+
+  return blocks.join("");
+}
+
+function renderWorkspaceFileEditorMarkdownModeToggle(editorState) {
+  if (!isMarkdownFilePath(editorState?.activePath)) {
+    return "";
+  }
+
+  const currentMode = getWorkspaceFileEditorMarkdownMode(editorState);
+  return `
+    <div class="workspace-file-editor-mode-toggle" aria-label="Markdown view mode">
+      ${["write", "preview", "split"].map((mode) => `
+        <button
+          type="button"
+          class="workspace-file-editor-mode-button ${currentMode === mode ? "is-active" : ""}"
+          data-action="set-workspace-file-editor-markdown-mode"
+          data-mode="${mode}"
+        >
+          ${mode === "write" ? "Write" : mode === "preview" ? "Preview" : "Split"}
+        </button>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderWorkspaceFileMarkdownPreview(workspace, editorState) {
+  const content = String(editorState?.draft || "");
+  if (!content.trim()) {
+    return `
+      <div class="workspace-file-editor-markdown-empty">
+        <strong>Nothing to preview</strong>
+        <p>Start writing Markdown and CrewDock will render it here.</p>
+      </div>
+    `;
+  }
+
+  return `
+    <article class="workspace-file-editor-markdown">
+      ${renderMarkdownPreviewHtml(content, {
+        workspacePath: workspace?.path || "",
+        relativePath: editorState?.activePath || "",
+      })}
+    </article>
+  `;
+}
+
 function renderWorkspaceFileEditorShell(workspace) {
   const visible = isWorkspaceFileEditorVisible(workspace.id);
+  const editorState = getWorkspaceFileEditorState(workspace.id, { create: false });
+  const markdownMode = getWorkspaceFileEditorMarkdownMode(editorState);
+  const isMarkdownSplit = visible && markdownMode === "split";
   return `
     <aside
-      class="workspace-file-editor-shell ${visible ? "is-visible" : ""}"
+      class="workspace-file-editor-shell ${visible ? "is-visible" : ""} ${isMarkdownSplit ? "is-markdown-split" : ""}"
       data-workspace-file-editor="${escapeHtml(workspace.id)}"
       aria-hidden="${visible ? "false" : "true"}"
     >
@@ -12478,6 +13110,10 @@ function renderWorkspaceFileEditor(workspace) {
   const title = getWorkspaceFileEditorTitle(editorState);
   const statusLabel = getWorkspaceFileEditorStatusLabel(editorState);
   const snapshot = editorState?.snapshot || null;
+  const isMarkdown = isMarkdownFilePath(activePath);
+  const markdownMode = getWorkspaceFileEditorMarkdownMode(editorState);
+  const showMarkdownPreview = isMarkdown && workspaceFileEditorShowsMarkdownPreview(editorState);
+  const showMarkdownWrite = !isMarkdown || workspaceFileEditorShowsMarkdownWrite(editorState);
 
   let body = `
     <div class="workspace-file-editor-empty">
@@ -12523,6 +13159,9 @@ function renderWorkspaceFileEditor(workspace) {
           </div>
         `
       : "";
+    const mainBodyClass = showMarkdownPreview
+      ? (showMarkdownWrite ? "is-split" : "is-preview-only")
+      : "is-write-only";
     body = `
       <div class="workspace-file-editor-body">
         ${conflictBanner}
@@ -12531,14 +13170,35 @@ function renderWorkspaceFileEditor(workspace) {
             ? renderWorkspaceFileEditorState(message, { tone: messageTone })
             : ""
         }
-        <textarea
-          class="workspace-file-editor-input"
-          data-workspace-file-editor-input
-          spellcheck="false"
-          autocapitalize="off"
-          autocorrect="off"
-          ${snapshot?.readOnly ? "readonly" : ""}
-        >${escapeHtml(editorState?.draft || "")}</textarea>
+        <div class="workspace-file-editor-main ${mainBodyClass}">
+          ${
+            showMarkdownWrite
+              ? `
+                  <div class="workspace-file-editor-pane is-write">
+                    <textarea
+                      class="workspace-file-editor-input"
+                      data-workspace-file-editor-input
+                      spellcheck="false"
+                      autocapitalize="off"
+                      autocorrect="off"
+                      ${snapshot?.readOnly ? "readonly" : ""}
+                    >${escapeHtml(editorState?.draft || "")}</textarea>
+                  </div>
+                `
+              : ""
+          }
+          ${
+            showMarkdownPreview
+              ? `
+                  <div class="workspace-file-editor-pane is-preview">
+                    <div class="workspace-file-editor-preview-shell" data-markdown-mode="${escapeHtml(markdownMode)}">
+                      ${renderWorkspaceFileMarkdownPreview(workspace, editorState)}
+                    </div>
+                  </div>
+                `
+              : ""
+          }
+        </div>
         <div class="workspace-file-editor-footer">
           <span>${escapeHtml(activePath)}</span>
           <span>${snapshot?.readOnly ? "Read only" : "Cmd/Ctrl+S to save"}</span>
@@ -12555,6 +13215,7 @@ function renderWorkspaceFileEditor(workspace) {
           <span class="workspace-file-editor-path">${escapeHtml(activePath || workspace.path)}</span>
         </div>
         <div class="workspace-file-editor-actions">
+          ${renderWorkspaceFileEditorMarkdownModeToggle(editorState)}
           <span class="workspace-file-editor-status" data-workspace-file-editor-status>${escapeHtml(statusLabel)}</span>
           <button
             class="workspace-file-editor-action"
@@ -12992,9 +13653,11 @@ function syncWorkspaceFileEditorSurface(workspace, root = document) {
 
   const visible = isWorkspaceFileEditorVisible(workspace.id);
   const editorState = getWorkspaceFileEditorState(workspace.id, { create: false });
+  const isMarkdownSplit = visible && getWorkspaceFileEditorMarkdownMode(editorState) === "split";
   const focusState = captureWorkspaceFileEditorFocusState(screen);
   screen.classList.toggle("has-file-editor", visible);
   shell.classList.toggle("is-visible", visible);
+  shell.classList.toggle("is-markdown-split", isMarkdownSplit);
   shell.setAttribute("aria-hidden", visible ? "false" : "true");
   shell.innerHTML = renderWorkspaceFileEditor(workspace);
   if (editorState?.shouldFocus) {

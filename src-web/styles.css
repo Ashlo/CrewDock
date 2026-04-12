@@ -7164,6 +7164,11 @@ button {
   border-right: 1px solid var(--chrome-divider);
 }
 
+.workspace-file-editor-shell.is-visible.is-markdown-split {
+  width: clamp(520px, 46vw, 860px);
+  flex-basis: clamp(520px, 46vw, 860px);
+}
+
 .workspace-file-editor-panel {
   height: 100%;
   display: flex;
@@ -7209,6 +7214,40 @@ button {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+}
+
+.workspace-file-editor-mode-toggle {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border: 1px solid var(--chrome-divider);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface-pill-bg) 85%, transparent);
+}
+
+.workspace-file-editor-mode-button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  min-height: 24px;
+  padding: 0 9px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background 140ms ease,
+    color 140ms ease;
+}
+
+.workspace-file-editor-mode-button:hover {
+  color: var(--text);
+}
+
+.workspace-file-editor-mode-button.is-active {
+  background: color-mix(in srgb, var(--accent-soft) 58%, transparent);
+  color: var(--tab-text-active);
 }
 
 .workspace-file-editor-status {
@@ -7279,6 +7318,30 @@ button {
   flex-direction: column;
   gap: 10px;
   padding: 12px;
+}
+
+.workspace-file-editor-main {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.workspace-file-editor-main.is-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 12px;
+}
+
+.workspace-file-editor-pane {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.workspace-file-editor-pane.is-preview {
+  min-height: 0;
 }
 
 .workspace-file-editor-empty,
@@ -7371,6 +7434,226 @@ button {
   line-height: 1.6;
   outline: none;
   box-shadow: inset 0 0 0 0.5px color-mix(in srgb, var(--text) 3%, transparent);
+}
+
+.workspace-file-editor-preview-shell {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  border: 1px solid var(--chrome-divider);
+  border-radius: 10px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent 12%),
+    color-mix(in srgb, var(--pane-bg) 92%, black);
+  box-shadow: inset 0 0 0 0.5px color-mix(in srgb, var(--text) 3%, transparent);
+}
+
+.workspace-file-editor-preview-shell[data-markdown-mode="preview"] {
+  padding: 18px 18px 22px;
+}
+
+.workspace-file-editor-preview-shell[data-markdown-mode="split"] {
+  padding: 14px 14px 18px;
+}
+
+.workspace-file-editor-markdown-empty {
+  padding: 18px 16px;
+  color: var(--surface-soft-text);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.workspace-file-editor-markdown-empty strong {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--text);
+}
+
+.workspace-file-editor-markdown-empty p {
+  margin: 0;
+}
+
+.workspace-file-editor-markdown {
+  color: color-mix(in srgb, var(--text) 94%, white);
+  font-size: 13px;
+  line-height: 1.72;
+}
+
+.workspace-file-editor-markdown > :first-child {
+  margin-top: 0;
+}
+
+.workspace-file-editor-markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.workspace-file-editor-markdown h1,
+.workspace-file-editor-markdown h2,
+.workspace-file-editor-markdown h3,
+.workspace-file-editor-markdown h4,
+.workspace-file-editor-markdown h5,
+.workspace-file-editor-markdown h6 {
+  margin: 1.1em 0 0.45em;
+  color: var(--tab-text-active);
+  font-weight: 700;
+  line-height: 1.22;
+}
+
+.workspace-file-editor-markdown h1 {
+  font-size: 1.85em;
+}
+
+.workspace-file-editor-markdown h2 {
+  font-size: 1.5em;
+}
+
+.workspace-file-editor-markdown h3 {
+  font-size: 1.25em;
+}
+
+.workspace-file-editor-markdown p,
+.workspace-file-editor-markdown ul,
+.workspace-file-editor-markdown ol,
+.workspace-file-editor-markdown blockquote,
+.workspace-file-editor-markdown pre,
+.workspace-file-editor-markdown .workspace-file-editor-markdown-table-shell {
+  margin: 0.8em 0;
+}
+
+.workspace-file-editor-markdown ul,
+.workspace-file-editor-markdown ol {
+  padding-left: 1.25rem;
+}
+
+.workspace-file-editor-markdown li + li {
+  margin-top: 0.3em;
+}
+
+.workspace-file-editor-markdown li.is-task {
+  list-style: none;
+  margin-left: -1.25rem;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.workspace-file-editor-markdown-checkbox {
+  width: 14px;
+  height: 14px;
+  margin-top: 0.28em;
+  flex: 0 0 14px;
+  border-radius: 4px;
+  border: 1px solid color-mix(in srgb, var(--muted) 58%, transparent);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.workspace-file-editor-markdown-checkbox.is-checked {
+  border-color: rgba(152, 195, 121, 0.42);
+  background: rgba(152, 195, 121, 0.18);
+}
+
+.workspace-file-editor-markdown blockquote {
+  padding: 0.15rem 0 0.15rem 0.9rem;
+  border-left: 2px solid color-mix(in srgb, var(--accent) 32%, var(--chrome-divider));
+  color: color-mix(in srgb, var(--surface-soft-text) 82%, white);
+}
+
+.workspace-file-editor-markdown code {
+  padding: 0.14rem 0.4rem;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #d7e3ff;
+  font-family: "SF Mono", SFMono-Regular, ui-monospace, Menlo, Monaco, Consolas, monospace;
+  font-size: 0.94em;
+}
+
+.workspace-file-editor-markdown pre {
+  overflow: auto;
+  padding: 14px 16px;
+  border: 1px solid color-mix(in srgb, var(--text) 7%, var(--chrome-divider));
+  border-radius: 10px;
+  background: rgba(8, 10, 16, 0.72);
+}
+
+.workspace-file-editor-markdown pre code {
+  padding: 0;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+}
+
+.workspace-file-editor-markdown a {
+  color: color-mix(in srgb, var(--accent) 82%, white);
+  text-decoration: none;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+.workspace-file-editor-markdown a:hover {
+  color: color-mix(in srgb, var(--accent) 92%, white);
+  border-bottom-color: color-mix(in srgb, var(--accent) 48%, transparent);
+}
+
+.workspace-file-editor-markdown img,
+.workspace-file-editor-markdown-image {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0.9em 0;
+  border-radius: 12px;
+}
+
+.workspace-file-editor-markdown p[align="center"],
+.workspace-file-editor-markdown h1[align="center"],
+.workspace-file-editor-markdown h2[align="center"],
+.workspace-file-editor-markdown h3[align="center"],
+.workspace-file-editor-markdown h4[align="center"],
+.workspace-file-editor-markdown h5[align="center"],
+.workspace-file-editor-markdown h6[align="center"],
+.workspace-file-editor-markdown table[align="center"] {
+  text-align: center;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+.workspace-file-editor-markdown td[align="center"],
+.workspace-file-editor-markdown th[align="center"] {
+  text-align: center;
+}
+
+.workspace-file-editor-markdown-link-disabled,
+.workspace-file-editor-markdown-inline-media {
+  color: var(--surface-soft-text);
+  border-bottom: 1px dashed color-mix(in srgb, var(--muted) 42%, transparent);
+}
+
+.workspace-file-editor-markdown del {
+  opacity: 0.72;
+}
+
+.workspace-file-editor-markdown hr {
+  border: 0;
+  height: 1px;
+  margin: 1.15em 0;
+  background: color-mix(in srgb, var(--text) 10%, transparent);
+}
+
+.workspace-file-editor-markdown table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.workspace-file-editor-markdown th,
+.workspace-file-editor-markdown td {
+  padding: 8px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--text) 8%, transparent);
+  text-align: left;
+  vertical-align: top;
+}
+
+.workspace-file-editor-markdown th {
+  color: var(--tab-text-active);
+  font-weight: 650;
 }
 
 .workspace-file-editor-input:focus {
