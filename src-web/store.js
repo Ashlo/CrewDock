@@ -10,6 +10,12 @@ export function createUiState() {
     launcherVisible: false,
     settingsVisible: false,
     settingsSection: "workbench",
+    appUpdate: {
+      snapshot: null,
+      checking: false,
+      error: "",
+      checkedThisSession: false,
+    },
     activePaneId: null,
     dragHoverPaneId: null,
     pendingWorkspaceDraft: null,
@@ -132,6 +138,7 @@ export function createRuntimeStore() {
     dispatchToastDeadline: 0,
     paneAttentionTimers: new Map(),
     workspaceFileDraftPersistTimers: new Map(),
+    appUpdateCheckInFlight: null,
     pendingRenderMask: 0,
     pendingRenderFrame: 0,
     renderMetrics: {

@@ -16,15 +16,17 @@ use std::{
     path::{Path, PathBuf},
     process::Command as ProcessCommand,
     sync::{Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use portable_pty::{ChildKiller, PtySize};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sysinfo::{CpuRefreshKind, DiskRefreshKind, Disks, MemoryRefreshKind, RefreshKind, System};
 use tauri::{AppHandle, Manager, State};
 
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const MAX_LAUNCHER_COMPLETION_MATCHES: usize = 24;
 const LAUNCHER_COMMANDS: [&str; 6] = ["help", "pwd", "ls", "cd", "open", "clear"];
 const PATH_AWARE_LAUNCHER_COMMANDS: [&str; 3] = ["ls", "cd", "open"];
@@ -55,6 +57,9 @@ const FILE_EXPLORER_HIDDEN_NAMES: [&str; 14] = [
     ".venv",
     "venv",
 ];
+const GITHUB_RELEASES_API_LATEST_URL: &str =
+    "https://api.github.com/repos/Ashlo/CrewDock/releases/latest";
+const APP_UPDATE_CHECK_TIMEOUT_SECS: u64 = 8;
 const LOGIN_SHELL_PATH_START_MARKER: &[u8] = b"__CREWDOCK_PATH_START__";
 const LOGIN_SHELL_PATH_END_MARKER: &[u8] = b"__CREWDOCK_PATH_END__";
 
@@ -182,6 +187,8 @@ struct SettingsRecord {
     terminal_font_size: f64,
     openai_api_key: Option<String>,
     codex_cli_path: Option<String>,
+    dismissed_app_update_version: Option<String>,
+    app_update_last_checked_at_ms: Option<u64>,
 }
 
 impl Default for SettingsRecord {
@@ -192,6 +199,8 @@ impl Default for SettingsRecord {
             terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
             openai_api_key: None,
             codex_cli_path: None,
+            dismissed_app_update_version: None,
+            app_update_last_checked_at_ms: None,
         }
     }
 }
@@ -257,12 +266,15 @@ impl RuntimeState {
             },
             launcher: self.launcher.clone(),
             settings: SettingsSnapshot {
+                app_version: APP_VERSION.to_string(),
                 theme_id: self.settings.theme_id,
                 interface_text_scale: self.settings.interface_text_scale,
                 terminal_font_size: self.settings.terminal_font_size,
                 has_stored_openai_api_key: self.settings.openai_api_key.is_some(),
                 has_environment_openai_api_key: has_openai_api_key_in_environment(),
                 codex_cli: self.codex_cli.clone(),
+                dismissed_app_update_version: self.settings.dismissed_app_update_version.clone(),
+                app_update_last_checked_at_ms: self.settings.app_update_last_checked_at_ms,
             },
             activity: persistence::build_activity_snapshot(self),
             workspaces: self
@@ -390,6 +402,7 @@ struct LauncherSnapshot {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SettingsSnapshot {
+    app_version: String,
     theme_id: ThemeId,
     interface_text_scale: f64,
     terminal_font_size: f64,
@@ -398,6 +411,51 @@ struct SettingsSnapshot {
     #[serde(rename = "hasEnvironmentOpenAiApiKey")]
     has_environment_openai_api_key: bool,
     codex_cli: CodexCliSnapshot,
+    dismissed_app_update_version: Option<String>,
+    app_update_last_checked_at_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppUpdateSnapshot {
+    current_version: String,
+    latest_version: Option<String>,
+    release_name: Option<String>,
+    release_notes: Option<String>,
+    release_url: Option<String>,
+    download_url: Option<String>,
+    published_at: Option<String>,
+    checked_at_ms: Option<u64>,
+    dismissed_version: Option<String>,
+    is_available: bool,
+}
+
+#[derive(Debug, Clone)]
+struct AppUpdateRelease {
+    version: String,
+    name: Option<String>,
+    notes: Option<String>,
+    release_url: String,
+    download_url: Option<String>,
+    published_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GithubReleaseApiResponse {
+    tag_name: String,
+    name: String,
+    body: String,
+    html_url: String,
+    draft: bool,
+    prerelease: bool,
+    published_at: Option<String>,
+    assets: Vec<GithubReleaseAssetResponse>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct GithubReleaseAssetResponse {
+    name: String,
+    browser_download_url: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1473,6 +1531,169 @@ fn parse_codex_cli_version_parts(version: &str) -> Vec<u64> {
             }
         })
         .collect()
+}
+
+fn normalize_app_release_version(value: &str) -> Option<String> {
+    let trimmed = value.trim().trim_start_matches(['v', 'V']);
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let candidate = trimmed.split_whitespace().next().unwrap_or("").trim();
+    if candidate.is_empty() || !candidate.chars().next().is_some_and(|character| character.is_ascii_digit()) {
+        return None;
+    }
+
+    Some(candidate.to_string())
+}
+
+fn parse_app_version_parts(version: &str) -> Vec<u64> {
+    normalize_app_release_version(version)
+        .unwrap_or_default()
+        .split(['-', '+'])
+        .next()
+        .unwrap_or("")
+        .split('.')
+        .filter_map(|part| {
+            let digits = part
+                .chars()
+                .take_while(|character| character.is_ascii_digit())
+                .collect::<String>();
+            if digits.is_empty() {
+                None
+            } else {
+                digits.parse::<u64>().ok()
+            }
+        })
+        .collect()
+}
+
+fn compare_app_versions(left: &str, right: &str) -> Ordering {
+    let left_parts = parse_app_version_parts(left);
+    let right_parts = parse_app_version_parts(right);
+    let max_len = left_parts.len().max(right_parts.len());
+
+    for index in 0..max_len {
+        let left_value = *left_parts.get(index).unwrap_or(&0);
+        let right_value = *right_parts.get(index).unwrap_or(&0);
+        match left_value.cmp(&right_value) {
+            Ordering::Equal => continue,
+            ordering => return ordering,
+        }
+    }
+
+    Ordering::Equal
+}
+
+fn current_release_arch_label() -> &'static str {
+    match env::consts::ARCH {
+        "aarch64" => "arm64",
+        arch => arch,
+    }
+}
+
+fn resolve_release_download_url(
+    release: &GithubReleaseApiResponse,
+    latest_version: &str,
+) -> Option<String> {
+    let arch = current_release_arch_label().to_lowercase();
+    let normalized_version = latest_version.to_lowercase();
+    let dmg_assets: Vec<&GithubReleaseAssetResponse> = release
+        .assets
+        .iter()
+        .filter(|asset| {
+            let name = asset.name.to_lowercase();
+            name.ends_with(".dmg") && !name.ends_with(".dmg.sha256")
+        })
+        .collect();
+
+    dmg_assets
+        .iter()
+        .find(|asset| {
+            let name = asset.name.to_lowercase();
+            name.contains(&arch) && name.contains(&normalized_version)
+        })
+        .or_else(|| {
+            dmg_assets
+                .iter()
+                .find(|asset| asset.name.to_lowercase().contains(&arch))
+        })
+        .or_else(|| dmg_assets.first())
+        .map(|asset| asset.browser_download_url.clone())
+}
+
+async fn fetch_latest_app_release() -> Result<Option<AppUpdateRelease>, String> {
+    let client = Client::builder()
+        .timeout(Duration::from_secs(APP_UPDATE_CHECK_TIMEOUT_SECS))
+        .user_agent(format!("CrewDock/{APP_VERSION}"))
+        .build()
+        .map_err(|error| format!("failed to build update client: {error}"))?;
+    let response = client
+        .get(GITHUB_RELEASES_API_LATEST_URL)
+        .send()
+        .await
+        .map_err(|error| format!("failed to check GitHub Releases: {error}"))?;
+
+    if response.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+
+    let release = response
+        .error_for_status()
+        .map_err(|error| format!("failed to fetch latest release: {error}"))?
+        .json::<GithubReleaseApiResponse>()
+        .await
+        .map_err(|error| format!("failed to decode latest release: {error}"))?;
+
+    if release.draft || release.prerelease {
+        return Ok(None);
+    }
+
+    let Some(version) = normalize_app_release_version(&release.tag_name)
+        .or_else(|| normalize_app_release_version(&release.name))
+    else {
+        return Ok(None);
+    };
+
+    let download_url = resolve_release_download_url(&release, &version);
+    let release_url = release.html_url.clone();
+
+    Ok(Some(AppUpdateRelease {
+        version: version.clone(),
+        name: (!release.name.trim().is_empty()).then_some(release.name.trim().to_string()),
+        notes: (!release.body.trim().is_empty()).then_some(release.body.trim().to_string()),
+        release_url,
+        download_url,
+        published_at: release.published_at.and_then(|value| {
+            let trimmed = value.trim().to_string();
+            (!trimmed.is_empty()).then_some(trimmed)
+        }),
+    }))
+}
+
+fn build_app_update_snapshot(
+    release: Option<AppUpdateRelease>,
+    checked_at_ms: Option<u64>,
+    dismissed_version: Option<String>,
+) -> AppUpdateSnapshot {
+    let current_version = APP_VERSION.to_string();
+    let latest_version = release.as_ref().map(|entry| entry.version.clone());
+    let is_available = latest_version
+        .as_deref()
+        .is_some_and(|latest| compare_app_versions(latest, APP_VERSION).is_gt());
+
+    AppUpdateSnapshot {
+        current_version,
+        latest_version,
+        release_name: release.as_ref().and_then(|entry| entry.name.clone()),
+        release_notes: release.as_ref().and_then(|entry| entry.notes.clone()),
+        release_url: release.as_ref().map(|entry| entry.release_url.clone()),
+        download_url: release.as_ref().and_then(|entry| entry.download_url.clone()),
+        published_at: release.as_ref().and_then(|entry| entry.published_at.clone()),
+        checked_at_ms,
+        dismissed_version,
+        is_available,
+    }
 }
 
 fn canonical_codex_path_key(path: &Path) -> String {
@@ -2944,6 +3165,94 @@ fn get_app_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
         .lock()
         .map_err(|_| "failed to acquire application state".to_string())?;
     Ok(runtime.build_snapshot())
+}
+
+#[tauri::command]
+async fn check_for_app_update(state: State<'_, AppState>) -> Result<AppUpdateSnapshot, String> {
+    let dismissed_version = {
+        let runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+        runtime.settings.dismissed_app_update_version.clone()
+    };
+
+    let release = fetch_latest_app_release().await?;
+    let checked_at_ms = now_timestamp_ms();
+
+    {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+        runtime.settings.app_update_last_checked_at_ms = Some(checked_at_ms);
+        runtime.persist_to_disk()?;
+    }
+
+    Ok(build_app_update_snapshot(
+        release,
+        Some(checked_at_ms),
+        dismissed_version,
+    ))
+}
+
+#[tauri::command]
+fn dismiss_app_update(
+    version: Option<String>,
+    state: State<'_, AppState>,
+    _app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let snapshot = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+        runtime.settings.dismissed_app_update_version = version
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        runtime.persist_to_disk()?;
+        runtime.build_snapshot()
+    };
+
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    let normalized_url = url.trim();
+    if !(normalized_url.starts_with("https://") || normalized_url.starts_with("http://")) {
+        return Err("only http and https URLs are supported".to_string());
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        ProcessCommand::new("open")
+            .arg(normalized_url)
+            .spawn()
+            .map_err(|error| format!("failed to open URL: {error}"))?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        ProcessCommand::new("xdg-open")
+            .arg(normalized_url)
+            .spawn()
+            .map_err(|error| format!("failed to open URL: {error}"))?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        ProcessCommand::new("cmd")
+            .args(["/C", "start", "", normalized_url])
+            .spawn()
+            .map_err(|error| format!("failed to open URL: {error}"))?;
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err("opening external URLs is not supported on this platform".to_string())
 }
 
 #[tauri::command]
@@ -5788,6 +6097,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_app_snapshot,
+            check_for_app_update,
+            dismiss_app_update,
+            open_external_url,
             load_system_health_snapshot,
             reset_to_launcher,
             create_workspace,
@@ -7308,6 +7620,46 @@ mod tests {
         assert!(compare_codex_cli_versions("0.116.0", "0.42.0").is_gt());
         assert!(compare_codex_cli_versions("0.116.0", "0.116.0").is_eq());
         assert!(compare_codex_cli_versions("0.98.0", "0.116.0").is_lt());
+    }
+
+    #[test]
+    fn app_version_compare_prefers_newer_release_tags() {
+        assert!(super::compare_app_versions("0.2.0", "0.1.9").is_gt());
+        assert!(super::compare_app_versions("v0.1.0", "0.1.0").is_eq());
+        assert!(super::compare_app_versions("0.1.0-beta.1", "0.1.0").is_eq());
+        assert!(super::compare_app_versions("0.9.0", "0.10.0").is_lt());
+    }
+
+    #[test]
+    fn release_download_url_prefers_matching_arch_dmg() {
+        let release = super::GithubReleaseApiResponse {
+            tag_name: "v0.1.1".to_string(),
+            name: "CrewDock v0.1.1".to_string(),
+            body: String::new(),
+            html_url: "https://github.com/Ashlo/CrewDock/releases/tag/v0.1.1".to_string(),
+            draft: false,
+            prerelease: false,
+            published_at: Some("2026-04-12T10:00:00Z".to_string()),
+            assets: vec![
+                super::GithubReleaseAssetResponse {
+                    name: "CrewDock_0.1.1_x86_64.dmg".to_string(),
+                    browser_download_url: "https://example.com/x86.dmg".to_string(),
+                },
+                super::GithubReleaseAssetResponse {
+                    name: "CrewDock_0.1.1_arm64.dmg".to_string(),
+                    browser_download_url: "https://example.com/arm64.dmg".to_string(),
+                },
+            ],
+        };
+
+        let resolved = super::resolve_release_download_url(&release, "0.1.1").unwrap();
+        let expected = if super::current_release_arch_label() == "arm64" {
+            "https://example.com/arm64.dmg"
+        } else {
+            "https://example.com/x86.dmg"
+        };
+
+        assert_eq!(resolved, expected);
     }
 
     #[test]

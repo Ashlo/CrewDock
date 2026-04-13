@@ -914,6 +914,95 @@ button {
   overflow: hidden;
 }
 
+.workspace-update-region {
+  flex: 0 0 auto;
+  max-height: 0;
+  overflow: hidden;
+  transition: max-height 180ms ease;
+}
+
+.workspace-update-region.is-visible {
+  max-height: 72px;
+}
+
+.workspace-update-banner {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent) 18%, var(--chrome-divider));
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--accent-soft) 26%, transparent), transparent 85%),
+    color-mix(in srgb, var(--chrome-surface) 92%, black 8%);
+}
+
+.workspace-update-banner-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.workspace-update-banner-mark {
+  color: color-mix(in srgb, var(--accent) 74%, white);
+  font-size: 0.66rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.workspace-update-banner-copy strong {
+  color: var(--text);
+  font-size: 0.9rem;
+  font-weight: 650;
+}
+
+.workspace-update-banner-copy span:last-child {
+  color: var(--surface-soft-text);
+  font-size: 0.77rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.workspace-update-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.workspace-update-banner-button {
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 10px;
+  border-radius: 9px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.026);
+  color: var(--surface-soft-text);
+  font-size: 0.74rem;
+  font-weight: 600;
+  transition:
+    border-color 140ms ease,
+    background 140ms ease,
+    color 140ms ease;
+}
+
+.workspace-update-banner-button:hover {
+  border-color: rgba(255, 255, 255, 0.14);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--control-text-strong);
+}
+
+.workspace-update-banner-button.is-primary {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 24%, rgba(255, 255, 255, 0.08));
+  background: color-mix(in srgb, var(--accent-soft) 74%, rgba(255, 255, 255, 0.03));
+}
+
 .workspace-statusbar-region {
   position: relative;
   z-index: 2;
@@ -3401,6 +3490,10 @@ button {
 .settings-codex-controls {
   display: grid;
   gap: 10px;
+}
+
+.settings-update-card {
+  gap: 14px;
 }
 
 .settings-codex-field {
@@ -7749,9 +7842,7 @@ button {
   overflow: hidden;
   border-radius: 0;
   border: 0;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.012), transparent 18%),
-    var(--pane-bg);
+  background: transparent;
   box-shadow: none;
   transition:
     border-color 160ms ease,
@@ -7804,9 +7895,7 @@ button {
 
 .terminal-pane[data-active="true"] {
   border-color: transparent;
-  background:
-    linear-gradient(180deg, color-mix(in srgb, var(--pane-active-wash) 180%, transparent), transparent 18%),
-    var(--pane-bg);
+  background: transparent;
   box-shadow: none;
 }
 
@@ -7838,34 +7927,16 @@ button {
     inset 0 0 0 999px color-mix(in srgb, var(--danger) 5%, transparent);
 }
 
-.terminal-pane-header {
+.terminal-pane-overlay {
   position: absolute;
-  top: 2px;
-  left: 4px;
+  top: 3px;
   right: 4px;
   z-index: 2;
   min-height: 0;
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 6px;
-  padding: 0;
-  border-bottom: 0;
-  background: none;
+  justify-content: flex-end;
   pointer-events: none;
-  transition: color 160ms ease;
-}
-
-.terminal-pane[data-density="compact"] .terminal-pane-header {
-  top: 2px;
-  left: 4px;
-  right: 4px;
-  min-height: 0;
-  padding: 0;
-}
-
-.terminal-pane[data-active="true"] .terminal-pane-header {
-  background: none;
 }
 
 @keyframes workspace-pane-dispatch-pulse {
@@ -7878,76 +7949,6 @@ button {
   100% {
     opacity: 0.58;
   }
-}
-
-.terminal-pane-title {
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  overflow: hidden;
-  white-space: nowrap;
-}
-
-.terminal-pane-title::before {
-  display: none;
-}
-
-.terminal-pane-kicker {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: var(--pane-title-muted);
-  font-size: 0.36rem;
-  font-weight: 620;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  opacity: 0.46;
-  transition:
-    color 160ms ease,
-    opacity 160ms ease;
-}
-
-.terminal-pane-title strong {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  color: var(--pane-title-text);
-  font-size: 0.36rem;
-  font-weight: 620;
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  opacity: 0.68;
-  transition:
-    color 160ms ease,
-    opacity 160ms ease;
-}
-
-.terminal-pane[data-density="compact"] .terminal-pane-title {
-  gap: 4px;
-}
-
-.terminal-pane[data-active="true"] .terminal-pane-kicker,
-.terminal-pane[data-active="true"] .terminal-pane-title strong {
-  color: var(--tab-text-active);
-  opacity: 0.92;
-}
-
-.terminal-pane[data-density="compact"] .terminal-pane-kicker {
-  font-size: 0.34rem;
-  letter-spacing: 0.08em;
-}
-
-.terminal-pane[data-density="compact"] .terminal-pane-title strong {
-  font-size: 0.34rem;
-  letter-spacing: 0.08em;
-}
-
-.terminal-pane-meta {
-  min-width: 0;
-  display: inline-flex;
-  align-items: center;
-  justify-content: flex-end;
 }
 
 .terminal-pane-codex-status {
@@ -7981,8 +7982,8 @@ button {
 }
 
 .terminal-host {
-  --terminal-inset-top: 9px;
-  --terminal-inset-inline: 2px;
+  --terminal-inset-top: 0;
+  --terminal-inset-inline: 0;
   --terminal-inset-bottom: 0;
   position: relative;
   flex: 1;
@@ -7992,13 +7993,13 @@ button {
     var(--terminal-inset-top)
     var(--terminal-inset-inline)
     var(--terminal-inset-bottom);
-  background: none;
+  background: var(--pane-bg);
   overflow: hidden;
 }
 
 .terminal-pane[data-density="compact"] .terminal-host {
-  --terminal-inset-top: 8px;
-  --terminal-inset-inline: 2px;
+  --terminal-inset-top: 0;
+  --terminal-inset-inline: 0;
   --terminal-inset-bottom: 0;
 }
 

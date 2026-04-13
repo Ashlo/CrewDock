@@ -116,6 +116,10 @@ pub(crate) struct PersistedSettings {
     pub(crate) openai_api_key: Option<String>,
     #[serde(default)]
     pub(crate) codex_cli_path: Option<String>,
+    #[serde(default)]
+    pub(crate) dismissed_app_update_version: Option<String>,
+    #[serde(default)]
+    pub(crate) app_update_last_checked_at_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -233,6 +237,8 @@ pub(crate) fn build_persisted_state(runtime: &RuntimeState) -> PersistedWorkspac
             terminal_font_size: Some(runtime.settings.terminal_font_size),
             openai_api_key: runtime.settings.openai_api_key.clone(),
             codex_cli_path: runtime.settings.codex_cli_path.clone(),
+            dismissed_app_update_version: runtime.settings.dismissed_app_update_version.clone(),
+            app_update_last_checked_at_ms: runtime.settings.app_update_last_checked_at_ms,
         },
         workspaces: runtime
             .workspaces
@@ -473,6 +479,12 @@ pub(crate) fn load_persisted_from_disk(
 
     runtime.settings.openai_api_key =
         crate::normalize_optional_openai_api_key(persisted.settings.openai_api_key);
+    runtime.settings.dismissed_app_update_version = persisted
+        .settings
+        .dismissed_app_update_version
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    runtime.settings.app_update_last_checked_at_ms = persisted.settings.app_update_last_checked_at_ms;
 
     let active_index = persisted.active_workspace_index;
     let active_path = persisted.active_workspace_path;

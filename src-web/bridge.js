@@ -21,6 +21,11 @@ export function createBridge({
   if (tauriApi?.core?.invoke) {
     return {
       getAppSnapshot: () => tauriApi.core.invoke("get_app_snapshot"),
+      checkForAppUpdate: () => tauriApi.core.invoke("check_for_app_update"),
+      dismissAppUpdate: (version = null) =>
+        tauriApi.core.invoke("dismiss_app_update", { version }),
+      openExternalUrl: (url) =>
+        tauriApi.core.invoke("open_external_url", { url }),
       setTheme: (themeId) => tauriApi.core.invoke("set_theme", { themeId }),
       setSettings: (themeId, interfaceTextScale, terminalFontSize) =>
         tauriApi.core.invoke("set_settings", {
@@ -220,11 +225,14 @@ function createMockBridge({
     ],
   };
   const settings = {
+    appVersion: "0.1.0",
     themeId: defaultThemeId,
     interfaceTextScale: 1,
     terminalFontSize: 13.5,
     hasStoredOpenAiApiKey: false,
     hasEnvironmentOpenAiApiKey: false,
+    dismissedAppUpdateVersion: null,
+    appUpdateLastCheckedAtMs: null,
     codexCli: {
       status: "ready",
       selectionMode: "auto",
@@ -904,6 +912,30 @@ function createMockBridge({
 
   return {
     getAppSnapshot: async () => emitState(),
+    checkForAppUpdate: async () => {
+      const checkedAtMs = Date.now();
+      settings.appUpdateLastCheckedAtMs = checkedAtMs;
+      emitState();
+      return {
+        currentVersion: settings.appVersion,
+        latestVersion: "0.1.1",
+        releaseName: "CrewDock v0.1.1",
+        releaseNotes: "Mock release notes for the next CrewDock build.",
+        releaseUrl: "https://github.com/Ashlo/CrewDock/releases/latest",
+        downloadUrl: "https://github.com/Ashlo/CrewDock/releases/latest",
+        publishedAt: new Date(checkedAtMs).toISOString(),
+        checkedAtMs,
+        dismissedVersion: settings.dismissedAppUpdateVersion,
+        isAvailable: true,
+      };
+    },
+    dismissAppUpdate: async (version = null) => {
+      settings.dismissedAppUpdateVersion = typeof version === "string" && version.trim()
+        ? version.trim()
+        : null;
+      return emitState();
+    },
+    openExternalUrl: async (_url) => {},
     loadSystemHealthSnapshot: async () => buildMockSystemHealthSnapshot(),
     listenState: async (handler) => {
       stateListeners.add(handler);

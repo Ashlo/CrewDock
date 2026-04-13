@@ -819,6 +819,84 @@ async function init() {
   syncSystemHealthLoop();
   void loadSystemHealthSnapshot({ silent: true });
   void refreshActiveWorkspaceGitStatus();
+  void checkForAppUpdate({ silent: true });
+}
+
+async function checkForAppUpdate({ force = false, silent = false } = {}) {
+  if (typeof bridge.checkForAppUpdate !== "function") {
+    return null;
+  }
+
+  if (runtimeStore.appUpdateCheckInFlight) {
+    return runtimeStore.appUpdateCheckInFlight;
+  }
+
+  if (!force) {
+    if (uiState.appUpdate.checkedThisSession) {
+      return uiState.appUpdate.snapshot;
+    }
+  }
+
+  uiState.appUpdate.checking = true;
+  uiState.appUpdate.error = "";
+  if (!silent || uiState.settingsVisible) {
+    requestRender(RENDER_STATUS | (uiState.settingsVisible ? RENDER_MODAL : 0));
+  }
+
+  const request = bridge
+    .checkForAppUpdate()
+    .then((snapshot) => {
+      const normalized = normalizeAppUpdateSnapshot(snapshot);
+      uiState.appUpdate.snapshot = normalized;
+      uiState.appUpdate.error = "";
+      uiState.appUpdate.checkedThisSession = true;
+      patchSnapshotAppUpdateMeta(normalized);
+      return normalized;
+    })
+    .catch((error) => {
+      if (!silent) {
+        uiState.appUpdate.error = error instanceof Error ? error.message : String(error || "Update check failed");
+      }
+      console.error(error);
+      return null;
+    })
+    .finally(() => {
+      uiState.appUpdate.checking = false;
+      runtimeStore.appUpdateCheckInFlight = null;
+      requestRender(RENDER_STATUS | (uiState.settingsVisible ? RENDER_MODAL : 0));
+    });
+
+  runtimeStore.appUpdateCheckInFlight = request;
+  return request;
+}
+
+async function dismissAppUpdate(version = uiState.appUpdate.snapshot?.latestVersion || null) {
+  if (typeof bridge.dismissAppUpdate !== "function") {
+    return;
+  }
+
+  uiState.snapshot = await bridge.dismissAppUpdate(version);
+  if (uiState.appUpdate.snapshot) {
+    uiState.appUpdate.snapshot = {
+      ...uiState.appUpdate.snapshot,
+      dismissedVersion: typeof version === "string" ? version : "",
+    };
+  }
+  requestRender(RENDER_STATUS | (uiState.settingsVisible ? RENDER_MODAL : 0));
+}
+
+async function openExternalUrl(url) {
+  const normalizedUrl = String(url || "").trim();
+  if (!normalizedUrl) {
+    return;
+  }
+
+  if (typeof bridge.openExternalUrl === "function") {
+    await bridge.openExternalUrl(normalizedUrl);
+    return;
+  }
+
+  window.open(normalizedUrl, "_blank", "noopener,noreferrer");
 }
 
 function detectPlatform() {
@@ -2607,6 +2685,80 @@ function getCodexCliSnapshot(snapshot = uiState.snapshot) {
   };
 }
 
+function hasAvailableCodexCli(snapshot = uiState.snapshot) {
+  return Boolean(getCodexCliSnapshot(snapshot).effectivePath);
+}
+
+function getResolvedTerminalTheme(theme = getCurrentThemeDefinition()) {
+  return { ...theme.terminalTheme };
+}
+
+function getAppVersion(snapshot = uiState.snapshot) {
+  return String(snapshot?.settings?.appVersion || "0.1.0");
+}
+
+function getDismissedAppUpdateVersion(snapshot = uiState.snapshot) {
+  return typeof snapshot?.settings?.dismissedAppUpdateVersion === "string"
+    ? snapshot.settings.dismissedAppUpdateVersion
+    : "";
+}
+
+function getAppUpdateLastCheckedAt(snapshot = uiState.snapshot) {
+  const value = Number(snapshot?.settings?.appUpdateLastCheckedAtMs || 0);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function normalizeAppUpdateSnapshot(snapshot) {
+  if (!snapshot) {
+    return null;
+  }
+
+  const latestVersion = typeof snapshot.latestVersion === "string" ? snapshot.latestVersion.trim() : "";
+  const dismissedVersion = typeof snapshot.dismissedVersion === "string" ? snapshot.dismissedVersion.trim() : "";
+  const checkedAtMs = Number(snapshot.checkedAtMs || 0);
+
+  return {
+    currentVersion: String(snapshot.currentVersion || getAppVersion()),
+    latestVersion,
+    releaseName: typeof snapshot.releaseName === "string" && snapshot.releaseName.trim()
+      ? snapshot.releaseName.trim()
+      : "",
+    releaseNotes: typeof snapshot.releaseNotes === "string" && snapshot.releaseNotes.trim()
+      ? snapshot.releaseNotes.trim()
+      : "",
+    releaseUrl: typeof snapshot.releaseUrl === "string" && snapshot.releaseUrl.trim()
+      ? snapshot.releaseUrl.trim()
+      : "",
+    downloadUrl: typeof snapshot.downloadUrl === "string" && snapshot.downloadUrl.trim()
+      ? snapshot.downloadUrl.trim()
+      : "",
+    publishedAt: typeof snapshot.publishedAt === "string" && snapshot.publishedAt.trim()
+      ? snapshot.publishedAt.trim()
+      : "",
+    checkedAtMs: Number.isFinite(checkedAtMs) && checkedAtMs > 0 ? checkedAtMs : 0,
+    dismissedVersion,
+    isAvailable: Boolean(snapshot.isAvailable) && Boolean(latestVersion),
+  };
+}
+
+function shouldShowAppUpdateBanner(appUpdate = uiState.appUpdate.snapshot) {
+  return Boolean(
+    appUpdate
+    && appUpdate.isAvailable
+    && appUpdate.latestVersion
+    && appUpdate.dismissedVersion !== appUpdate.latestVersion,
+  );
+}
+
+function patchSnapshotAppUpdateMeta(appUpdate) {
+  if (!uiState.snapshot?.settings || !appUpdate) {
+    return;
+  }
+
+  uiState.snapshot.settings.appUpdateLastCheckedAtMs = appUpdate.checkedAtMs || null;
+  uiState.snapshot.settings.dismissedAppUpdateVersion = appUpdate.dismissedVersion || null;
+}
+
 function createSettingsDraft(snapshot = uiState.snapshot) {
   const codexCli = getCodexCliSnapshot(snapshot);
   return {
@@ -3321,7 +3473,7 @@ function syncMountedTerminalAppearance(
     let shouldRefit = false;
     let shouldRefresh = false;
     if (state.themeId !== theme.id) {
-      state.terminal.options.theme = { ...theme.terminalTheme };
+      state.terminal.options.theme = getResolvedTerminalTheme(theme);
       state.themeId = theme.id;
       shouldRefresh = true;
     }
@@ -3688,6 +3840,21 @@ async function handleClick(event) {
     if (dismissDispatchToast(target.dataset.dispatchToastId || "")) {
       requestActivityRender();
     }
+    return;
+  }
+
+  if (target.dataset.action === "check-app-update") {
+    await checkForAppUpdate({ force: true, silent: false });
+    return;
+  }
+
+  if (target.dataset.action === "dismiss-app-update") {
+    await dismissAppUpdate(target.dataset.version || null);
+    return;
+  }
+
+  if (target.dataset.action === "open-app-update-link") {
+    await openExternalUrl(target.dataset.url || "");
     return;
   }
 
@@ -8024,6 +8191,7 @@ function ensureFrame() {
   app.innerHTML = `
     <div class="app-shell">
       <header class="workspace-strip" data-region="strip"></header>
+      <div class="workspace-update-region" data-region="update"></div>
       <section class="workspace-stage" data-region="stage"></section>
       <footer class="workspace-statusbar-region" data-region="status"></footer>
       <div class="workspace-activity-layer" data-region="activity"></div>
@@ -8242,6 +8410,7 @@ function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskInterse
   }
 
   const stripRegion = app.querySelector('[data-region="strip"]');
+  const updateRegion = app.querySelector('[data-region="update"]');
   const stageRegion = app.querySelector('[data-region="stage"]');
   const statusRegion = app.querySelector('[data-region="status"]');
   const activityRegion = app.querySelector('[data-region="activity"]');
@@ -8252,6 +8421,8 @@ function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskInterse
     recordRenderMetric("strip");
   }
   if (renderMaskIncludes(mask, RENDER_STATUS)) {
+    updateRegion.innerHTML = renderAppUpdateBanner();
+    updateRegion.classList.toggle("is-visible", shouldShowAppUpdateBanner());
     statusRegion.innerHTML = renderWorkspaceStatusBar(snapshot, activeWorkspace);
     recordRenderMetric("status");
   }
@@ -8614,7 +8785,9 @@ function renderWorkspaceStatusBar(snapshot, activeWorkspace) {
 
     leftItems.push(renderStatusBarItem(pathLabel, activeWorkspace.path, "is-path is-primary"));
     leftItems.push(renderStatusBarFilesButton(activeWorkspace));
-    leftItems.push(renderStatusBarCodexButton(activeWorkspace));
+    if (hasAvailableCodexCli(snapshot)) {
+      leftItems.push(renderStatusBarCodexButton(activeWorkspace));
+    }
     leftItems.push(renderStatusBarGitButton(summary));
     leftItems.push(renderStatusBarTodoButton(activeWorkspace));
     if (shouldShowSystemHealth) {
@@ -9821,6 +9994,150 @@ function normalizeWheelDelta(event, tabs) {
   return dominantDelta;
 }
 
+function renderAppUpdateBanner() {
+  const appUpdate = uiState.appUpdate.snapshot;
+  if (!shouldShowAppUpdateBanner(appUpdate)) {
+    return "";
+  }
+
+  const destinationUrl = appUpdate.downloadUrl || appUpdate.releaseUrl || "";
+  const publishedLabel = appUpdate.publishedAt
+    ? `Published ${escapeHtml(appUpdate.publishedAt.slice(0, 10))}`
+    : "GitHub release";
+  const releaseLabel = appUpdate.releaseName || `CrewDock ${appUpdate.latestVersion}`;
+
+  return `
+    <div class="workspace-update-banner" role="status" aria-live="polite">
+      <div class="workspace-update-banner-copy">
+        <span class="workspace-update-banner-mark">Update available</span>
+        <strong>${escapeHtml(releaseLabel)}</strong>
+        <span>
+          ${escapeHtml(`You’re on ${appUpdate.currentVersion}. ${publishedLabel}.`)}
+        </span>
+      </div>
+      <div class="workspace-update-banner-actions">
+        <button
+          type="button"
+          class="workspace-update-banner-button is-primary"
+          data-action="open-app-update-link"
+          data-url="${escapeHtml(destinationUrl)}"
+          ${destinationUrl ? "" : "disabled"}
+        >
+          ${appUpdate.downloadUrl ? "Download" : "View release"}
+        </button>
+        <button
+          type="button"
+          class="workspace-update-banner-button"
+          data-action="dismiss-app-update"
+          data-version="${escapeHtml(appUpdate.latestVersion)}"
+        >
+          Dismiss
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+function renderSettingsAppUpdateCard(snapshot) {
+  const appUpdate = uiState.appUpdate.snapshot;
+  const currentVersion = getAppVersion(snapshot);
+  const lastCheckedAt = getAppUpdateLastCheckedAt(snapshot);
+  const isAvailable = Boolean(appUpdate?.isAvailable);
+  const isDismissed = Boolean(
+    isAvailable
+    && appUpdate?.latestVersion
+    && appUpdate.dismissedVersion === appUpdate.latestVersion,
+  );
+  const statusTone = uiState.appUpdate.error
+    ? "warning"
+    : isAvailable
+      ? "active"
+      : "neutral";
+  const statusLabel = uiState.appUpdate.checking
+    ? "Checking..."
+    : uiState.appUpdate.error
+      ? "Unavailable"
+      : isAvailable
+        ? "Available"
+        : lastCheckedAt
+          ? "Up to date"
+          : "Idle";
+  const destinationUrl = appUpdate?.downloadUrl || appUpdate?.releaseUrl || "";
+  const publishedCopy = appUpdate?.publishedAt
+    ? `Published ${appUpdate.publishedAt.slice(0, 10)}`
+    : "Latest GitHub release";
+  const lastCheckedCopy = lastCheckedAt ? `Last checked ${formatRelativeTime(lastCheckedAt)}` : "Not checked yet";
+  const releaseLabel = appUpdate?.releaseName || (appUpdate?.latestVersion ? `CrewDock ${appUpdate.latestVersion}` : "Latest release");
+
+  return `
+    <div class="settings-ai-card settings-update-card">
+      <div class="settings-ai-head">
+        <div>
+          <p class="settings-panel-kicker">Updates</p>
+          <h3>CrewDock ${escapeHtml(currentVersion)}</h3>
+        </div>
+        <span class="settings-ai-status is-${statusTone}">${escapeHtml(statusLabel)}</span>
+      </div>
+      <div class="settings-codex-summary">
+        <div class="settings-codex-summary-row">
+          <span class="settings-codex-summary-label">Current build</span>
+          <strong>${escapeHtml(currentVersion)}</strong>
+        </div>
+        <div class="settings-codex-summary-row">
+          <span class="settings-codex-summary-label">Release status</span>
+          <strong>${escapeHtml(isAvailable ? releaseLabel : "Latest installed")}</strong>
+        </div>
+        <div class="settings-codex-summary-row">
+          <span class="settings-codex-summary-label">Check activity</span>
+          <span>${escapeHtml(lastCheckedCopy)}</span>
+        </div>
+      </div>
+      <p class="settings-codex-note">
+        ${
+          uiState.appUpdate.error
+            ? escapeHtml(uiState.appUpdate.error)
+            : isAvailable
+              ? escapeHtml(`${publishedCopy}. CrewDock will keep install flow manual through GitHub Releases.`)
+              : "CrewDock checks GitHub Releases and lets you download the newest notarized DMG when a build is available."
+        }
+      </p>
+      <div class="settings-ai-actions">
+        <button
+          type="button"
+          class="settings-ai-button ${isAvailable ? "settings-ai-button-primary" : ""}"
+          data-action="check-app-update"
+          ${uiState.appUpdate.checking ? "disabled" : ""}
+        >
+          ${uiState.appUpdate.checking ? "Checking..." : "Check now"}
+        </button>
+        ${
+          isAvailable
+            ? `
+                <button
+                  type="button"
+                  class="settings-ai-button"
+                  data-action="open-app-update-link"
+                  data-url="${escapeHtml(destinationUrl)}"
+                  ${destinationUrl ? "" : "disabled"}
+                >
+                  ${appUpdate?.downloadUrl ? "Download DMG" : "View release"}
+                </button>
+                <button
+                  type="button"
+                  class="settings-ai-button"
+                  data-action="dismiss-app-update"
+                  data-version="${escapeHtml(appUpdate?.latestVersion || "")}"
+                >
+                  ${isDismissed ? "Dismissed" : "Dismiss for now"}
+                </button>
+              `
+            : ""
+        }
+      </div>
+    </div>
+  `;
+}
+
 function renderSettingsSheet(snapshot) {
   const activeThemeId = getDraftThemeId(snapshot);
   const interfaceTextScale = getDraftInterfaceTextScale(snapshot);
@@ -9908,7 +10225,8 @@ function renderSettingsSheet(snapshot) {
                     preview: renderTerminalTextPreview(),
                   })}
                 </div>
-                ${renderSettingsCodexCard(getDraftCodexCli(snapshot))}
+                ${hasAvailableCodexCli(snapshot) ? renderSettingsCodexCard(getDraftCodexCli(snapshot)) : ""}
+                ${renderSettingsAppUpdateCard(snapshot)}
                 ${renderSettingsAiCard({
                   hasStoredKey,
                   hasEnvironmentKey,
@@ -13371,15 +13689,9 @@ function renderPaneShell(pane, paneIndex) {
       data-dispatch-attention="${dispatchTone ? "true" : "false"}"
       data-dispatch-tone="${escapeHtml(dispatchTone)}"
     >
-      <header class="terminal-pane-header">
-        <div class="terminal-pane-title">
-          <span class="terminal-pane-kicker">Terminal</span>
-          <strong>${paneNumber}</strong>
-        </div>
-        <div class="terminal-pane-meta" data-pane-codex-restore>
-          ${renderPaneCodexRestoreStatus(pane.id)}
-        </div>
-      </header>
+      <div class="terminal-pane-overlay" data-pane-codex-restore>
+        ${renderPaneCodexRestoreStatus(pane.id)}
+      </div>
       <div class="terminal-host" data-terminal-host="${escapeHtml(pane.id)}">
         <div class="terminal-fit-shell" data-terminal-surface="${escapeHtml(pane.id)}"></div>
       </div>
@@ -13573,7 +13885,7 @@ function mountWorkspaceTerminals(workspace, root = document) {
       letterSpacing: 0,
       lineHeight: 1.24,
       scrollback: 8000,
-      theme: { ...theme.terminalTheme },
+      theme: getResolvedTerminalTheme(theme),
     });
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
