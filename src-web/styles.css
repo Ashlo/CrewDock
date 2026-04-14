@@ -1026,7 +1026,7 @@ button {
   gap: 12px;
   padding: 0 10px;
   overflow: hidden;
-  color: var(--surface-soft-text);
+  color: color-mix(in srgb, var(--text) 52%, var(--muted) 48%);
 }
 
 .workspace-statusbar-group {
@@ -1069,7 +1069,8 @@ button {
   gap: 5px;
   overflow: hidden;
   color: inherit;
-  font-size: 0.68rem;
+  font-size: 0.72rem;
+  font-weight: 500;
   line-height: 1;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1078,8 +1079,8 @@ button {
 .workspace-statusbar-brand {
   flex: 0 0 auto;
   max-width: none;
-  color: rgba(223, 229, 236, 0.56);
-  font-size: 0.6rem;
+  color: color-mix(in srgb, var(--text) 36%, var(--muted) 64%);
+  font-size: 0.62rem;
   font-weight: 600;
   letter-spacing: 0.14em;
   text-transform: uppercase;
@@ -1090,7 +1091,7 @@ button {
 }
 
 .workspace-statusbar-item.is-primary {
-  color: rgba(243, 246, 250, 0.88);
+  color: color-mix(in srgb, var(--text) 90%, var(--muted) 10%);
 }
 
 .workspace-statusbar-item.is-path {
@@ -1164,7 +1165,7 @@ button {
 .workspace-statusbar-button.is-neutral,
 .workspace-statusbar-button.is-pending,
 .workspace-statusbar-item.is-neutral {
-  color: var(--surface-soft-text);
+  color: color-mix(in srgb, var(--text) 56%, var(--muted) 44%);
 }
 
 .workspace-system-health-panel {

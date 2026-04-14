@@ -1,6 +1,6 @@
 [package]
 name = "crewdock"
-version = "0.1.0"
+version = "0.1.1"
 license = "MIT"
 description = "Desktop workspace switcher with PTY-backed terminals and built-in source control"
 edition = "2021"

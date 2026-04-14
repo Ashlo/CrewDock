@@ -88,4 +88,4 @@ gh release create v<version> \
 
 - Update the landing page download button to point to the latest release asset or `releases/latest`.
 - Post the launch announcement with the same screenshot/video set used on the landing page.
-- Keep the first update path manual through GitHub Releases until in-app update notifications are implemented.
+- Smoke-test the in-app update prompt from an older build once the GitHub Release is live.
