@@ -40,6 +40,7 @@ const MAX_CODEX_SESSION_SCAN_LINES: usize = 80;
 const MAX_CODEX_SESSION_TITLE_CHARS: usize = 72;
 const CODEX_PENDING_START_DISCOVERY_ATTEMPTS: usize = 20;
 const CODEX_PENDING_START_DISCOVERY_INTERVAL_MS: u64 = 750;
+const CODEX_PENDING_START_GLOBAL_MATCH_GRACE_MS: u64 = 5_000;
 const MAX_WORKSPACE_TEXT_FILE_BYTES: u64 = 1024 * 1024;
 const FILE_EXPLORER_HIDDEN_NAMES: [&str; 14] = [
     ".git",
@@ -569,6 +570,13 @@ struct CodexSessionMetaPayload {
 struct CodexSessionFileSummary {
     meta: CodexSessionMetaPayload,
     first_user_prompt: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct CodexSessionRecord {
+    meta: CodexSessionMetaPayload,
+    first_user_prompt: Option<String>,
+    last_active_at_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1713,12 +1721,26 @@ fn load_workspace_codex_sessions_snapshot(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
-    let sessions =
+    let mut sessions =
         discover_codex_sessions_for_workspace(workspace_path, remembered_session_id.as_deref());
-    let remembered_session_missing = remembered_session_id
-        .as_ref()
-        .map(|session_id| !sessions.iter().any(|session| session.id == *session_id))
-        .unwrap_or(false);
+    let remembered_session_missing = if let Some(session_id) = remembered_session_id.as_ref() {
+        if sessions.iter().any(|session| session.id == *session_id) {
+            false
+        } else if let Some(record) = find_codex_session_record_by_id(session_id) {
+            sessions.push(build_codex_session_match_snapshot(record, Some(session_id.as_str())));
+            sessions.sort_by(|left, right| {
+                right
+                    .last_active_at_ms
+                    .cmp(&left.last_active_at_ms)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            false
+        } else {
+            true
+        }
+    } else {
+        false
+    };
 
     WorkspaceCodexSessionsSnapshot {
         workspace_id: workspace_id.to_string(),
@@ -1737,47 +1759,10 @@ fn discover_codex_sessions_for_workspace(
     workspace_path: &str,
     remembered_session_id: Option<&str>,
 ) -> Vec<CodexSessionMatchSnapshot> {
-    let Some(root) = codex_sessions_root() else {
-        return Vec::new();
-    };
-    if !root.is_dir() {
-        return Vec::new();
-    }
-
-    let workspace_key = normalize_path_for_comparison(workspace_path);
-    let mut matches = Vec::new();
-
-    for session_file in collect_codex_session_files(&root) {
-        let Some(summary) = read_codex_session_summary(&session_file) else {
-            continue;
-        };
-        if normalize_path_for_comparison(&summary.meta.cwd) != workspace_key {
-            continue;
-        }
-
-        let last_active_at_ms = fs::metadata(&session_file)
-            .ok()
-            .and_then(|metadata| metadata.modified().ok())
-            .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
-            .map(|duration| duration.as_millis() as u64)
-            .unwrap_or(0);
-
-        matches.push(CodexSessionMatchSnapshot {
-            id: summary.meta.id.clone(),
-            cwd: summary.meta.cwd.clone(),
-            display_title: build_codex_session_display_title(
-                &summary.meta.cwd,
-                summary.first_user_prompt.as_deref(),
-            ),
-            cli_version: summary.meta.cli_version,
-            source: summary.meta.source,
-            originator: summary.meta.originator,
-            last_active_at_ms,
-            is_remembered: remembered_session_id
-                .map(|session_id| session_id == summary.meta.id.as_str())
-                .unwrap_or(false),
-        });
-    }
+    let mut matches = discover_codex_session_records_for_workspace(workspace_path)
+        .into_iter()
+        .map(|record| build_codex_session_match_snapshot(record, remembered_session_id))
+        .collect::<Vec<_>>();
 
     matches.sort_by(|left, right| {
         right
@@ -1791,6 +1776,38 @@ fn discover_codex_sessions_for_workspace(
 fn discover_codex_session_metas_for_workspace(
     workspace_path: &str,
 ) -> Vec<CodexSessionMetaPayload> {
+    discover_codex_session_records_for_workspace(workspace_path)
+        .into_iter()
+        .map(|record| record.meta)
+        .collect()
+}
+
+fn discover_all_codex_session_ids() -> HashSet<String> {
+    collect_codex_session_records()
+        .into_iter()
+        .map(|record| record.meta.id)
+        .collect()
+}
+
+fn find_codex_session_record_by_id(session_id: &str) -> Option<CodexSessionRecord> {
+    let trimmed = session_id.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    collect_codex_session_records()
+        .into_iter()
+        .find(|record| record.meta.id == trimmed)
+}
+
+fn discover_codex_session_records_for_workspace(workspace_path: &str) -> Vec<CodexSessionRecord> {
+    collect_codex_session_records()
+        .into_iter()
+        .filter(|record| codex_session_matches_workspace(workspace_path, &record.meta.cwd))
+        .collect()
+}
+
+fn collect_codex_session_records() -> Vec<CodexSessionRecord> {
     let Some(root) = codex_sessions_root() else {
         return Vec::new();
     };
@@ -1798,36 +1815,61 @@ fn discover_codex_session_metas_for_workspace(
         return Vec::new();
     }
 
-    let workspace_key = normalize_path_for_comparison(workspace_path);
-    let mut matches = Vec::new();
-
+    let mut records = Vec::new();
     for session_file in collect_codex_session_files(&root) {
         let Some(summary) = read_codex_session_summary(&session_file) else {
             continue;
         };
-        if normalize_path_for_comparison(&summary.meta.cwd) != workspace_key {
-            continue;
-        }
-        matches.push(summary.meta);
+        records.push(CodexSessionRecord {
+            meta: summary.meta,
+            first_user_prompt: summary.first_user_prompt,
+            last_active_at_ms: fs::metadata(&session_file)
+                .ok()
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(|modified| modified.duration_since(UNIX_EPOCH).ok())
+                .map(|duration| duration.as_millis() as u64)
+                .unwrap_or(0),
+        });
     }
 
-    matches
+    records
 }
 
-fn discover_codex_session_ids_for_workspace(workspace_path: &str) -> HashSet<String> {
-    discover_codex_session_metas_for_workspace(workspace_path)
-        .into_iter()
-        .map(|meta| meta.id)
-        .collect()
+fn build_codex_session_match_snapshot(
+    record: CodexSessionRecord,
+    remembered_session_id: Option<&str>,
+) -> CodexSessionMatchSnapshot {
+    let is_remembered = remembered_session_id
+        .map(|session_id| session_id == record.meta.id.as_str())
+        .unwrap_or(false);
+    let CodexSessionRecord {
+        meta,
+        first_user_prompt,
+        last_active_at_ms,
+    } = record;
+
+    CodexSessionMatchSnapshot {
+        id: meta.id.clone(),
+        cwd: meta.cwd.clone(),
+        display_title: build_codex_session_display_title(&meta.cwd, first_user_prompt.as_deref()),
+        cli_version: meta.cli_version,
+        source: meta.source,
+        originator: meta.originator,
+        last_active_at_ms,
+        is_remembered,
+    }
 }
 
-fn find_codex_session_meta_for_workspace(
-    workspace_path: &str,
-    session_id: &str,
-) -> Option<CodexSessionMetaPayload> {
-    discover_codex_session_metas_for_workspace(workspace_path)
-        .into_iter()
-        .find(|meta| meta.id == session_id)
+fn codex_session_matches_workspace(workspace_path: &str, session_cwd: &str) -> bool {
+    let workspace_key = normalize_path_for_comparison(workspace_path);
+    let session_key = normalize_path_for_comparison(session_cwd);
+    if session_key == workspace_key {
+        return true;
+    }
+
+    let workspace_root = Path::new(&workspace_key);
+    let session_root = Path::new(&session_key);
+    session_root.starts_with(workspace_root)
 }
 
 fn maybe_auto_restore_codex_for_ready_pane(
@@ -1889,8 +1931,7 @@ fn maybe_auto_restore_codex_for_ready_pane(
                     error,
                 }),
             )
-        } else if find_codex_session_meta_for_workspace(&binding.cwd, &binding.session_id).is_none()
-        {
+        } else if find_codex_session_record_by_id(&binding.session_id).is_none() {
             remove_workspace_codex_restore_binding(
                 &mut runtime.workspaces[workspace_index],
                 slot_index,
@@ -1910,11 +1951,14 @@ fn maybe_auto_restore_codex_for_ready_pane(
             )
         } else {
             let codex_binary = runtime.codex_cli.effective_path.clone().unwrap_or_default();
+            let restore_cwd = find_codex_session_record_by_id(&binding.session_id)
+                .map(|record| record.meta.cwd)
+                .unwrap_or_else(|| binding.cwd.clone());
             let command = format!(
                 "{} resume {} -C {}\n",
                 shell_escape(&codex_binary),
                 shell_escape(&binding.session_id),
-                shell_escape(&binding.cwd),
+                shell_escape(&restore_cwd),
             );
             (
                 Some(writer),
@@ -2037,16 +2081,11 @@ fn try_bind_pending_codex_start(
         pending
     };
 
-    let session_metas = discover_codex_session_metas_for_workspace(&pending.cwd);
-    let new_sessions = session_metas
+    let workspace_scoped_new_sessions = discover_codex_session_metas_for_workspace(&pending.cwd)
         .into_iter()
         .filter(|meta| !pending.known_session_ids.contains(meta.id.as_str()))
         .collect::<Vec<_>>();
-    if new_sessions.is_empty() {
-        return Ok(false);
-    }
-
-    if new_sessions.len() > 1 {
+    if workspace_scoped_new_sessions.len() > 1 {
         let mut runtime = shared
             .lock()
             .map_err(|_| "failed to acquire application state".to_string())?;
@@ -2054,7 +2093,31 @@ fn try_bind_pending_codex_start(
         return Ok(true);
     }
 
-    let discovered = new_sessions[0].clone();
+    let discovered = if let Some(meta) = workspace_scoped_new_sessions.into_iter().next() {
+        meta
+    } else {
+        let global_new_sessions = collect_codex_session_records()
+            .into_iter()
+            .filter(|record| !pending.known_session_ids.contains(record.meta.id.as_str()))
+            .filter(|record| {
+                record.last_active_at_ms
+                    >= pending
+                        .started_at_ms
+                        .saturating_sub(CODEX_PENDING_START_GLOBAL_MATCH_GRACE_MS)
+            })
+            .collect::<Vec<_>>();
+        if global_new_sessions.is_empty() {
+            return Ok(false);
+        }
+        if global_new_sessions.len() > 1 {
+            let mut runtime = shared
+                .lock()
+                .map_err(|_| "failed to acquire application state".to_string())?;
+            runtime.clear_pending_codex_starts_for_workspace(workspace_id);
+            return Ok(true);
+        }
+        global_new_sessions[0].meta.clone()
+    };
     {
         let mut runtime = shared
             .lock()
@@ -4117,7 +4180,7 @@ fn start_workspace_codex_session(
     };
 
     write_shell_command(&writer, &command)?;
-    let known_session_ids = discover_codex_session_ids_for_workspace(&workspace_path);
+    let known_session_ids = discover_all_codex_session_ids();
     let should_spawn_discovery = {
         let mut runtime = shared
             .lock()
@@ -6168,6 +6231,7 @@ mod tests {
         fs,
         path::{Path, PathBuf},
         process::Command,
+        sync::{Arc, Mutex},
         thread,
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
@@ -6181,15 +6245,17 @@ mod tests {
         collect_git_detail_with_binary, compare_codex_cli_versions,
         complete_launcher_input_for_base, default_launcher_path, execute_launcher_command,
         external_workspace_target_spec, extract_login_shell_path, extract_navigation_target,
-        layout_for_pane_count, layout_presets, load_workspace_file_explorer_directory_snapshot,
-        load_workspace_text_file_snapshot, merge_path_values, normalize_workspace_path,
+        layout_for_pane_count, layout_presets, load_workspace_codex_sessions_snapshot,
+        load_workspace_file_explorer_directory_snapshot, load_workspace_text_file_snapshot,
+        merge_path_values, normalize_workspace_path,
         parse_battery_snapshot, parse_codex_cli_version, parse_git_status_porcelain,
         persistence::ActivityEventKind, prepare_workspace_launch, read_codex_session_summary,
         resolve_navigation_path, save_workspace_text_file_snapshot,
-        upsert_workspace_codex_restore_binding, validate_git_cli_arg, BatteryState,
-        CodexCliCandidateSnapshot, CodexCliSelectionMode, CodexCliSource, CodexCliStatus,
-        ExternalWorkspaceTargetKind, GitFileKind, GitState, PendingCodexStartRecord, RuntimeState,
-        ThemeId, WorkspaceFileDraftRecord, WorkspaceFileExplorerEntryKind,
+        try_bind_pending_codex_start, upsert_workspace_codex_restore_binding,
+        validate_git_cli_arg, BatteryState, CodexCliCandidateSnapshot, CodexCliSelectionMode,
+        CodexCliSnapshot, CodexCliSource, CodexCliStatus, ExternalWorkspaceTargetKind,
+        GitFileKind, GitState, PendingCodexStartRecord, RuntimeState, ThemeId,
+        WorkspaceFileDraftRecord, WorkspaceFileExplorerEntryKind,
         WorkspaceTextFileNewlineStyle, WorkspaceTodoRecord, DEFAULT_INTERFACE_TEXT_SCALE,
         DEFAULT_TERMINAL_FONT_SIZE,
     };
@@ -6403,6 +6469,127 @@ mod tests {
         assert_eq!(
             summary.first_user_prompt.as_deref(),
             Some("Please audit the render path for perf pitfalls.")
+        );
+    }
+
+    #[test]
+    fn codex_session_snapshot_keeps_remembered_session_by_id_even_without_workspace_match() {
+        let fixture = TestWorkspace::new();
+        let original_home = env::var_os("HOME");
+        let unrelated = fixture.root_dir().join("outside-remembered-session");
+        fs::create_dir_all(&unrelated).expect("outside remembered session directory should exist");
+        write_codex_session_fixture(
+            fixture.home_root(),
+            "session-remembered",
+            &unrelated,
+            Some("Inspect the API routes."),
+        );
+
+        unsafe {
+            env::set_var("HOME", fixture.home_root());
+        }
+
+        let snapshot = load_workspace_codex_sessions_snapshot(
+            "workspace-1",
+            fixture.project_dir().to_str().unwrap(),
+            Some("session-remembered"),
+            &CodexCliSnapshot::unavailable("test"),
+        );
+
+        match original_home {
+            Some(value) => unsafe { env::set_var("HOME", value) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+
+        assert!(!snapshot.remembered_session_missing);
+        assert_eq!(snapshot.sessions.len(), 1);
+        assert_eq!(snapshot.sessions[0].id, "session-remembered");
+        assert!(snapshot.sessions[0].is_remembered);
+        assert_eq!(snapshot.sessions[0].cwd, unrelated.display().to_string());
+    }
+
+    #[test]
+    fn codex_session_snapshot_matches_nested_session_cwds_inside_workspace() {
+        let fixture = TestWorkspace::new();
+        let original_home = env::var_os("HOME");
+        let nested = fixture.project_dir().join("backend").join("api");
+        write_codex_session_fixture(
+            fixture.home_root(),
+            "session-nested",
+            &nested,
+            Some("Inspect the API routes."),
+        );
+
+        unsafe {
+            env::set_var("HOME", fixture.home_root());
+        }
+
+        let snapshot = load_workspace_codex_sessions_snapshot(
+            "workspace-1",
+            fixture.project_dir().to_str().unwrap(),
+            None,
+            &CodexCliSnapshot::unavailable("test"),
+        );
+
+        match original_home {
+            Some(value) => unsafe { env::set_var("HOME", value) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+
+        assert!(!snapshot.remembered_session_missing);
+        assert_eq!(snapshot.sessions.len(), 1);
+        assert_eq!(snapshot.sessions[0].id, "session-nested");
+        assert_eq!(snapshot.sessions[0].cwd, nested.display().to_string());
+    }
+
+    #[test]
+    fn pending_codex_start_binds_single_new_global_session_when_workspace_match_is_missing() {
+        let fixture = TestWorkspace::new();
+        let original_home = env::var_os("HOME");
+        let unrelated = fixture.root_dir().join("outside-session-root");
+        fs::create_dir_all(&unrelated).expect("outside session directory should exist");
+        write_codex_session_fixture(
+            fixture.home_root(),
+            "session-global",
+            &unrelated,
+            Some("Resume from outside the repo root."),
+        );
+
+        unsafe {
+            env::set_var("HOME", fixture.home_root());
+        }
+
+        let (mut runtime, workspace_id) = runtime_with_workspace(fixture.project_dir());
+        let pane_id = runtime.workspaces[0].panes[0].id.clone();
+        runtime.pending_codex_starts.push(PendingCodexStartRecord {
+            workspace_id: workspace_id.clone(),
+            pane_id,
+            pane_slot_index: 0,
+            cwd: runtime.workspaces[0].path.clone(),
+            started_at_ms: super::now_timestamp_ms(),
+            known_session_ids: HashSet::new(),
+        });
+
+        let shared = Arc::new(Mutex::new(runtime));
+        let bound = try_bind_pending_codex_start(&shared, &workspace_id)
+            .expect("pending codex start should succeed");
+
+        match original_home {
+            Some(value) => unsafe { env::set_var("HOME", value) },
+            None => unsafe { env::remove_var("HOME") },
+        }
+
+        assert!(bound);
+
+        let runtime = shared.lock().expect("runtime lock should succeed");
+        assert_eq!(
+            runtime.workspaces[0].codex_session_id.as_deref(),
+            Some("session-global")
+        );
+        assert_eq!(runtime.workspaces[0].codex_restore_bindings.len(), 1);
+        assert_eq!(
+            runtime.workspaces[0].codex_restore_bindings[0].cwd,
+            unrelated.display().to_string()
         );
     }
 
@@ -7924,6 +8111,29 @@ src/old name.rs\0\
 
     fn canonical_path(path: &Path) -> PathBuf {
         fs::canonicalize(path).expect("fixture path should be canonicalizable")
+    }
+
+    fn write_codex_session_fixture(
+        home_root: &Path,
+        session_id: &str,
+        cwd: &Path,
+        first_prompt: Option<&str>,
+    ) -> PathBuf {
+        let session_dir = home_root.join(".codex").join("sessions").join("2026").join("04").join("14");
+        fs::create_dir_all(&session_dir).expect("session directory should exist");
+        let session_file = session_dir.join(format!("rollout-{session_id}.jsonl"));
+        let mut content = format!(
+            "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{session_id}\",\"cwd\":\"{}\",\"originator\":\"codex_cli_rs\",\"cli_version\":\"0.120.0\",\"source\":\"cli\"}}}}\n",
+            cwd.display()
+        );
+        if let Some(prompt) = first_prompt {
+            content.push_str(&format!(
+                "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":{}}}}}\n",
+                serde_json::to_string(prompt).expect("prompt should serialize")
+            ));
+        }
+        fs::write(&session_file, content).expect("session fixture should write");
+        session_file
     }
 
     fn runtime_with_workspace(path: &Path) -> (RuntimeState, String) {

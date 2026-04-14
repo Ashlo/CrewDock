@@ -48,6 +48,8 @@ const WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX = 32;
 const WORKSPACE_TAB_EDGE_SCROLL_MAX_PX_PER_FRAME = 18;
 const WORKSPACE_TAB_CLICK_SUPPRESS_MS = 250;
 const MARKDOWN_VIEW_MODES = new Set(["write", "preview", "split"]);
+const MARKDOWN_MERMAID_LANGUAGES = new Set(["mermaid"]);
+const MARKDOWN_MERMAID_RENDER_ID_PREFIX = "crewdock-mermaid";
 const MARKDOWN_RAW_HTML_ALLOWED_TAGS = new Set([
   "a",
   "blockquote",
@@ -135,6 +137,7 @@ const RENDER_TODO_SURFACES = RENDER_STATUS | RENDER_MODAL;
 const RENDER_SOURCE_CONTROL_SURFACES = RENDER_STRIP | RENDER_STATUS | RENDER_MODAL;
 const RENDER_CODEX_SURFACES = RENDER_STATUS | RENDER_MODAL;
 const RENDER_FILE_EXPLORER_SURFACES = RENDER_STATUS | RENDER_EXPLORER;
+let markdownMermaidRenderNonce = 0;
 const WORKSPACE_OPEN_TARGET_META = Object.freeze({
   cursor: { label: "Cursor", kind: "editor", shortLabel: "C" },
   antigravity: { label: "Antigravity", kind: "editor", shortLabel: "A" },
@@ -13168,6 +13171,206 @@ function splitMarkdownTableRow(line) {
     .map((cell) => cell.trim());
 }
 
+function isMarkdownMermaidLanguage(language) {
+  return MARKDOWN_MERMAID_LANGUAGES.has(String(language || "").trim().toLowerCase());
+}
+
+function renderMarkdownPlainCodeBlock(language, content) {
+  const languageLabel = String(language || "").trim();
+  return `
+    <pre class="workspace-file-editor-markdown-code"><code${languageLabel ? ` data-language="${escapeHtml(languageLabel)}"` : ""}>${escapeHtml(content)}</code></pre>
+  `;
+}
+
+function renderMarkdownMermaidBlock(content) {
+  return `
+    <div class="workspace-file-editor-markdown-mermaid-shell" data-markdown-mermaid>
+      <div class="workspace-file-editor-markdown-mermaid-stage" data-markdown-mermaid-stage data-state="idle">
+        <div class="workspace-file-editor-markdown-mermaid-status">Rendering diagram…</div>
+      </div>
+      <pre class="workspace-file-editor-markdown-mermaid-source" data-markdown-mermaid-source hidden>${escapeHtml(content)}</pre>
+    </div>
+  `;
+}
+
+function getMarkdownMermaidApi() {
+  return typeof window !== "undefined" && window.mermaid ? window.mermaid : null;
+}
+
+function normalizeMarkdownMermaidDefinition(definition) {
+  const lines = normalizeWorkspaceTextContentForComparison(definition).split("\n");
+  return lines.map((line) => line.replace(/([A-Za-z0-9_]+)\[\/([^\]\n]*?)\]/g, (match, nodeId, rawLabel) => {
+    const label = String(rawLabel || "").trim();
+    if (!label || label.endsWith("/")) {
+      return match;
+    }
+    return `${nodeId}["/${label}"]`;
+  })).join("\n");
+}
+
+function buildMarkdownMermaidThemeConfig() {
+  const rootStyle = getComputedStyle(document.documentElement);
+  const colorScheme = getCurrentThemeDefinition().colorScheme || "dark";
+  const readVar = (name, fallback = "") => rootStyle.getPropertyValue(name).trim() || fallback;
+  const text = readVar("--text", colorScheme === "light" ? "#1f2937" : "#e5e7eb");
+  const accent = readVar("--accent", colorScheme === "light" ? "#2563eb" : "#60a5fa");
+  const border = readVar("--border-strong", accent);
+  const muted = readVar("--muted", text);
+  const surface = readVar("--surface-card-bg", readVar("--modal-bg", readVar("--pane-bg", colorScheme === "light" ? "#ffffff" : "#0f172a")));
+  const secondarySurface = readVar("--control-bg", surface);
+  const tertiarySurface = readVar("--surface-pill-bg", surface);
+  const edgeLabelBackground = readVar("--pane-bg", surface);
+
+  return {
+    startOnLoad: false,
+    securityLevel: "strict",
+    theme: "base",
+    fontFamily: '"SF Pro Display", "SF Pro Text", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+    flowchart: {
+      htmlLabels: false,
+      curve: "basis",
+      useMaxWidth: false,
+    },
+    sequence: {
+      useMaxWidth: false,
+    },
+    themeVariables: {
+      background: "transparent",
+      primaryColor: surface,
+      primaryTextColor: text,
+      primaryBorderColor: border,
+      secondaryColor: secondarySurface,
+      secondaryTextColor: text,
+      secondaryBorderColor: border,
+      tertiaryColor: tertiarySurface,
+      tertiaryTextColor: text,
+      tertiaryBorderColor: border,
+      mainBkg: surface,
+      clusterBkg: secondarySurface,
+      clusterBorder: border,
+      lineColor: muted,
+      defaultLinkColor: muted,
+      edgeLabelBackground,
+      nodeTextColor: text,
+      textColor: text,
+      titleColor: text,
+      fontFamily: '"SF Pro Display", "SF Pro Text", ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+      cScale0: surface,
+      cScale1: secondarySurface,
+      cScale2: tertiarySurface,
+      cScalePeer1: accent,
+      cScalePeer2: border,
+    },
+  };
+}
+
+function renderMarkdownMermaidError(message, content) {
+  const resolvedMessage = String(message || "").trim() || "CrewDock could not render this Mermaid diagram.";
+  return `
+    <div class="workspace-file-editor-markdown-mermaid-error">
+      <strong>Could not render diagram</strong>
+      <p>${escapeHtml(resolvedMessage)}</p>
+    </div>
+    ${renderMarkdownPlainCodeBlock("mermaid", content)}
+  `;
+}
+
+async function renderMarkdownMermaidShell(shell, definition, signature) {
+  const stage = shell.querySelector("[data-markdown-mermaid-stage]");
+  if (!(stage instanceof HTMLElement)) {
+    return;
+  }
+
+  const requestId = String(++markdownMermaidRenderNonce);
+  shell.dataset.renderRequestId = requestId;
+  stage.dataset.state = "rendering";
+  stage.innerHTML = '<div class="workspace-file-editor-markdown-mermaid-status">Rendering diagram…</div>';
+
+  const mermaid = getMarkdownMermaidApi();
+  if (!mermaid || typeof mermaid.initialize !== "function" || typeof mermaid.render !== "function") {
+    stage.dataset.state = "error";
+    stage.innerHTML = renderMarkdownMermaidError("Mermaid is not available in this build.", definition);
+    return;
+  }
+
+  try {
+    mermaid.initialize(buildMarkdownMermaidThemeConfig());
+    const normalizedDefinition = normalizeMarkdownMermaidDefinition(definition);
+    let result;
+
+    try {
+      result = await mermaid.render(`${MARKDOWN_MERMAID_RENDER_ID_PREFIX}-${requestId}`, definition);
+    } catch (primaryError) {
+      if (normalizedDefinition === definition) {
+        throw primaryError;
+      }
+      result = await mermaid.render(`${MARKDOWN_MERMAID_RENDER_ID_PREFIX}-${requestId}-normalized`, normalizedDefinition);
+    }
+
+    if (!shell.isConnected || shell.dataset.renderRequestId !== requestId) {
+      return;
+    }
+
+    stage.dataset.state = "ready";
+    stage.innerHTML = result?.svg || "";
+    shell.dataset.renderedSignature = signature;
+
+    const svg = stage.querySelector("svg");
+    if (svg instanceof SVGElement) {
+      svg.removeAttribute("height");
+    }
+
+    if (typeof result?.bindFunctions === "function") {
+      result.bindFunctions(stage);
+    }
+  } catch (error) {
+    if (!shell.isConnected || shell.dataset.renderRequestId !== requestId) {
+      return;
+    }
+
+    stage.dataset.state = "error";
+    stage.innerHTML = renderMarkdownMermaidError(
+      error instanceof Error ? error.message : "CrewDock could not render this Mermaid diagram.",
+      definition,
+    );
+    console.error(error);
+  }
+}
+
+function syncWorkspaceFileEditorMarkdownDiagrams(root) {
+  if (!(root instanceof HTMLElement)) {
+    return;
+  }
+
+  const shells = root.querySelectorAll("[data-markdown-mermaid]");
+  if (!shells.length) {
+    return;
+  }
+
+  for (const shell of shells) {
+    if (!(shell instanceof HTMLElement)) {
+      continue;
+    }
+
+    const source = shell.querySelector("[data-markdown-mermaid-source]");
+    const stage = shell.querySelector("[data-markdown-mermaid-stage]");
+    if (!(source instanceof HTMLElement) || !(stage instanceof HTMLElement)) {
+      continue;
+    }
+
+    const definition = source.textContent || "";
+    const signature = `${getActiveThemeId()}::${normalizeMarkdownMermaidDefinition(definition)}`;
+    if (
+      shell.dataset.renderedSignature === signature
+      && (stage.dataset.state === "ready" || stage.dataset.state === "rendering")
+    ) {
+      continue;
+    }
+
+    void renderMarkdownMermaidShell(shell, definition, signature);
+  }
+}
+
 function isMarkdownTableDivider(line) {
   return /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(String(line || ""));
 }
@@ -13191,10 +13394,9 @@ function isMarkdownSpecialBlockStart(line, nextLine = "") {
 }
 
 function renderMarkdownCodeBlock(language, content) {
-  const languageLabel = String(language || "").trim();
-  return `
-    <pre class="workspace-file-editor-markdown-code"><code${languageLabel ? ` data-language="${escapeHtml(languageLabel)}"` : ""}>${escapeHtml(content)}</code></pre>
-  `;
+  return isMarkdownMermaidLanguage(language)
+    ? renderMarkdownMermaidBlock(content)
+    : renderMarkdownPlainCodeBlock(language, content);
 }
 
 function renderMarkdownTable(lines, context = {}) {
@@ -13411,9 +13613,10 @@ function renderWorkspaceFileEditorShell(workspace) {
   const editorState = getWorkspaceFileEditorState(workspace.id, { create: false });
   const markdownMode = getWorkspaceFileEditorMarkdownMode(editorState);
   const isMarkdownSplit = visible && markdownMode === "split";
+  const isMarkdownPreview = visible && markdownMode === "preview";
   return `
     <aside
-      class="workspace-file-editor-shell ${visible ? "is-visible" : ""} ${isMarkdownSplit ? "is-markdown-split" : ""}"
+      class="workspace-file-editor-shell ${visible ? "is-visible" : ""} ${isMarkdownSplit ? "is-markdown-split" : ""} ${isMarkdownPreview ? "is-markdown-preview" : ""}"
       data-workspace-file-editor="${escapeHtml(workspace.id)}"
       aria-hidden="${visible ? "false" : "true"}"
     >
@@ -13966,12 +14169,15 @@ function syncWorkspaceFileEditorSurface(workspace, root = document) {
   const visible = isWorkspaceFileEditorVisible(workspace.id);
   const editorState = getWorkspaceFileEditorState(workspace.id, { create: false });
   const isMarkdownSplit = visible && getWorkspaceFileEditorMarkdownMode(editorState) === "split";
+  const isMarkdownPreview = visible && getWorkspaceFileEditorMarkdownMode(editorState) === "preview";
   const focusState = captureWorkspaceFileEditorFocusState(screen);
   screen.classList.toggle("has-file-editor", visible);
   shell.classList.toggle("is-visible", visible);
   shell.classList.toggle("is-markdown-split", isMarkdownSplit);
+  shell.classList.toggle("is-markdown-preview", isMarkdownPreview);
   shell.setAttribute("aria-hidden", visible ? "false" : "true");
   shell.innerHTML = renderWorkspaceFileEditor(workspace);
+  syncWorkspaceFileEditorMarkdownDiagrams(shell);
   if (editorState?.shouldFocus) {
     editorState.shouldFocus = false;
     const input = shell.querySelector("[data-workspace-file-editor-input]");
