@@ -1305,6 +1305,39 @@ async function loadWorkspaceFileExplorerDirectory(workspaceId, relativePath = ""
   }
 }
 
+async function refreshWorkspaceFileExplorerDirectories(
+  workspaceId = getActiveWorkspace()?.id || "",
+  { preserveSelection = true } = {},
+) {
+  const explorerState = getWorkspaceFileExplorerState(workspaceId, { create: false });
+  if (!explorerState) {
+    return false;
+  }
+
+  const directoryPaths = Array.from(
+    new Set([
+      "",
+      ...Array.from(explorerState.expandedDirectories || []).map((path) =>
+        normalizeWorkspaceFileExplorerRelativePath(path),
+      ),
+    ]),
+  ).sort((left, right) => left.split("/").length - right.split("/").length);
+
+  for (const relativePath of directoryPaths) {
+    await loadWorkspaceFileExplorerDirectory(workspaceId, relativePath, { force: true });
+  }
+
+  if (preserveSelection) {
+    explorerState.selectedPath = resolveWorkspaceExplorerSelectionPath(
+      workspaceId,
+      explorerState.selectedPath,
+    ) || "";
+  }
+
+  requestRender(RENDER_EXPLORER);
+  return true;
+}
+
 function ensureWorkspaceFileExplorerRootLoaded(workspaceId = getActiveWorkspace()?.id || "") {
   const explorerState = getWorkspaceFileExplorerState(workspaceId, { create: false });
   if (!explorerState?.visible || explorerState.directories.has("") || explorerState.loadingPaths.has("")) {
@@ -1330,8 +1363,13 @@ function openWorkspaceFileExplorer(workspaceId = getActiveWorkspace()?.id || "")
     return false;
   }
 
+  const wasVisible = explorerState.visible;
   explorerState.visible = true;
-  ensureWorkspaceFileExplorerRootLoaded(workspaceId);
+  if (!wasVisible) {
+    void refreshWorkspaceFileExplorerDirectories(workspaceId);
+  } else {
+    ensureWorkspaceFileExplorerRootLoaded(workspaceId);
+  }
   return true;
 }
 
@@ -3582,6 +3620,11 @@ async function handleClick(event) {
     return;
   }
 
+  if (target.dataset.action === "toggle-workspace-git-menu") {
+    await toggleWorkspaceGitMenu();
+    return;
+  }
+
   if (target.dataset.action === "open-workspace-in-target") {
     await openActiveWorkspaceInTarget(target.dataset.targetId || "");
     return;
@@ -3595,6 +3638,7 @@ async function handleClick(event) {
     closeSystemHealthPanel();
     closeSourceControlPanel();
     closeWorkspaceOpenMenu();
+    closeWorkspaceGitMenu();
     uiState.activityRailVisible = false;
     closeQuickSwitcher();
     uiState.pendingWorkspaceDraft = null;
@@ -3625,6 +3669,7 @@ async function handleClick(event) {
     closeSystemHealthPanel();
     closeSourceControlPanel();
     closeWorkspaceOpenMenu();
+    closeWorkspaceGitMenu();
     uiState.activityRailVisible = false;
     closeQuickSwitcher();
     uiState.pendingWorkspaceDraft = null;
@@ -3636,8 +3681,9 @@ async function handleClick(event) {
 
   if (target.dataset.action === "show-git-panel") {
     const didCloseOpenMenu = closeWorkspaceOpenMenu();
+    const didCloseGitMenu = closeWorkspaceGitMenu();
     await openSourceControlPanel({ force: true });
-    if (didCloseOpenMenu) {
+    if (didCloseOpenMenu || didCloseGitMenu) {
       requestRender(RENDER_STRIP);
     }
     return;
@@ -4180,6 +4226,11 @@ function handlePointerDown(event) {
     renderMask |= RENDER_STRIP;
   }
 
+  if (uiState.workspaceGitMenuVisible && !target?.closest("[data-workspace-git-shell]")) {
+    closeWorkspaceGitMenu();
+    renderMask |= RENDER_STRIP;
+  }
+
   if (
     uiState.systemHealthPanelVisible
     && !target?.closest("[data-system-health-panel]")
@@ -4458,6 +4509,9 @@ function renderWorkspaceStripRegion(
     workspaceRenameDraft: uiState.workspaceRenameDraft,
     workspaceOpenControlHtml: snapshot.activeWorkspace
       ? renderWorkspaceOpenControl(snapshot.activeWorkspace)
+      : "",
+    workspaceGitControlHtml: snapshot.activeWorkspace
+      ? renderWorkspaceGitControl(snapshot.activeWorkspace)
       : "",
     getWorkspaceAttention,
     hasWorkspaceFileDraftIndicator: workspaceHasFileDraftIndicator,
@@ -5368,6 +5422,13 @@ async function handleKeyDown(event) {
   if (uiState.workspaceOpenMenuVisible && event.key === "Escape") {
     event.preventDefault();
     closeWorkspaceOpenMenu();
+    requestRender(RENDER_STRIP);
+    return;
+  }
+
+  if (uiState.workspaceGitMenuVisible && event.key === "Escape") {
+    event.preventDefault();
+    closeWorkspaceGitMenu();
     requestRender(RENDER_STRIP);
     return;
   }
@@ -6456,6 +6517,8 @@ async function openSourceControlPanel({ force = false } = {}) {
 
   uiState.gitPanelVisible = true;
   closeSourceControlRowMenu();
+  closeWorkspaceOpenMenu();
+  closeWorkspaceGitMenu();
   hideSettingsSheet();
   closeTodoPanel();
   closeCodexModal();
@@ -7101,6 +7164,60 @@ async function submitSourceControlCommit({ commitAll = false } = {}) {
   }
 }
 
+async function ensureActiveWorkspaceSourceControlSnapshot({ force = false } = {}) {
+  const workspaceId = uiState.snapshot?.activeWorkspaceId;
+  if (!workspaceId) {
+    return null;
+  }
+
+  if (!force && uiState.sourceControl.snapshot?.workspaceId === workspaceId) {
+    return uiState.sourceControl.snapshot;
+  }
+
+  await refreshActiveWorkspaceGitStatus({ force: true });
+  return loadActiveWorkspaceSourceControl({ force: true });
+}
+
+async function openSourceControlCommitComposer({ force = false } = {}) {
+  uiState.sourceControl.activeTab = "changes";
+  await openSourceControlPanel({ force });
+  requestRender(RENDER_MODAL);
+}
+
+async function promptSourceControlQuickCommit({ commitAll = false } = {}) {
+  const snapshot = await ensureActiveWorkspaceSourceControlSnapshot();
+  if (!snapshot) {
+    return;
+  }
+
+  if (snapshot.summary?.state === "not-repo" || snapshot.summary?.state === "error") {
+    await openSourceControlCommitComposer({ force: true });
+    return;
+  }
+
+  if (!commitAll && !hasStagedSourceControlChanges(snapshot)) {
+    await openSourceControlCommitComposer();
+    window.alert("No staged changes to commit.");
+    return;
+  }
+
+  if (commitAll && !hasPendingSourceControlChanges(snapshot)) {
+    await openSourceControlCommitComposer();
+    window.alert("No pending changes to commit.");
+    return;
+  }
+
+  const promptLabel = commitAll ? "Commit all pending changes" : "Commit staged changes";
+  const initialMessage = uiState.sourceControl.commitMessage.trim();
+  const message = (window.prompt(promptLabel, initialMessage) || "").trim();
+  if (!message) {
+    return;
+  }
+
+  uiState.sourceControl.commitMessage = message;
+  await submitSourceControlCommit({ commitAll });
+}
+
 async function generateSourceControlCommitMessage() {
   const workspaceId = getSourceControlWorkspaceId();
   if (!workspaceId || !bridge.generateGitCommitMessage || uiState.sourceControl.generatingCommitMessage) {
@@ -7168,6 +7285,35 @@ async function submitSourceControlCreateBranch() {
   }
 }
 
+async function promptSourceControlCreateBranch() {
+  const workspaceId = getSourceControlWorkspaceId();
+  if (!workspaceId || !bridge.gitCreateBranch) {
+    return;
+  }
+
+  const branchName = (window.prompt("Create branch", "") || "").trim();
+  if (!branchName) {
+    return;
+  }
+
+  const suggestedStartPoint = getSourceControlCurrentBranch() || "";
+  const startPoint = (window.prompt("Start point (optional)", suggestedStartPoint) || "").trim();
+  const snapshot = await runSourceControlMutation(
+    () => bridge.gitCreateBranch(workspaceId, branchName, startPoint || null),
+    { resetGraphSelection: true },
+  );
+  if (snapshot?.task?.id) {
+    uiState.sourceControl.pendingCreateBranch = {
+      workspaceId,
+      taskId: snapshot.task.id,
+      branchName,
+      startPoint,
+    };
+    syncPendingSourceControlCreateBranch(snapshot.task, snapshot);
+    requestRender(RENDER_MODAL);
+  }
+}
+
 async function submitSourceControlTaskInput() {
   const workspaceId = getSourceControlWorkspaceId();
   const task = uiState.sourceControl.snapshot?.task || null;
@@ -7207,8 +7353,12 @@ async function handleSourceControlAction(target) {
   const branchName = target.dataset.branchName || "";
   const commitOid = target.dataset.oid || "";
 
+  const didCloseWorkspaceGitMenu = closeWorkspaceGitMenu();
   if (action !== "scm-toggle-row-menu") {
     closeSourceControlRowMenu();
+  }
+  if (didCloseWorkspaceGitMenu) {
+    requestRender(RENDER_STRIP);
   }
 
   if (action === "close-scm-publish-modal") {
@@ -7226,6 +7376,15 @@ async function handleSourceControlAction(target) {
     case "scm-refresh":
       await refreshActiveWorkspaceGitStatus({ force: true });
       await loadActiveWorkspaceSourceControl({ force: true });
+      return;
+    case "scm-open-commit":
+      await openSourceControlCommitComposer({ force: true });
+      return;
+    case "scm-quick-commit":
+      await promptSourceControlQuickCommit({ commitAll: false });
+      return;
+    case "scm-quick-commit-all":
+      await promptSourceControlQuickCommit({ commitAll: true });
       return;
     case "scm-switch-tab": {
       const nextTab = target.dataset.scmTab || "changes";
@@ -7329,6 +7488,9 @@ async function handleSourceControlAction(target) {
       return;
     case "scm-push":
       await submitSourceControlPush();
+      return;
+    case "scm-prompt-create-branch":
+      await promptSourceControlCreateBranch();
       return;
     case "scm-checkout-branch": {
       const summary = getSourceControlSummary();
@@ -8664,6 +8826,23 @@ function renderBranchIcon() {
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
       <path d="M7 3a3 3 0 1 1 0 6v7.2a3 3 0 1 1-2 0V9a3 3 0 0 1 2-6Zm0 2a1 1 0 1 0 0 2 1 1 0 0 0 0-2Zm10 4a3 3 0 1 1-2.9 3.8H9v2h5.1A3 3 0 1 1 17 9Zm0 2a1 1 0 1 0 0 2 1 1 0 0 0 0-2Zm0 7a1 1 0 1 0 0 2 1 1 0 0 0 0-2Z" fill="currentColor"></path>
+    </svg>
+  `;
+}
+
+function renderCommitIcon() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M5 12h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path>
+      <circle cx="12" cy="12" r="3.2" fill="currentColor"></circle>
+    </svg>
+  `;
+}
+
+function renderPushIcon() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M11 20h2v-9.2l2.6 2.6 1.4-1.4-5-5-5 5 1.4 1.4 2.6-2.6V20ZM5 3h14v2H5V3Z" fill="currentColor"></path>
     </svg>
   `;
 }
@@ -12420,6 +12599,15 @@ function closeWorkspaceOpenMenu() {
   return true;
 }
 
+function closeWorkspaceGitMenu() {
+  if (!uiState.workspaceGitMenuVisible) {
+    return false;
+  }
+
+  uiState.workspaceGitMenuVisible = false;
+  return true;
+}
+
 async function ensureWorkspaceOpenTargetsLoaded({ force = false } = {}) {
   if (!bridge.listExternalWorkspaceTargets) {
     uiState.workspaceOpenTargets = [];
@@ -12538,9 +12726,171 @@ async function toggleWorkspaceOpenMenu(forceVisible = !uiState.workspaceOpenMenu
     return;
   }
 
+  closeWorkspaceGitMenu();
   uiState.workspaceOpenMenuVisible = true;
   requestRender(RENDER_STRIP);
   await ensureWorkspaceOpenTargetsLoaded();
+}
+
+function getWorkspaceGitControlSummary(workspace = getActiveWorkspace()) {
+  const summary = workspace?.gitSummary || workspace?.gitDetail?.summary || null;
+  if (!summary || summary.state === "not-repo" || summary.state === "error") {
+    return null;
+  }
+
+  return summary;
+}
+
+async function toggleWorkspaceGitMenu(forceVisible = !uiState.workspaceGitMenuVisible) {
+  if (!getWorkspaceGitControlSummary()) {
+    return;
+  }
+
+  if (!forceVisible) {
+    if (closeWorkspaceGitMenu()) {
+      requestRender(RENDER_STRIP);
+    }
+    return;
+  }
+
+  closeWorkspaceOpenMenu();
+  uiState.workspaceGitMenuVisible = true;
+  requestRender(RENDER_STRIP);
+}
+
+function renderWorkspaceGitControlIcon() {
+  return `
+    <span class="workspace-open-target-icon is-git" aria-hidden="true">
+      ${renderCommitIcon()}
+    </span>
+  `;
+}
+
+function renderWorkspaceGitMenuItem({
+  action,
+  label,
+  copy,
+  icon,
+  disabled = false,
+}) {
+  return `
+    <button
+      class="workspace-open-menu-item"
+      type="button"
+      role="menuitem"
+      data-action="${escapeHtml(action)}"
+      title="${escapeHtml(label)}"
+      ${disabled ? "disabled" : ""}
+    >
+      ${icon}
+      <span class="workspace-open-menu-copy">
+        <strong>${escapeHtml(label)}</strong>
+        <span>${escapeHtml(copy)}</span>
+      </span>
+    </button>
+  `;
+}
+
+function renderWorkspaceGitMenu(workspace, summary) {
+  const stagedCount = Number(summary.counts?.staged || 0);
+  const commitAllDisabled = !summary.isDirty;
+  const pushLabel = !summary.upstream && summary.state !== "detached" ? "Publish" : "Push";
+
+  return `
+    <div
+      class="workspace-open-menu"
+      role="menu"
+      aria-label="${escapeHtml(`Commit actions for ${workspace.name}`)}"
+    >
+      <div class="workspace-open-menu-group">
+        <p class="workspace-open-menu-label">Commit actions</p>
+        ${renderWorkspaceGitMenuItem({
+          action: "scm-open-commit",
+          label: "Commit",
+          copy: summary.branch ? `Open composer on ${summary.branch}` : "Open the commit composer",
+          icon: renderWorkspaceGitControlIcon(),
+        })}
+        ${renderWorkspaceGitMenuItem({
+          action: "scm-quick-commit",
+          label: "Commit staged",
+          copy: stagedCount > 0
+            ? `${stagedCount} ${stagedCount === 1 ? "file is" : "files are"} staged`
+            : "Stage files first",
+          icon: renderWorkspaceGitControlIcon(),
+          disabled: stagedCount === 0,
+        })}
+        ${renderWorkspaceGitMenuItem({
+          action: "scm-quick-commit-all",
+          label: "Commit all",
+          copy: summary.isDirty ? "Commit all pending changes in one step" : "No pending changes",
+          icon: renderWorkspaceGitControlIcon(),
+          disabled: commitAllDisabled,
+        })}
+        ${renderWorkspaceGitMenuItem({
+          action: "scm-push",
+          label: pushLabel,
+          copy: summary.upstream ? `Send commits to ${summary.upstream}` : "Configure tracking and publish this branch",
+          icon: `
+            <span class="workspace-open-target-icon is-git" aria-hidden="true">
+              ${renderPushIcon()}
+            </span>
+          `,
+        })}
+        ${renderWorkspaceGitMenuItem({
+          action: "scm-prompt-create-branch",
+          label: "Create branch",
+          copy: "Start a branch from the current HEAD",
+          icon: `
+            <span class="workspace-open-target-icon is-git" aria-hidden="true">
+              ${renderBranchIcon()}
+            </span>
+          `,
+        })}
+      </div>
+    </div>
+  `;
+}
+
+function renderWorkspaceGitControl(workspace) {
+  const summary = getWorkspaceGitControlSummary(workspace);
+  if (!summary) {
+    return "";
+  }
+
+  const title = summary.branch
+    ? `Open commit composer for ${workspace.name} (${summary.branch})`
+    : `Open commit composer for ${workspace.name}`;
+
+  return `
+    <div
+      class="workspace-open-shell ${uiState.workspaceGitMenuVisible ? "is-open" : ""}"
+      data-workspace-git-shell
+      data-tauri-drag-region="false"
+    >
+      <button
+        class="workspace-open-button workspace-open-button-main"
+        type="button"
+        data-action="scm-open-commit"
+        title="${escapeHtml(title)}"
+        aria-label="${escapeHtml(title)}"
+      >
+        ${renderWorkspaceGitControlIcon()}
+        <span>Commit</span>
+      </button>
+      <button
+        class="workspace-open-button workspace-open-button-toggle"
+        type="button"
+        data-action="toggle-workspace-git-menu"
+        title="Choose commit action"
+        aria-label="Choose commit action"
+        aria-haspopup="menu"
+        aria-expanded="${uiState.workspaceGitMenuVisible ? "true" : "false"}"
+      >
+        ${renderChevronIcon(uiState.workspaceGitMenuVisible ? "up" : "down")}
+      </button>
+      ${uiState.workspaceGitMenuVisible ? renderWorkspaceGitMenu(workspace, summary) : ""}
+    </div>
+  `;
 }
 
 function renderWorkspaceOpenTargetIcon(targetOrId) {

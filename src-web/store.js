@@ -86,6 +86,7 @@ export function createUiState() {
     codexSubmitting: false,
     codexShouldFocus: false,
     workspaceOpenMenuVisible: false,
+    workspaceGitMenuVisible: false,
     workspaceOpenTargets: [],
     workspaceOpenTargetsLoading: false,
     workspaceOpenTargetsError: "",

@@ -258,15 +258,19 @@ button {
   flex: 1;
   display: flex;
   align-items: center;
-  gap: 4px;
-  min-height: 32px;
-  padding: 0;
+  gap: 5px;
+  min-height: 34px;
+  padding: 1px 2px;
   overflow: hidden;
-  border: 0;
-  border-radius: 0;
-  background: none;
-  box-shadow: none;
-  isolation: auto;
+  border: 1px solid color-mix(in srgb, var(--chrome-divider) 58%, transparent);
+  border-radius: 12px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, white 2%, transparent), transparent 62%),
+    color-mix(in srgb, var(--chrome-surface) 72%, transparent);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, white 3%, transparent),
+    0 1px 0 rgba(0, 0, 0, 0.12);
+  isolation: isolate;
 }
 
 .workspace-tabs-shell::before {
@@ -278,7 +282,7 @@ button {
   min-width: 0;
   flex: 1;
   overflow: hidden;
-  border-radius: 0;
+  border-radius: 10px;
 }
 
 .workspace-tabs-viewport::before,
@@ -315,7 +319,7 @@ button {
 .workspace-tabs-scroll {
   flex: 0 0 0;
   width: 0;
-  height: 24px;
+  height: 22px;
   padding: 0;
   overflow: hidden;
   display: inline-flex;
@@ -340,8 +344,8 @@ button {
 
 .workspace-tabs-shell.has-overflow-left .workspace-tabs-scroll-left,
 .workspace-tabs-shell.has-overflow-right .workspace-tabs-scroll-right {
-  flex-basis: 24px;
-  width: 24px;
+  flex-basis: 22px;
+  width: 22px;
   opacity: 1;
   pointer-events: auto;
   transform: scale(1);
@@ -381,43 +385,113 @@ button {
 }
 
 .workspace-strip-actions .workspace-open-shell {
-  border-color: color-mix(in srgb, var(--border) 86%, transparent);
+  border-radius: 12px;
+  border-color: color-mix(in srgb, var(--border) 72%, transparent);
   background:
-    linear-gradient(180deg, color-mix(in srgb, white 2%, transparent), transparent 50%),
-    color-mix(in srgb, var(--control-bg) 82%, transparent);
+    linear-gradient(180deg, color-mix(in srgb, white 1.5%, transparent), transparent 42%),
+    color-mix(in srgb, var(--panel) 76%, var(--control-bg) 24%);
   box-shadow:
-    0 6px 18px rgba(0, 0, 0, 0.1),
-    inset 0 1px 0 color-mix(in srgb, white 3%, transparent);
+    0 1px 0 color-mix(in srgb, white 4%, transparent) inset,
+    0 8px 20px rgba(0, 0, 0, 0.14);
+}
+
+.workspace-strip-actions .workspace-open-shell.is-open {
+  border-color: color-mix(in srgb, var(--text) 14%, transparent);
+  box-shadow:
+    0 1px 0 color-mix(in srgb, white 5%, transparent) inset,
+    0 10px 24px rgba(0, 0, 0, 0.18);
 }
 
 .workspace-strip-actions .workspace-open-button {
-  min-height: 30px;
+  min-height: 31px;
+  color: color-mix(in srgb, var(--text) 88%, var(--surface-soft-text));
 }
 
 .workspace-strip-actions .workspace-open-button-main {
-  gap: 7px;
-  padding: 0 10px 0 9px;
-  font-size: 0.86rem;
-  font-weight: 560;
+  gap: 8px;
+  padding: 0 12px 0 10px;
+  border-radius: 11px 0 0 11px;
+  font-size: 0.82rem;
+  font-weight: 545;
+  letter-spacing: -0.01em;
 }
 
 .workspace-strip-actions .workspace-open-button-toggle {
-  width: 32px;
+  width: 30px;
+  border-left-color: color-mix(in srgb, var(--border) 44%, transparent);
 }
 
 .workspace-strip-actions .workspace-open-target-icon {
-  width: 18px;
-  height: 18px;
-  border-radius: 5px;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  border-color: color-mix(in srgb, white 6%, transparent);
+  background: color-mix(in srgb, var(--surface-pill-bg) 58%, transparent);
+  box-shadow: none;
 }
 
 .workspace-strip-actions .workspace-open-target-icon svg {
-  width: 12px;
-  height: 12px;
+  width: 11px;
+  height: 11px;
+}
+
+.workspace-strip-actions [data-workspace-git-shell] .workspace-open-target-icon {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  color: color-mix(in srgb, var(--text) 94%, white 6%);
+}
+
+.workspace-strip-actions [data-workspace-git-shell] .workspace-open-target-icon svg {
+  width: 13px;
+  height: 13px;
 }
 
 .workspace-strip-actions .workspace-open-target-monogram {
   font-size: 0.5rem;
+}
+
+.workspace-strip-actions .workspace-open-menu {
+  top: calc(100% + 6px);
+  width: min(248px, calc(100vw - 32px));
+  padding: 8px;
+  border-radius: 16px;
+  border-color: color-mix(in srgb, var(--border) 72%, transparent);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, white 1.5%, transparent), transparent 24%),
+    color-mix(in srgb, var(--panel) 97%, transparent);
+  box-shadow:
+    0 18px 30px rgba(0, 0, 0, 0.24),
+    0 1px 0 color-mix(in srgb, white 4%, transparent) inset;
+  backdrop-filter: blur(14px);
+}
+
+.workspace-strip-actions .workspace-open-menu-group {
+  gap: 2px;
+}
+
+.workspace-strip-actions .workspace-open-menu-label {
+  margin-bottom: 5px;
+  padding-left: 2px;
+  font-size: 0.63rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+.workspace-strip-actions .workspace-open-menu-item {
+  gap: 10px;
+  padding: 8px 9px;
+  border-radius: 10px;
+}
+
+.workspace-strip-actions .workspace-open-menu-copy strong {
+  font-size: 0.85rem;
+  font-weight: 540;
+}
+
+.workspace-strip-actions .workspace-open-menu-copy span {
+  font-size: 0.68rem;
+  line-height: 1.25;
 }
 
 .workspace-tabs {
@@ -426,12 +500,12 @@ button {
   flex: 1;
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
   overflow-x: auto;
   overscroll-behavior-x: contain;
   scroll-behavior: smooth;
   scrollbar-width: none;
-  padding: 0;
+  padding: 1px 1px 1px 0;
 }
 
 .workspace-tabs::-webkit-scrollbar {
@@ -441,38 +515,38 @@ button {
 .workspace-tab-drop-slot {
   flex: 0 0 auto;
   position: relative;
-  min-width: 84px;
+  min-width: 92px;
   box-sizing: border-box;
-  border-radius: 999px;
-  border: 1px solid color-mix(in srgb, white 6%, transparent);
+  border-radius: 10px;
+  border: 1px dashed color-mix(in srgb, var(--tab-border-hover) 70%, transparent);
   background:
     linear-gradient(
       180deg,
-      rgba(255, 255, 255, 0.05),
-      rgba(255, 255, 255, 0.015)
+      color-mix(in srgb, white 3%, transparent),
+      transparent 62%
     );
   box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.06),
-    inset 0 0 0 1px rgba(255, 255, 255, 0.018);
-  opacity: 0.54;
+    inset 0 1px 0 color-mix(in srgb, white 4%, transparent),
+    0 1px 0 rgba(0, 0, 0, 0.12);
+  opacity: 0.74;
   pointer-events: none;
   overflow: hidden;
-  backdrop-filter: blur(14px) saturate(1.04);
+  backdrop-filter: blur(8px) saturate(1.02);
 }
 
 .workspace-tab-drop-slot::before {
   content: "";
   position: absolute;
-  inset: 6px;
+  inset: 4px;
   border-radius: inherit;
   background:
     linear-gradient(
       90deg,
       transparent,
-      color-mix(in srgb, var(--accent) 10%, transparent),
+      color-mix(in srgb, var(--accent) 16%, transparent),
       transparent
     );
-  opacity: 0.7;
+  opacity: 0.62;
 }
 
 .workspace-tab-drop-indicator {
@@ -597,11 +671,12 @@ button {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
-  min-height: 30px;
+  min-height: 32px;
   color: var(--surface-soft-text);
-  font-size: 0.72rem;
+  font-size: 0.73rem;
   letter-spacing: 0.01em;
   white-space: nowrap;
+  padding: 0 8px;
 }
 
 .workspace-tab-shell {
@@ -610,13 +685,17 @@ button {
   display: flex;
   align-items: center;
   gap: 0;
-  max-width: 240px;
-  min-height: 32px;
-  margin: 2px 0;
-  border-radius: 6px;
-  border: 1px solid transparent;
-  background: transparent;
-  box-shadow: none;
+  max-width: 252px;
+  min-height: 34px;
+  margin: 1px 0;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--tab-border) 86%, transparent);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, white 2%, transparent), transparent 56%),
+    color-mix(in srgb, var(--tab-bg) 92%, transparent);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, white 3%, transparent),
+    0 1px 0 rgba(0, 0, 0, 0.18);
   transform: translateY(0);
   transition:
     border-color 160ms ease,
@@ -629,11 +708,11 @@ button {
 .workspace-tab-shell::after {
   content: "";
   position: absolute;
-  left: 10px;
-  right: 10px;
-  bottom: 0;
-  height: 2px;
-  border-radius: 2px 2px 0 0;
+  left: 9px;
+  right: 9px;
+  bottom: 1px;
+  height: 1.5px;
+  border-radius: 999px;
   background: var(--accent);
   opacity: 0;
   transform: scaleX(0.5);
@@ -643,21 +722,34 @@ button {
 }
 
 .workspace-tab-shell:hover {
-  background: var(--strip-tab-hover-surface);
-  transform: translateY(0);
+  border-color: color-mix(in srgb, var(--tab-border-hover) 92%, transparent);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, white 2.4%, transparent), transparent 54%),
+    color-mix(in srgb, var(--tab-bg-hover) 94%, transparent);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, white 4%, transparent),
+    0 5px 12px rgba(0, 0, 0, 0.18);
+  transform: translateY(-1px);
 }
 
 .workspace-tab-shell.is-active {
-  border-color: var(--chrome-divider);
-  background: var(--strip-tab-active-surface);
+  border-color: color-mix(in srgb, var(--tab-border-active) 88%, var(--tab-border) 12%);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, white 3.2%, transparent), transparent 52%),
+    color-mix(in srgb, var(--tab-bg-active) 96%, transparent);
   box-shadow: 
-    0 4px 12px rgba(0, 0, 0, 0.12),
-    inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    inset 0 1px 0 color-mix(in srgb, white 7%, transparent),
+    0 8px 18px rgba(0, 0, 0, 0.22),
+    0 0 0 1px color-mix(in srgb, var(--accent) 10%, transparent);
 }
 
 .workspace-tab-shell.is-active::after {
   opacity: 1;
   transform: scaleX(1);
+}
+
+.workspace-tab-shell.has-attention:not(.is-active) {
+  border-color: color-mix(in srgb, var(--accent) 18%, var(--tab-border));
 }
 
 .workspace-tab-main {
@@ -666,25 +758,28 @@ button {
   flex: 1;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 0 10px;
-  min-height: 32px;
+  gap: 9px;
+  padding: 0 11px;
+  min-height: 34px;
 }
 
 .workspace-tab-status {
-  width: 6px;
-  height: 6px;
+  width: 7px;
+  height: 7px;
   flex: 0 0 auto;
   border-radius: 50%;
-  background: var(--muted);
-  opacity: 0.4;
+  background: color-mix(in srgb, var(--muted) 72%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, white 6%, transparent);
+  opacity: 0.62;
   transition: all 200ms ease;
 }
 
 .workspace-tab-status.is-live {
   background: var(--accent);
-  opacity: 0.8;
-  box-shadow: 0 0 8px var(--accent-soft);
+  opacity: 0.96;
+  box-shadow:
+    0 0 0 1px color-mix(in srgb, white 9%, transparent),
+    0 0 10px color-mix(in srgb, var(--accent) 44%, transparent);
 }
 
 .workspace-tab-name {
@@ -695,29 +790,29 @@ button {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--tab-text);
-  font-size: 0.85rem;
-  letter-spacing: -0.01em;
-  font-weight: 500;
+  font-size: 0.84rem;
+  letter-spacing: -0.012em;
+  font-weight: 535;
   transition: color 160ms ease;
 }
 
 .workspace-tab-shell.is-active .workspace-tab-name {
   color: var(--tab-text-active);
-  font-weight: 600;
+  font-weight: 610;
 }
 
 .workspace-tab-action {
   flex: 0 0 auto;
-  width: 20px;
-  height: 20px;
+  width: 22px;
+  height: 22px;
   margin-right: 4px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 4px;
+  border-radius: 6px;
   color: var(--tab-close);
   opacity: 0;
-  transform: scale(0.9);
+  transform: scale(0.92);
   transition:
     opacity 160ms ease,
     transform 160ms ease,
@@ -726,8 +821,10 @@ button {
 }
 
 .workspace-tab-shell:hover .workspace-tab-action,
-.workspace-tab-shell:focus-within .workspace-tab-action {
-  opacity: 0.7;
+.workspace-tab-shell:focus-within .workspace-tab-action,
+.workspace-tab-shell.is-active .workspace-tab-action,
+.workspace-tab-shell.is-renaming .workspace-tab-action {
+  opacity: 0.82;
   transform: scale(1);
 }
 
@@ -742,47 +839,42 @@ button {
 }
 
 .workspace-tab-close {
-  margin-right: 6px;
-}
-
-.workspace-tab-shell:hover .workspace-tab-action,
-.workspace-tab-shell:focus-within .workspace-tab-action,
-.workspace-tab-shell.is-renaming .workspace-tab-action {
-  opacity: 1;
-  transform: scale(1);
-}
-
-.workspace-tab-action:hover {
-  background: var(--tab-close-hover-bg);
-  color: var(--tab-text-active);
+  margin-right: 5px;
 }
 
 .workspace-tab-action svg {
-  width: 10px;
-  height: 10px;
+  width: 11px;
+  height: 11px;
 }
 
 .workspace-tab-attention {
-  min-width: 18px;
-  height: 18px;
+  min-width: 17px;
+  height: 17px;
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 0 6px;
-  border-radius: 4px;
-  background: rgba(255, 255, 255, 0.1);
+  padding: 0 5px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, white 10%, transparent);
+  background: color-mix(in srgb, var(--surface-pill-bg) 95%, transparent);
   color: var(--tab-text-active);
-  font-size: 0.68rem;
-  font-weight: 700;
+  font-size: 0.62rem;
+  font-weight: 730;
+  letter-spacing: 0.01em;
   line-height: 1;
-  transition: all 200ms ease;
+  transition:
+    background 180ms ease,
+    color 180ms ease,
+    border-color 180ms ease,
+    box-shadow 180ms ease;
 }
 
 .workspace-tab-attention.is-ready {
   background: var(--accent);
   color: white;
-  box-shadow: 0 0 10px var(--accent-soft);
+  border-color: color-mix(in srgb, white 26%, transparent);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 38%, transparent);
 }
 
 .workspace-tab-attention.is-warning {
@@ -801,11 +893,12 @@ button {
 }
 
 .workspace-tab-git {
-  width: 6px;
-  height: 6px;
+  width: 7px;
+  height: 7px;
   flex: 0 0 auto;
   border-radius: 50%;
-  background: rgba(255, 255, 255, 0.2);
+  border: 1px solid color-mix(in srgb, white 7%, transparent);
+  background: rgba(255, 255, 255, 0.18);
   transition: all 200ms ease;
 }
 
@@ -828,12 +921,13 @@ button {
 }
 
 .workspace-tab-draft {
-  width: 6px;
-  height: 6px;
+  width: 7px;
+  height: 7px;
   flex: 0 0 auto;
   border-radius: 50%;
+  border: 1px solid color-mix(in srgb, #fff 12%, transparent);
   background: #f2c36a;
-  box-shadow: 0 0 8px rgba(242, 195, 106, 0.34);
+  box-shadow: 0 0 8px rgba(242, 195, 106, 0.28);
 }
 
 .workspace-strip-button,
@@ -6688,6 +6782,17 @@ button {
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--border) 34%, transparent);
 }
 
+.workspace-open-menu-item:disabled {
+  opacity: 0.46;
+  cursor: default;
+  box-shadow: none;
+}
+
+.workspace-open-menu-item:disabled:hover {
+  background: transparent;
+  box-shadow: none;
+}
+
 .workspace-open-menu-item.is-preferred {
   background: color-mix(in srgb, var(--surface-pill-bg) 88%, transparent);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--border) 42%, transparent);
@@ -8339,11 +8444,11 @@ button {
 
   .workspace-tabs-shell {
     gap: 3px;
-    padding: 0;
+    padding: 1px;
   }
 
   .workspace-tab-shell {
-    max-width: 160px;
+    max-width: 172px;
   }
 
   .workspace-strip-actions {

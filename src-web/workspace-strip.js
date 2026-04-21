@@ -4,6 +4,7 @@ export function renderWorkspaceStrip({
   activeWorkspaceId,
   workspaceRenameDraft,
   workspaceOpenControlHtml,
+  workspaceGitControlHtml,
   getWorkspaceAttention,
   hasWorkspaceFileDraftIndicator,
   getWorkspaceFileDraftIndicatorTitle,
@@ -63,6 +64,7 @@ export function renderWorkspaceStrip({
       </div>
       <div class="workspace-strip-actions">
         ${workspaceOpenControlHtml || ""}
+        ${workspaceGitControlHtml || ""}
         <button
           class="workspace-strip-button workspace-settings-button"
           data-tauri-drag-region="false"
