@@ -727,22 +727,34 @@ window.__crewdockRenderDebug = runtimeStore.renderMetrics;
 
 void init();
 
+function applyAppSnapshot(snapshot, { hydrateActivity = false } = {}) {
+  uiState.snapshot = snapshot;
+  pruneWorkspaceFileExplorerState(snapshot);
+  pruneWorkspaceFileEditorState(snapshot);
+  pruneCodexRestoreState(snapshot);
+  if (hydrateActivity) {
+    hydrateRuntimeActivityFromSnapshot(snapshot);
+  }
+  applySnapshotSettings(snapshot);
+}
+
+async function refreshAppSnapshot({ hydrateActivity = false } = {}) {
+  if (typeof bridge.getAppSnapshot !== "function") {
+    return uiState.snapshot;
+  }
+
+  const snapshot = await bridge.getAppSnapshot();
+  applyAppSnapshot(snapshot, { hydrateActivity });
+  return snapshot;
+}
+
 async function init() {
   document.body.dataset.platform = detectPlatform();
-  uiState.snapshot = await bridge.getAppSnapshot();
-  pruneWorkspaceFileExplorerState(uiState.snapshot);
-  pruneWorkspaceFileEditorState(uiState.snapshot);
-  pruneCodexRestoreState(uiState.snapshot);
-  hydrateRuntimeActivityFromSnapshot(uiState.snapshot);
-  applySnapshotSettings(uiState.snapshot);
+  await refreshAppSnapshot({ hydrateActivity: true });
 
   if (bridge.listenState) {
     await bridge.listenState((snapshot) => {
-      uiState.snapshot = snapshot;
-      pruneWorkspaceFileExplorerState(snapshot);
-      pruneWorkspaceFileEditorState(snapshot);
-      pruneCodexRestoreState(snapshot);
-      applySnapshotSettings(snapshot);
+      applyAppSnapshot(snapshot);
       if (!snapshot.activeWorkspaceId) {
         closeWorkspaceOpenMenu();
       }
@@ -5817,6 +5829,12 @@ function closeCodexModal() {
 }
 
 async function openCodexModal() {
+  try {
+    await refreshAppSnapshot();
+  } catch (error) {
+    console.error(error);
+  }
+
   const workspace = getActiveWorkspace();
   if (!workspace) {
     return;
