@@ -10129,8 +10129,9 @@ function scrollWorkspaceTabIntoView(tabs, workspaceId, behavior = "auto") {
   }
 
   const selector = `[data-action="switch-workspace"][data-workspace-id="${escapeSelectorValue(workspaceId)}"]`;
-  const activeTab = tabs.querySelector(selector);
-  if (!activeTab) {
+  const activeTabButton = tabs.querySelector(selector);
+  const activeTab = activeTabButton?.closest?.("[data-workspace-tab-shell]");
+  if (!(activeTab instanceof HTMLElement)) {
     return;
   }
 
