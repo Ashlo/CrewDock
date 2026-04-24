@@ -262,14 +262,11 @@ button {
   min-height: 34px;
   padding: 1px 2px;
   overflow: hidden;
-  border: 1px solid color-mix(in srgb, var(--chrome-divider) 58%, transparent);
-  border-radius: 12px;
+  border: 0;
+  border-radius: 0;
   background:
-    linear-gradient(180deg, color-mix(in srgb, white 2%, transparent), transparent 62%),
-    color-mix(in srgb, var(--chrome-surface) 72%, transparent);
-  box-shadow:
-    inset 0 1px 0 color-mix(in srgb, white 3%, transparent),
-    0 1px 0 rgba(0, 0, 0, 0.12);
+    linear-gradient(180deg, color-mix(in srgb, white 2%, transparent), transparent 72%);
+  box-shadow: none;
   isolation: isolate;
 }
 
@@ -500,7 +497,7 @@ button {
   flex: 1;
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 4px;
   overflow-x: auto;
   overscroll-behavior-x: contain;
   scroll-behavior: smooth;
@@ -686,61 +683,65 @@ button {
   align-items: center;
   gap: 0;
   max-width: 252px;
-  min-height: 34px;
-  margin: 1px 0;
-  border-radius: 10px;
-  border: 1px solid color-mix(in srgb, var(--tab-border) 86%, transparent);
-  background:
-    linear-gradient(180deg, color-mix(in srgb, white 2%, transparent), transparent 56%),
-    color-mix(in srgb, var(--tab-bg) 92%, transparent);
-  box-shadow:
-    inset 0 1px 0 color-mix(in srgb, white 3%, transparent),
-    0 1px 0 rgba(0, 0, 0, 0.18);
+  min-height: 32px;
+  margin: 0;
+  border-radius: 9px;
+  border: 1px solid transparent;
+  background: transparent;
+  box-shadow: none;
+  opacity: 0.72;
   transform: translateY(0);
   transition:
     border-color 160ms ease,
     background 160ms ease,
     color 160ms ease,
     box-shadow 160ms ease,
+    opacity 160ms ease,
     transform 200ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .workspace-tab-shell::after {
   content: "";
   position: absolute;
-  left: 9px;
-  right: 9px;
-  bottom: 1px;
+  left: 14px;
+  right: 14px;
+  bottom: 0;
   height: 1.5px;
   border-radius: 999px;
-  background: var(--accent);
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--accent) 36%, transparent),
+      color-mix(in srgb, var(--accent) 92%, white 8%),
+      color-mix(in srgb, var(--accent) 36%, transparent)
+    );
   opacity: 0;
-  transform: scaleX(0.5);
+  transform: scaleX(0.64);
   transition:
     opacity 160ms ease,
     transform 240ms cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .workspace-tab-shell:hover {
-  border-color: color-mix(in srgb, var(--tab-border-hover) 92%, transparent);
+  border-color: transparent;
   background:
-    linear-gradient(180deg, color-mix(in srgb, white 2.4%, transparent), transparent 54%),
-    color-mix(in srgb, var(--tab-bg-hover) 94%, transparent);
-  box-shadow:
-    inset 0 1px 0 color-mix(in srgb, white 4%, transparent),
-    0 5px 12px rgba(0, 0, 0, 0.18);
-  transform: translateY(-1px);
+    linear-gradient(180deg, color-mix(in srgb, white 3%, transparent), transparent 62%),
+    color-mix(in srgb, var(--tab-bg-hover) 42%, transparent);
+  box-shadow: none;
+  opacity: 0.92;
+  transform: translateY(0);
 }
 
 .workspace-tab-shell.is-active {
-  border-color: color-mix(in srgb, var(--tab-border-active) 88%, var(--tab-border) 12%);
+  border-color: color-mix(in srgb, var(--tab-border-active) 34%, transparent);
   background:
-    linear-gradient(180deg, color-mix(in srgb, white 3.2%, transparent), transparent 52%),
-    color-mix(in srgb, var(--tab-bg-active) 96%, transparent);
+    linear-gradient(180deg, color-mix(in srgb, white 5%, transparent), transparent 58%),
+    color-mix(in srgb, var(--tab-bg-active) 68%, transparent);
   box-shadow: 
-    inset 0 1px 0 color-mix(in srgb, white 7%, transparent),
-    0 8px 18px rgba(0, 0, 0, 0.22),
-    0 0 0 1px color-mix(in srgb, var(--accent) 10%, transparent);
+    inset 0 1px 0 color-mix(in srgb, white 8%, transparent),
+    0 5px 14px rgba(0, 0, 0, 0.12);
+  opacity: 1;
+  transform: translateY(0);
 }
 
 .workspace-tab-shell.is-active::after {
@@ -758,19 +759,19 @@ button {
   flex: 1;
   display: flex;
   align-items: center;
-  gap: 9px;
+  gap: 8px;
   padding: 0 11px;
-  min-height: 34px;
+  min-height: 32px;
 }
 
 .workspace-tab-status {
-  width: 7px;
-  height: 7px;
+  width: 6px;
+  height: 6px;
   flex: 0 0 auto;
   border-radius: 50%;
   background: color-mix(in srgb, var(--muted) 72%, transparent);
   box-shadow: 0 0 0 1px color-mix(in srgb, white 6%, transparent);
-  opacity: 0.62;
+  opacity: 0.52;
   transition: all 200ms ease;
 }
 
@@ -790,15 +791,15 @@ button {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--tab-text);
-  font-size: 0.84rem;
-  letter-spacing: -0.012em;
-  font-weight: 535;
+  font-size: 0.82rem;
+  letter-spacing: 0;
+  font-weight: 560;
   transition: color 160ms ease;
 }
 
 .workspace-tab-shell.is-active .workspace-tab-name {
   color: var(--tab-text-active);
-  font-weight: 610;
+  font-weight: 650;
 }
 
 .workspace-tab-action {
