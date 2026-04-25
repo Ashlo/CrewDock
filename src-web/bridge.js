@@ -17,6 +17,17 @@ export function createBridge({
   mockLoadWorkspaceFileExplorerDirectory,
 } = {}) {
   const tauriApi = window.__TAURI__;
+  const mockPlatform = (() => {
+    const agent = typeof navigator === "undefined" ? "" : navigator.userAgent || "";
+    if (/Windows/.test(agent)) {
+      return "windows";
+    }
+    if (/Mac|iPhone|iPad/.test(agent)) {
+      return "macos";
+    }
+    return "other";
+  })();
+  const mockShellLabel = mockPlatform === "windows" ? "pwsh.exe" : "/bin/zsh";
 
   if (tauriApi?.core?.invoke) {
     return {
@@ -39,6 +50,13 @@ export function createBridge({
         tauriApi.core.invoke("set_terminal_font_size", { terminalFontSize }),
       setOpenAiApiKey: (openaiApiKey) =>
         tauriApi.core.invoke("set_openai_api_key", { openaiApiKey }),
+      setTelemetryPreferences: (telemetryEnabled, telemetryHost) =>
+        tauriApi.core.invoke("set_telemetry_preferences", {
+          telemetryEnabled,
+          telemetryHost,
+        }),
+      setPostHogProjectApiKey: (posthogProjectApiKey) =>
+        tauriApi.core.invoke("set_posthog_project_api_key", { posthogProjectApiKey }),
       setCodexCliPath: (codexCliPath) =>
         tauriApi.core.invoke("set_codex_cli_path", { codexCliPath }),
       refreshCodexCliCatalog: () =>
@@ -131,8 +149,10 @@ export function createBridge({
         tauriApi.core.invoke("split_pane", { paneId, direction }),
       closePane: (paneId) =>
         tauriApi.core.invoke("close_pane", { paneId }),
+      showInFileManager: (path) =>
+        tauriApi.core.invoke("show_in_file_manager", { path }),
       showInFinder: (path) =>
-        tauriApi.core.invoke("show_in_finder", { path }),
+        tauriApi.core.invoke("show_in_file_manager", { path }),
       listExternalWorkspaceTargets: () =>
         tauriApi.core.invoke("list_external_workspace_targets"),
       openWorkspaceInTarget: (path, targetId) =>
@@ -231,6 +251,12 @@ function createMockBridge({
     terminalFontSize: 13.5,
     hasStoredOpenAiApiKey: false,
     hasEnvironmentOpenAiApiKey: false,
+    telemetry: {
+      enabled: false,
+      host: "https://us.i.posthog.com",
+      hasStoredPostHogProjectApiKey: false,
+      isConfigured: false,
+    },
     dismissedAppUpdateVersion: null,
     appUpdateLastCheckedAtMs: null,
     codexCli: {
@@ -283,10 +309,42 @@ function createMockBridge({
     { id: "vscode", label: "VS Code", kind: "editor", iconDataUrl: createMockWorkspaceTargetIconDataUrl("VS", "#1264d1") },
     { id: "windsurf", label: "Windsurf", kind: "editor", iconDataUrl: createMockWorkspaceTargetIconDataUrl("W", "#1766d6") },
     { id: "zed", label: "Zed", kind: "editor", iconDataUrl: createMockWorkspaceTargetIconDataUrl("Z", "#1d2128") },
-    { id: "finder", label: "Finder", kind: "system", iconDataUrl: createMockWorkspaceTargetIconDataUrl("F", "#2b82f6") },
-    { id: "terminal", label: "Terminal", kind: "system", iconDataUrl: createMockWorkspaceTargetIconDataUrl(">", "#17191d") },
-    { id: "iterm2", label: "iTerm2", kind: "system", iconDataUrl: createMockWorkspaceTargetIconDataUrl("I", "#111315") },
+    ...(mockPlatform === "windows"
+      ? []
+      : [
+          { id: "xcode", label: "Xcode", kind: "editor", iconDataUrl: createMockWorkspaceTargetIconDataUrl("X", "#0f1116") },
+        ]),
+    {
+      id: "finder",
+      label: mockPlatform === "windows" ? "Explorer" : "Finder",
+      kind: "system",
+      iconDataUrl: createMockWorkspaceTargetIconDataUrl(
+        mockPlatform === "windows" ? "E" : "F",
+        "#2b82f6",
+      ),
+    },
+    {
+      id: "terminal",
+      label: mockPlatform === "windows" ? "Windows Terminal" : "Terminal",
+      kind: "system",
+      iconDataUrl: createMockWorkspaceTargetIconDataUrl(">", "#17191d"),
+    },
+    ...(mockPlatform === "windows"
+      ? []
+      : [
+          { id: "iterm2", label: "iTerm2", kind: "system", iconDataUrl: createMockWorkspaceTargetIconDataUrl("I", "#111315") },
+        ]),
     { id: "warp", label: "Warp", kind: "system", iconDataUrl: createMockWorkspaceTargetIconDataUrl("W", "#d9dee8", "#1b1f27") },
+    ...(mockPlatform === "windows"
+      ? [
+          {
+            id: "android-studio",
+            label: "Android Studio",
+            kind: "editor",
+            iconDataUrl: createMockWorkspaceTargetIconDataUrl("A", "#2b8248"),
+          },
+        ]
+      : []),
   ];
 
   function emitState() {
@@ -434,7 +492,7 @@ function createMockBridge({
             `CrewDock shell session attached\r\n` +
             `Session: ${currentPane.label}\r\n` +
             `Layout: ${workspace.layout.label}\r\n` +
-            `Shell: /bin/zsh\r\n` +
+            `Shell: ${mockShellLabel}\r\n` +
             `Directory: ${workspace.path}\r\n\r\n` +
             `This is the mock fallback bridge. Type here and the session will echo.\r\n$ `,
         });
@@ -981,6 +1039,18 @@ function createMockBridge({
       settings.hasStoredOpenAiApiKey = Boolean(String(openaiApiKey || "").trim());
       return emitState();
     },
+    setTelemetryPreferences: async (telemetryEnabled, telemetryHost) => {
+      const normalizedHost = String(telemetryHost || "").trim();
+      settings.telemetry.enabled = Boolean(telemetryEnabled);
+      settings.telemetry.host = normalizedHost || "https://us.i.posthog.com";
+      settings.telemetry.isConfigured = settings.telemetry.enabled && settings.telemetry.hasStoredPostHogProjectApiKey;
+      return emitState();
+    },
+    setPostHogProjectApiKey: async (posthogProjectApiKey) => {
+      settings.telemetry.hasStoredPostHogProjectApiKey = Boolean(String(posthogProjectApiKey || "").trim());
+      settings.telemetry.isConfigured = settings.telemetry.enabled && settings.telemetry.hasStoredPostHogProjectApiKey;
+      return emitState();
+    },
     setCodexCliPath: async (codexCliPath) => {
       const normalized = typeof codexCliPath === "string" ? codexCliPath.trim() : "";
       settings.codexCli.configuredPath = normalized || null;
@@ -1419,7 +1489,7 @@ function createMockBridge({
               `CrewDock shell session attached\r\n` +
               `Session: ${pane.label}\r\n` +
               `Layout: ${workspace.layout.label}\r\n` +
-              `Shell: /bin/zsh\r\n` +
+              `Shell: ${mockShellLabel}\r\n` +
               `Directory: ${workspace.path}\r\n\r\n$ `,
           });
         }, 120);
@@ -1468,6 +1538,7 @@ function createMockBridge({
       }
       return snapshot;
     },
+    showInFileManager: async () => {},
     showInFinder: async () => {},
     listExternalWorkspaceTargets: async () =>
       structuredClone(mockExternalWorkspaceTargets),

@@ -1,6 +1,7 @@
 use std::{
     env,
     io::{Read, Write},
+    path::Path,
     sync::{Arc, Mutex},
 };
 
@@ -113,7 +114,7 @@ fn spawn_terminal_session(
         .map_err(|error| format!("failed to open PTY: {error}"))?;
 
     let mut command = CommandBuilder::new(&shell);
-    command.arg("-l");
+    configure_shell_launch(&mut command, &shell);
     command.cwd(&cwd);
     strip_tooling_env(&mut command);
     command.env("TERM", "xterm-256color");
@@ -217,6 +218,30 @@ fn strip_tooling_env(command: &mut CommandBuilder) {
             command.env_remove(key.as_ref());
         }
     }
+}
+
+fn configure_shell_launch(command: &mut CommandBuilder, shell: &str) {
+    if cfg!(target_os = "windows") {
+        if shell_basename(shell).is_some_and(|name| {
+            matches!(
+                name.as_str(),
+                "pwsh" | "pwsh.exe" | "powershell" | "powershell.exe"
+            )
+        }) {
+            command.arg("-NoLogo");
+        }
+        return;
+    }
+
+    command.arg("-l");
+}
+
+fn shell_basename(shell: &str) -> Option<String> {
+    Path::new(shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.trim().to_ascii_lowercase())
+        .filter(|name| !name.is_empty())
 }
 
 fn stream_terminal_output(

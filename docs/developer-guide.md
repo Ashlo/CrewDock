@@ -150,7 +150,8 @@ Two important details:
 `RuntimeState` in `src-tauri/src/lib.rs` owns:
 
 - `next_id` for workspace and pane identifiers
-- `shell` resolved from `SHELL` or defaulting to `/bin/zsh`
+- `shell` resolved per platform: PowerShell or `cmd.exe` on Windows, `SHELL`
+  or `/bin/zsh` elsewhere
 - `launcher` state including layout presets and current base path
 - `settings` including theme, interface text scale, terminal font size, and an
   optional stored OpenAI API key
@@ -219,7 +220,7 @@ These commands are the main frontend-backend boundary today:
   `close_workspace`, `split_pane`, `close_pane`
 - Launcher and shell plumbing:
   `run_launcher_command`, `complete_launcher_input`, `write_to_pane`,
-  `resize_pane`, `show_in_finder`
+  `resize_pane`, `show_in_file_manager`
 - Source control:
   `refresh_workspace_git_status`, `load_workspace_source_control`,
   `load_workspace_git_diff`, `load_workspace_git_commit_detail`,
@@ -422,7 +423,7 @@ npm run dev
 Notes:
 
 - `npm install` copies `xterm.js` assets into `src-web/vendor/`.
-- `npm run dev` currently shells out to `cargo run` for the Tauri crate.
+- `npm run dev` runs `cargo tauri dev`.
 - There is no separate frontend bundler or dev server at the moment.
 
 ## Tests
@@ -485,8 +486,8 @@ A new contributor should know these constraints up front:
   parsing, persistence, and tests.
 - The launcher only supports directory navigation, not general shell commands.
 - Persistence restores metadata, not existing PTY process state.
-- `show_in_finder` is currently implemented with macOS `open`, so that behavior
-  is platform-specific.
+- `show_in_file_manager` uses the platform file-manager launcher (`open`,
+  `explorer`, or `xdg-open`), so behavior still varies a bit by OS.
 - Git refresh is polling-based.
 
 These are not accidental. The repo is still in an early-stage, working-spike

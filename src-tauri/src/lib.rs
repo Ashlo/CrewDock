@@ -2,6 +2,7 @@ mod events;
 mod persistence;
 mod session_manager;
 mod source_control;
+mod telemetry;
 mod workspace_manager;
 
 #[cfg(unix)]
@@ -23,6 +24,7 @@ use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use portable_pty::{ChildKiller, PtySize};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sysinfo::{CpuRefreshKind, DiskRefreshKind, Disks, MemoryRefreshKind, RefreshKind, System};
 use tauri::{AppHandle, Manager, State};
 
@@ -108,6 +110,7 @@ struct RuntimeState {
     shell: String,
     launcher: LauncherSnapshot,
     settings: SettingsRecord,
+    telemetry_launch_event_sent: bool,
     codex_cli: CodexCliSnapshot,
     workspaces: Vec<WorkspaceRecord>,
     active_workspace_id: Option<String>,
@@ -188,6 +191,10 @@ struct SettingsRecord {
     terminal_font_size: f64,
     openai_api_key: Option<String>,
     codex_cli_path: Option<String>,
+    telemetry_enabled: bool,
+    telemetry_install_id: String,
+    telemetry_host: String,
+    posthog_project_api_key: Option<String>,
     dismissed_app_update_version: Option<String>,
     app_update_last_checked_at_ms: Option<u64>,
 }
@@ -200,6 +207,10 @@ impl Default for SettingsRecord {
             terminal_font_size: DEFAULT_TERMINAL_FONT_SIZE,
             openai_api_key: None,
             codex_cli_path: None,
+            telemetry_enabled: false,
+            telemetry_install_id: telemetry::generate_install_id(),
+            telemetry_host: telemetry::default_posthog_host(),
+            posthog_project_api_key: None,
             dismissed_app_update_version: None,
             app_update_last_checked_at_ms: None,
         }
@@ -210,12 +221,13 @@ impl RuntimeState {
     fn seeded() -> Self {
         Self {
             next_id: 0,
-            shell: env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into()),
+            shell: default_runtime_shell(),
             launcher: LauncherSnapshot {
                 presets: layout_presets(),
                 base_path: default_launcher_path(),
             },
             settings: SettingsRecord::default(),
+            telemetry_launch_event_sent: false,
             codex_cli: CodexCliSnapshot::unavailable("CrewDock has not scanned for Codex CLI yet."),
             workspaces: Vec::new(),
             active_workspace_id: None,
@@ -274,6 +286,7 @@ impl RuntimeState {
                 has_stored_openai_api_key: self.settings.openai_api_key.is_some(),
                 has_environment_openai_api_key: has_openai_api_key_in_environment(),
                 codex_cli: self.codex_cli.clone(),
+                telemetry: telemetry::build_settings_snapshot(self),
                 dismissed_app_update_version: self.settings.dismissed_app_update_version.clone(),
                 app_update_last_checked_at_ms: self.settings.app_update_last_checked_at_ms,
             },
@@ -412,6 +425,7 @@ struct SettingsSnapshot {
     #[serde(rename = "hasEnvironmentOpenAiApiKey")]
     has_environment_openai_api_key: bool,
     codex_cli: CodexCliSnapshot,
+    telemetry: telemetry::TelemetrySettingsSnapshot,
     dismissed_app_update_version: Option<String>,
     app_update_last_checked_at_ms: Option<u64>,
 }
@@ -600,7 +614,6 @@ struct SystemHealthSnapshot {
 #[serde(rename_all = "camelCase")]
 enum SystemHealthAvailability {
     Ready,
-    Unavailable,
     Error,
 }
 
@@ -1178,6 +1191,10 @@ fn detect_codex_cli_snapshot(configured_path: Option<&str>) -> CodexCliSnapshot 
 }
 
 fn sync_process_path_with_login_shell(shell: &str) {
+    if cfg!(target_os = "windows") {
+        return;
+    }
+
     let current_path = env::var_os("PATH");
     let Some(login_shell_path) = read_login_shell_path(shell) else {
         return;
@@ -1548,7 +1565,12 @@ fn normalize_app_release_version(value: &str) -> Option<String> {
     }
 
     let candidate = trimmed.split_whitespace().next().unwrap_or("").trim();
-    if candidate.is_empty() || !candidate.chars().next().is_some_and(|character| character.is_ascii_digit()) {
+    if candidate.is_empty()
+        || !candidate
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_digit())
+    {
         return None;
     }
 
@@ -1593,6 +1615,7 @@ fn compare_app_versions(left: &str, right: &str) -> Ordering {
     Ordering::Equal
 }
 
+#[cfg(test)]
 fn current_release_arch_label() -> &'static str {
     match env::consts::ARCH {
         "aarch64" => "arm64",
@@ -1600,34 +1623,108 @@ fn current_release_arch_label() -> &'static str {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReleaseDownloadPlatform {
+    MacOs,
+    Windows,
+    Other,
+}
+
+fn current_release_download_platform() -> ReleaseDownloadPlatform {
+    if cfg!(target_os = "windows") {
+        ReleaseDownloadPlatform::Windows
+    } else if cfg!(target_os = "macos") {
+        ReleaseDownloadPlatform::MacOs
+    } else {
+        ReleaseDownloadPlatform::Other
+    }
+}
+
+fn release_arch_aliases_for_platform(platform: ReleaseDownloadPlatform) -> Vec<&'static str> {
+    match (platform, env::consts::ARCH) {
+        (ReleaseDownloadPlatform::Windows, "x86_64") => vec!["x64", "x86_64", "amd64"],
+        (_, "x86_64") => vec!["x86_64", "x64", "amd64"],
+        (_, "aarch64") => vec!["arm64", "aarch64"],
+        (_, "x86") => vec!["x86", "i686", "i386"],
+        (_, arch) => match arch {
+            "x86_64" => vec!["x86_64"],
+            "aarch64" => vec!["arm64"],
+            "x86" => vec!["x86"],
+            _ => vec![arch],
+        },
+    }
+}
+
+fn release_asset_kind_rank(platform: ReleaseDownloadPlatform, asset_name: &str) -> Option<u8> {
+    match platform {
+        ReleaseDownloadPlatform::MacOs => {
+            (asset_name.ends_with(".dmg") && !asset_name.ends_with(".dmg.sha256")).then_some(0)
+        }
+        ReleaseDownloadPlatform::Windows => {
+            if asset_name.ends_with("-setup.exe") || asset_name.ends_with("_setup.exe") {
+                Some(0)
+            } else if asset_name.ends_with(".msi") {
+                Some(1)
+            } else if asset_name.ends_with(".exe") {
+                Some(2)
+            } else {
+                None
+            }
+        }
+        ReleaseDownloadPlatform::Other => None,
+    }
+}
+
+fn release_asset_matches_arch(asset_name: &str, arch_aliases: &[&str]) -> bool {
+    arch_aliases.iter().any(|alias| asset_name.contains(alias))
+}
+
+fn resolve_release_download_url_for_platform(
+    release: &GithubReleaseApiResponse,
+    latest_version: &str,
+    platform: ReleaseDownloadPlatform,
+) -> Option<String> {
+    let normalized_version = latest_version.to_lowercase();
+    let arch_aliases = release_arch_aliases_for_platform(platform);
+    let candidates = release
+        .assets
+        .iter()
+        .filter_map(|asset| {
+            let name = asset.name.to_lowercase();
+            let rank = release_asset_kind_rank(platform, &name)?;
+            Some((asset, name, rank))
+        })
+        .collect::<Vec<_>>();
+
+    for require_version in [true, false] {
+        let matching = candidates
+            .iter()
+            .filter(|(_, name, _)| !require_version || name.contains(&normalized_version))
+            .filter(|(_, name, _)| release_asset_matches_arch(name, arch_aliases.as_slice()))
+            .min_by_key(|(_, _, rank)| *rank)
+            .map(|(asset, _, _)| asset.browser_download_url.clone());
+        if matching.is_some() {
+            return matching;
+        }
+    }
+
+    candidates
+        .iter()
+        .filter(|(_, name, _)| name.contains(&normalized_version))
+        .min_by_key(|(_, _, rank)| *rank)
+        .or_else(|| candidates.iter().min_by_key(|(_, _, rank)| *rank))
+        .map(|(asset, _, _)| asset.browser_download_url.clone())
+}
+
 fn resolve_release_download_url(
     release: &GithubReleaseApiResponse,
     latest_version: &str,
 ) -> Option<String> {
-    let arch = current_release_arch_label().to_lowercase();
-    let normalized_version = latest_version.to_lowercase();
-    let dmg_assets: Vec<&GithubReleaseAssetResponse> = release
-        .assets
-        .iter()
-        .filter(|asset| {
-            let name = asset.name.to_lowercase();
-            name.ends_with(".dmg") && !name.ends_with(".dmg.sha256")
-        })
-        .collect();
-
-    dmg_assets
-        .iter()
-        .find(|asset| {
-            let name = asset.name.to_lowercase();
-            name.contains(&arch) && name.contains(&normalized_version)
-        })
-        .or_else(|| {
-            dmg_assets
-                .iter()
-                .find(|asset| asset.name.to_lowercase().contains(&arch))
-        })
-        .or_else(|| dmg_assets.first())
-        .map(|asset| asset.browser_download_url.clone())
+    resolve_release_download_url_for_platform(
+        release,
+        latest_version,
+        current_release_download_platform(),
+    )
 }
 
 async fn fetch_latest_app_release() -> Result<Option<AppUpdateRelease>, String> {
@@ -1696,8 +1793,12 @@ fn build_app_update_snapshot(
         release_name: release.as_ref().and_then(|entry| entry.name.clone()),
         release_notes: release.as_ref().and_then(|entry| entry.notes.clone()),
         release_url: release.as_ref().map(|entry| entry.release_url.clone()),
-        download_url: release.as_ref().and_then(|entry| entry.download_url.clone()),
-        published_at: release.as_ref().and_then(|entry| entry.published_at.clone()),
+        download_url: release
+            .as_ref()
+            .and_then(|entry| entry.download_url.clone()),
+        published_at: release
+            .as_ref()
+            .and_then(|entry| entry.published_at.clone()),
         checked_at_ms,
         dismissed_version,
         is_available,
@@ -1727,7 +1828,10 @@ fn load_workspace_codex_sessions_snapshot(
         if sessions.iter().any(|session| session.id == *session_id) {
             false
         } else if let Some(record) = find_codex_session_record_by_id(session_id) {
-            sessions.push(build_codex_session_match_snapshot(record, Some(session_id.as_str())));
+            sessions.push(build_codex_session_match_snapshot(
+                record,
+                Some(session_id.as_str()),
+            ));
             sessions.sort_by(|left, right| {
                 right
                     .last_active_at_ms
@@ -1954,11 +2058,10 @@ fn maybe_auto_restore_codex_for_ready_pane(
             let restore_cwd = find_codex_session_record_by_id(&binding.session_id)
                 .map(|record| record.meta.cwd)
                 .unwrap_or_else(|| binding.cwd.clone());
-            let command = format!(
-                "{} resume {} -C {}\n",
-                shell_escape(&codex_binary),
-                shell_escape(&binding.session_id),
-                shell_escape(&restore_cwd),
+            let command = build_shell_command(
+                &runtime.shell,
+                &codex_binary,
+                &["resume", &binding.session_id, "-C", &restore_cwd],
             );
             (
                 Some(writer),
@@ -2995,33 +3098,82 @@ fn workspace_file_explorer_sort_bucket(kind: WorkspaceFileExplorerEntryKind) -> 
     }
 }
 
-fn shell_escape(value: &str) -> String {
-    if value.is_empty() {
-        return "''".to_string();
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellCommandFlavor {
+    Posix,
+    PowerShell,
+    CommandPrompt,
+}
 
-    let escaped = value.replace('\'', "'\"'\"'");
-    format!("'{escaped}'")
+fn shell_command_flavor(shell: &str) -> ShellCommandFlavor {
+    let basename = Path::new(shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .map(|name| name.trim().to_ascii_lowercase());
+
+    match basename.as_deref() {
+        Some("pwsh") | Some("pwsh.exe") | Some("powershell") | Some("powershell.exe") => {
+            ShellCommandFlavor::PowerShell
+        }
+        Some("cmd") | Some("cmd.exe") => ShellCommandFlavor::CommandPrompt,
+        _ if cfg!(target_os = "windows") => ShellCommandFlavor::PowerShell,
+        _ => ShellCommandFlavor::Posix,
+    }
+}
+
+fn shell_escape(value: &str, flavor: ShellCommandFlavor) -> String {
+    match flavor {
+        ShellCommandFlavor::Posix => {
+            if value.is_empty() {
+                return "''".to_string();
+            }
+
+            let escaped = value.replace('\'', "'\"'\"'");
+            format!("'{escaped}'")
+        }
+        ShellCommandFlavor::PowerShell => {
+            if value.is_empty() {
+                return "''".to_string();
+            }
+
+            let escaped = value.replace('\'', "''");
+            format!("'{escaped}'")
+        }
+        ShellCommandFlavor::CommandPrompt => {
+            let escaped = value.replace('"', "\"\"");
+            format!("\"{escaped}\"")
+        }
+    }
+}
+
+fn build_shell_command(shell: &str, program: &str, args: &[&str]) -> String {
+    let flavor = shell_command_flavor(shell);
+    let escaped_program = shell_escape(program, flavor);
+    let escaped_args = args
+        .iter()
+        .map(|argument| shell_escape(argument, flavor))
+        .collect::<Vec<_>>();
+    let command = match flavor {
+        ShellCommandFlavor::PowerShell => {
+            if escaped_args.is_empty() {
+                format!("& {escaped_program}")
+            } else {
+                format!("& {escaped_program} {}", escaped_args.join(" "))
+            }
+        }
+        ShellCommandFlavor::Posix | ShellCommandFlavor::CommandPrompt => {
+            if escaped_args.is_empty() {
+                escaped_program
+            } else {
+                format!("{escaped_program} {}", escaped_args.join(" "))
+            }
+        }
+    };
+
+    format!("{command}\n")
 }
 
 impl SystemHealthSnapshot {
-    fn unavailable(message: impl Into<String>) -> Self {
-        Self {
-            availability: SystemHealthAvailability::Unavailable,
-            cpu_percent: 0.0,
-            memory_used_bytes: 0,
-            memory_total_bytes: 0,
-            memory_percent: 0.0,
-            disk_used_bytes: 0,
-            disk_total_bytes: 0,
-            disk_percent: 0.0,
-            battery_percent: None,
-            battery_state: None,
-            last_refreshed_at_ms: current_timestamp_ms(),
-            error_message: Some(message.into()),
-        }
-    }
-
     fn error(message: impl Into<String>) -> Self {
         Self {
             availability: SystemHealthAvailability::Error,
@@ -3057,12 +3209,6 @@ impl SystemHealthMonitor {
     }
 
     fn collect_snapshot(&mut self) -> Result<SystemHealthSnapshot, String> {
-        if !cfg!(target_os = "macos") {
-            return Ok(SystemHealthSnapshot::unavailable(
-                "System monitoring is available on macOS only.",
-            ));
-        }
-
         self.system.refresh_cpu_usage();
         self.system.refresh_memory();
         self.disks.refresh(true);
@@ -3223,11 +3369,31 @@ enum PersistedPaneLayout {
 
 #[tauri::command]
 fn get_app_snapshot(state: State<'_, AppState>) -> Result<AppSnapshot, String> {
-    let runtime = state
-        .inner
-        .lock()
-        .map_err(|_| "failed to acquire application state".to_string())?;
-    Ok(runtime.build_snapshot())
+    let (snapshot, launch_event_properties) = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        let launch_event_properties = if runtime.telemetry_launch_event_sent {
+            None
+        } else {
+            runtime.telemetry_launch_event_sent = true;
+            Some(telemetry::object(json!({
+                "workspaceCount": runtime.workspaces.len(),
+                "hasActiveWorkspace": runtime.active_workspace_id.is_some(),
+                "source": "app_snapshot",
+            })))
+        };
+
+        (runtime.build_snapshot(), launch_event_properties)
+    };
+
+    if let Some(properties) = launch_event_properties {
+        telemetry::queue_event(&state.inner, "app_opened", properties);
+    }
+
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -3318,6 +3484,38 @@ fn open_external_url(url: String) -> Result<(), String> {
     Err("opening external URLs is not supported on this platform".to_string())
 }
 
+fn open_path_in_file_manager(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        ProcessCommand::new("open")
+            .arg(path)
+            .spawn()
+            .map_err(|error| format!("failed to open Finder: {error}"))?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        ProcessCommand::new("xdg-open")
+            .arg(path)
+            .spawn()
+            .map_err(|error| format!("failed to open file manager: {error}"))?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        ProcessCommand::new("explorer")
+            .arg(path)
+            .spawn()
+            .map_err(|error| format!("failed to open Explorer: {error}"))?;
+        return Ok(());
+    }
+
+    #[allow(unreachable_code)]
+    Err("opening a file manager is not supported on this platform".to_string())
+}
+
 #[tauri::command]
 fn load_system_health_snapshot(
     state: State<'_, SystemHealthState>,
@@ -3327,13 +3525,9 @@ fn load_system_health_snapshot(
         .lock()
         .map_err(|_| "failed to acquire system monitor state".to_string())?;
 
-    monitor.collect_snapshot().or_else(|error| {
-        if cfg!(target_os = "macos") {
-            Ok(SystemHealthSnapshot::error(error))
-        } else {
-            Ok(SystemHealthSnapshot::unavailable(error))
-        }
-    })
+    monitor
+        .collect_snapshot()
+        .or_else(|error| Ok(SystemHealthSnapshot::error(error)))
 }
 
 #[tauri::command]
@@ -3381,6 +3575,14 @@ fn create_workspace(
     };
 
     spawn_pane_jobs(shared, app.clone(), shell, pane_jobs);
+    telemetry::queue_event(
+        &state.inner,
+        "workspace_created",
+        telemetry::object(json!({
+            "paneCount": pane_count,
+            "workspaceCount": snapshot.window.workspace_count,
+        })),
+    );
     Ok(snapshot)
 }
 
@@ -3529,6 +3731,13 @@ fn switch_workspace(
     };
 
     spawn_pane_jobs(shared, app.clone(), shell, pane_jobs);
+    telemetry::queue_event(
+        &state.inner,
+        "workspace_switched",
+        telemetry::object(json!({
+            "workspaceCount": snapshot.window.workspace_count,
+        })),
+    );
     Ok(snapshot)
 }
 
@@ -3605,13 +3814,9 @@ fn close_pane(
 }
 
 #[tauri::command]
-fn show_in_finder(path: String) -> Result<(), String> {
+fn show_in_file_manager(path: String) -> Result<(), String> {
     let target = normalize_workspace_path(&path)?;
-    std::process::Command::new("open")
-        .arg(target)
-        .spawn()
-        .map_err(|error| format!("failed to open Finder: {error}"))?;
-    Ok(())
+    open_path_in_file_manager(&target)
 }
 
 fn external_workspace_target_spec(target_id: &str) -> Option<ExternalWorkspaceTargetSpec> {
@@ -3619,6 +3824,136 @@ fn external_workspace_target_spec(target_id: &str) -> Option<ExternalWorkspaceTa
         .iter()
         .copied()
         .find(|spec| spec.id == target_id)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_env_dir(name: &str) -> Option<PathBuf> {
+    env::var_os(name)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_target_path_candidates(spec: ExternalWorkspaceTargetSpec) -> &'static [&'static str] {
+    match spec.id {
+        "cursor" => &["cursor.exe", "cursor.cmd", "cursor.bat"],
+        "vscode" => &["code.exe", "code.cmd", "code.bat"],
+        "windsurf" => &["windsurf.exe", "windsurf.cmd", "windsurf.bat"],
+        "zed" => &["zed.exe"],
+        "terminal" => &["wt.exe"],
+        "warp" => &["warp.exe"],
+        "android-studio" => &["studio64.exe", "studio.exe"],
+        _ => &[],
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_known_target_install_paths(spec: ExternalWorkspaceTargetSpec) -> Vec<PathBuf> {
+    let local_app_data = windows_env_dir("LOCALAPPDATA");
+    let program_files = windows_env_dir("ProgramFiles");
+    let program_files_x86 = windows_env_dir("ProgramFiles(x86)");
+    let mut candidates = Vec::new();
+
+    match spec.id {
+        "cursor" => {
+            if let Some(root) = &local_app_data {
+                candidates.push(root.join("Programs").join("Cursor").join("Cursor.exe"));
+            }
+            if let Some(root) = &program_files {
+                candidates.push(root.join("Cursor").join("Cursor.exe"));
+            }
+        }
+        "vscode" => {
+            if let Some(root) = &local_app_data {
+                candidates.push(
+                    root.join("Programs")
+                        .join("Microsoft VS Code")
+                        .join("Code.exe"),
+                );
+            }
+            if let Some(root) = &program_files {
+                candidates.push(root.join("Microsoft VS Code").join("Code.exe"));
+            }
+            if let Some(root) = &program_files_x86 {
+                candidates.push(root.join("Microsoft VS Code").join("Code.exe"));
+            }
+        }
+        "windsurf" => {
+            if let Some(root) = &local_app_data {
+                candidates.push(root.join("Programs").join("Windsurf").join("Windsurf.exe"));
+            }
+            if let Some(root) = &program_files {
+                candidates.push(root.join("Windsurf").join("Windsurf.exe"));
+            }
+        }
+        "zed" => {
+            if let Some(root) = &local_app_data {
+                candidates.push(root.join("Programs").join("Zed").join("Zed.exe"));
+            }
+            if let Some(root) = &program_files {
+                candidates.push(root.join("Zed").join("Zed.exe"));
+            }
+        }
+        "terminal" => {
+            if let Some(root) = &local_app_data {
+                candidates.push(root.join("Microsoft").join("WindowsApps").join("wt.exe"));
+            }
+        }
+        "warp" => {
+            if let Some(root) = &local_app_data {
+                candidates.push(root.join("Programs").join("Warp").join("Warp.exe"));
+            }
+            if let Some(root) = &program_files {
+                candidates.push(root.join("Warp").join("Warp.exe"));
+            }
+        }
+        "android-studio" => {
+            if let Some(root) = &program_files {
+                candidates.push(
+                    root.join("Android")
+                        .join("Android Studio")
+                        .join("bin")
+                        .join("studio64.exe"),
+                );
+                candidates.push(
+                    root.join("Android")
+                        .join("Android Studio")
+                        .join("bin")
+                        .join("studio.exe"),
+                );
+            }
+            if let Some(root) = &program_files_x86 {
+                candidates.push(
+                    root.join("Android")
+                        .join("Android Studio")
+                        .join("bin")
+                        .join("studio64.exe"),
+                );
+                candidates.push(
+                    root.join("Android")
+                        .join("Android Studio")
+                        .join("bin")
+                        .join("studio.exe"),
+                );
+            }
+        }
+        _ => {}
+    }
+
+    candidates
+}
+
+#[cfg(target_os = "windows")]
+fn windows_target_command_path(spec: ExternalWorkspaceTargetSpec) -> Option<PathBuf> {
+    for candidate in windows_target_path_candidates(spec) {
+        if let Some(path) = resolve_binary_on_path(candidate) {
+            return Some(path);
+        }
+    }
+
+    windows_known_target_install_paths(spec)
+        .into_iter()
+        .find(|candidate| candidate.is_file())
 }
 
 #[cfg(target_os = "macos")]
@@ -3651,7 +3986,15 @@ fn external_workspace_target_app_path(spec: ExternalWorkspaceTargetSpec) -> Opti
         .find(|candidate| candidate.is_dir())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn external_workspace_target_app_path(spec: ExternalWorkspaceTargetSpec) -> Option<PathBuf> {
+    match spec.id {
+        "finder" => Some(PathBuf::from("explorer.exe")),
+        _ => windows_target_command_path(spec),
+    }
+}
+
+#[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
 fn external_workspace_target_app_path(_spec: ExternalWorkspaceTargetSpec) -> Option<PathBuf> {
     None
 }
@@ -3798,13 +4141,71 @@ fn load_external_workspace_target_icon_data_url(
     None
 }
 
+fn external_workspace_target_display_label(spec: ExternalWorkspaceTargetSpec) -> &'static str {
+    #[cfg(target_os = "windows")]
+    match spec.id {
+        "finder" => return "Explorer",
+        "terminal" => return "Windows Terminal",
+        _ => {}
+    }
+
+    spec.label
+}
+
+#[cfg(target_os = "windows")]
+fn percent_encode_uri_component(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(*byte as char)
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
+#[cfg(target_os = "windows")]
+fn spawn_windows_target_command(
+    command_path: &Path,
+    args: &[String],
+    current_dir: Option<&Path>,
+    target_label: &str,
+) -> Result<(), String> {
+    let extension = command_path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(|value| value.trim().to_ascii_lowercase());
+    let mut command = if matches!(extension.as_deref(), Some("cmd" | "bat")) {
+        let mut process = ProcessCommand::new("cmd");
+        process.arg("/C").arg(command_path);
+        process
+    } else {
+        ProcessCommand::new(command_path)
+    };
+
+    if let Some(directory) = current_dir {
+        command.current_dir(directory);
+    }
+
+    for argument in args {
+        command.arg(argument);
+    }
+
+    command
+        .spawn()
+        .map_err(|error| format!("failed to open {target_label}: {error}"))?;
+    Ok(())
+}
+
 fn build_external_workspace_target_snapshot(
     spec: ExternalWorkspaceTargetSpec,
     icon_data_url: Option<String>,
 ) -> ExternalWorkspaceTargetSnapshot {
     ExternalWorkspaceTargetSnapshot {
         id: spec.id.to_string(),
-        label: spec.label.to_string(),
+        label: external_workspace_target_display_label(spec).to_string(),
         kind: spec.kind,
         icon_data_url,
     }
@@ -3846,9 +4247,43 @@ fn open_workspace_in_target(path: String, target_id: String) -> Result<(), Strin
         return Ok(());
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        let target_argument = target_path.display().to_string();
+        let current_dir = Some(target_path.as_path());
+
+        match spec.id {
+            "finder" => return open_path_in_file_manager(&target_path),
+            "terminal" => {
+                return spawn_windows_target_command(
+                    &app_path,
+                    &["-d".to_string(), target_argument.clone()],
+                    current_dir,
+                    external_workspace_target_display_label(spec),
+                );
+            }
+            "warp" => {
+                let encoded_path = percent_encode_uri_component(&target_argument);
+                return open_external_url(format!("warp://action/new_window?path={encoded_path}"));
+            }
+            "cursor" | "vscode" | "windsurf" | "zed" | "android-studio" => {
+                return spawn_windows_target_command(
+                    &app_path,
+                    &[target_argument.clone()],
+                    current_dir,
+                    external_workspace_target_display_label(spec),
+                );
+            }
+            _ => {}
+        }
+
+        Err("Opening workspaces in external apps is not supported on this platform yet".to_string())
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     {
         let _ = target_path;
+        let _ = app_path;
         Err("Opening workspaces in external apps is not supported on this platform yet".to_string())
     }
 }
@@ -3990,6 +4425,47 @@ fn set_openai_api_key(
 }
 
 #[tauri::command]
+fn set_telemetry_preferences(
+    telemetry_enabled: bool,
+    telemetry_host: String,
+    state: State<'_, AppState>,
+    _app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let snapshot = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        runtime.settings.telemetry_enabled = telemetry_enabled;
+        runtime.settings.telemetry_host = telemetry::normalize_posthog_host(Some(telemetry_host));
+        runtime.persist_to_disk()?;
+        runtime.build_snapshot()
+    };
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn set_posthog_project_api_key(
+    posthog_project_api_key: Option<String>,
+    state: State<'_, AppState>,
+    _app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let snapshot = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        runtime.settings.posthog_project_api_key =
+            telemetry::normalize_optional_posthog_project_api_key(posthog_project_api_key);
+        runtime.persist_to_disk()?;
+        runtime.build_snapshot()
+    };
+    Ok(snapshot)
+}
+
+#[tauri::command]
 fn set_codex_cli_path(
     codex_cli_path: Option<String>,
     state: State<'_, AppState>,
@@ -4118,16 +4594,20 @@ fn resume_workspace_codex_session(
         );
         runtime.clear_pending_codex_start_for_pane(&pane_id);
         runtime.persist_to_disk()?;
-        let command = format!(
-            "{} resume {} -C {}\n",
-            shell_escape(&codex_binary),
-            shell_escape(&session_id),
-            shell_escape(&workspace_path),
+        let command = build_shell_command(
+            &runtime.shell,
+            &codex_binary,
+            &["resume", &session_id, "-C", &workspace_path],
         );
         (runtime.build_snapshot(), writer, command)
     };
 
     write_shell_command(&writer, &command)?;
+    telemetry::queue_event(
+        &state.inner,
+        "codex_session_resumed",
+        telemetry::object(json!({})),
+    );
     Ok(snapshot)
 }
 
@@ -4171,15 +4651,16 @@ fn start_workspace_codex_session(
                 .clone()
                 .unwrap_or_else(|| "No Codex CLI is configured.".to_string())
         })?;
-        let command = format!(
-            "{} -C {}\n",
-            shell_escape(&codex_binary),
-            shell_escape(&workspace.path),
-        );
+        let command = build_shell_command(&runtime.shell, &codex_binary, &["-C", &workspace.path]);
         (writer, command, workspace.path.clone())
     };
 
     write_shell_command(&writer, &command)?;
+    telemetry::queue_event(
+        &shared,
+        "codex_session_started",
+        telemetry::object(json!({})),
+    );
     let known_session_ids = discover_all_codex_session_ids();
     let should_spawn_discovery = {
         let mut runtime = shared
@@ -4801,13 +5282,48 @@ fn default_launcher_path() -> String {
         .ok()
         .and_then(|path| fs::canonicalize(&path).ok().or(Some(path)))
         .or_else(|| {
-            env::var("HOME")
+            home_dir()
                 .ok()
-                .and_then(|home| fs::canonicalize(&home).ok().or(Some(PathBuf::from(home))))
+                .and_then(|home| fs::canonicalize(&home).ok().or(Some(home)))
         })
-        .unwrap_or_else(|| PathBuf::from("/"))
+        .unwrap_or_else(env::temp_dir)
         .display()
         .to_string()
+}
+
+#[cfg(target_os = "windows")]
+fn resolve_binary_on_path(binary_name: &str) -> Option<PathBuf> {
+    let candidate = PathBuf::from(binary_name);
+    if candidate.is_absolute() || candidate.components().count() > 1 {
+        return candidate.is_file().then_some(candidate);
+    }
+
+    let raw_path = env::var_os("PATH")?;
+    env::split_paths(&raw_path)
+        .map(|directory| directory.join(binary_name))
+        .find(|candidate| candidate.is_file())
+}
+
+fn default_runtime_shell() -> String {
+    #[cfg(target_os = "windows")]
+    {
+        for candidate in ["pwsh.exe", "powershell.exe"] {
+            if let Some(path) = resolve_binary_on_path(candidate) {
+                return path.display().to_string();
+            }
+        }
+
+        return env::var("COMSPEC")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "cmd.exe".to_string());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".into())
+    }
 }
 
 fn normalize_workspace_path(raw: &str) -> Result<PathBuf, String> {
@@ -5047,8 +5563,9 @@ fn complete_launcher_path_input(
         return Ok(empty_launcher_completion(raw_input));
     }
 
+    let completion_separator = launcher_completion_separator(unquoted_target);
     let completed_fragment = if matches.len() == 1 {
-        format!("{}/", matches[0])
+        format!("{}{completion_separator}", matches[0])
     } else {
         let shared_prefix = longest_common_prefix(&matches);
         if shared_prefix.len() > fragment.len() {
@@ -5063,7 +5580,7 @@ fn complete_launcher_path_input(
     let match_display = summarize_completion_matches(
         matches
             .into_iter()
-            .map(|name| format!("{quote_prefix}{typed_path_prefix}{name}/"))
+            .map(|name| format!("{quote_prefix}{typed_path_prefix}{name}{completion_separator}"))
             .collect(),
     );
 
@@ -5093,9 +5610,22 @@ fn split_launcher_completion_input(raw_input: &str) -> (String, &str) {
 }
 
 fn split_launcher_completion_target(value: &str) -> (&str, &str, &str) {
-    match value.rfind('/') {
+    match value
+        .char_indices()
+        .rev()
+        .find(|(_, character)| matches!(character, '/' | '\\'))
+        .map(|(index, _)| index)
+    {
         Some(index) => (&value[..index], &value[..index + 1], &value[index + 1..]),
         None => ("", "", value),
+    }
+}
+
+fn launcher_completion_separator(value: &str) -> &'static str {
+    if value.contains('\\') {
+        "\\"
+    } else {
+        "/"
     }
 }
 
@@ -5207,6 +5737,10 @@ fn expand_navigation_target(raw: &str) -> Result<PathBuf, String> {
     }
 
     if let Some(rest) = value.strip_prefix("~/") {
+        return Ok(home_dir()?.join(rest));
+    }
+
+    if let Some(rest) = value.strip_prefix("~\\") {
         return Ok(home_dir()?.join(rest));
     }
 
@@ -6128,7 +6662,7 @@ pub fn run() {
         .manage(SystemHealthState::default())
         .setup(|app| {
             let shared = app.state::<AppState>().inner.clone();
-            let restore = (|| -> Result<(Vec<PaneJob>, String), String> {
+            let restore = (|| -> Result<(Vec<PaneJob>, String, usize, bool), String> {
                 let persistence_path = resolve_persistence_path(app.handle())?;
                 let mut runtime = shared
                     .lock()
@@ -6146,14 +6680,33 @@ pub fn run() {
                     .and_then(|workspace_id| prepare_workspace_launch(&mut runtime, &workspace_id))
                     .unwrap_or_default();
 
-                Ok((pane_jobs, runtime.shell.clone()))
+                Ok((
+                    pane_jobs,
+                    runtime.shell.clone(),
+                    runtime.workspaces.len(),
+                    runtime.active_workspace_id.is_some(),
+                ))
             })();
 
             match restore {
-                Ok((pane_jobs, shell)) => {
+                Ok((pane_jobs, shell, workspace_count, has_active_workspace)) => {
+                    telemetry::debug_log(&format!(
+                        "setup restored workspace_count={workspace_count} has_active_workspace={has_active_workspace}"
+                    ));
+                    telemetry::queue_event(
+                        &shared,
+                        "app_opened",
+                        telemetry::object(json!({
+                            "workspaceCount": workspace_count,
+                            "hasActiveWorkspace": has_active_workspace,
+                        })),
+                    );
                     spawn_pane_jobs(shared, app.handle().clone(), shell, pane_jobs);
                 }
-                Err(error) => eprintln!("{error}"),
+                Err(error) => {
+                    telemetry::debug_log(&format!("setup restore failed: {error}"));
+                    eprintln!("{error}");
+                }
             }
 
             Ok(())
@@ -6178,6 +6731,8 @@ pub fn run() {
             set_interface_text_scale,
             set_terminal_font_size,
             set_openai_api_key,
+            set_telemetry_preferences,
+            set_posthog_project_api_key,
             set_codex_cli_path,
             refresh_codex_cli_catalog,
             load_workspace_codex_sessions,
@@ -6211,7 +6766,7 @@ pub fn run() {
             close_workspace,
             split_pane,
             close_pane,
-            show_in_finder,
+            show_in_file_manager,
             list_external_workspace_targets,
             open_workspace_in_target,
             run_launcher_command,
@@ -6247,17 +6802,16 @@ mod tests {
         external_workspace_target_spec, extract_login_shell_path, extract_navigation_target,
         layout_for_pane_count, layout_presets, load_workspace_codex_sessions_snapshot,
         load_workspace_file_explorer_directory_snapshot, load_workspace_text_file_snapshot,
-        merge_path_values, normalize_workspace_path,
-        parse_battery_snapshot, parse_codex_cli_version, parse_git_status_porcelain,
-        persistence::ActivityEventKind, prepare_workspace_launch, read_codex_session_summary,
-        resolve_navigation_path, save_workspace_text_file_snapshot,
-        try_bind_pending_codex_start, upsert_workspace_codex_restore_binding,
-        validate_git_cli_arg, BatteryState, CodexCliCandidateSnapshot, CodexCliSelectionMode,
-        CodexCliSnapshot, CodexCliSource, CodexCliStatus, ExternalWorkspaceTargetKind,
-        GitFileKind, GitState, PendingCodexStartRecord, RuntimeState, ThemeId,
-        WorkspaceFileDraftRecord, WorkspaceFileExplorerEntryKind,
-        WorkspaceTextFileNewlineStyle, WorkspaceTodoRecord, DEFAULT_INTERFACE_TEXT_SCALE,
-        DEFAULT_TERMINAL_FONT_SIZE,
+        merge_path_values, normalize_workspace_path, parse_battery_snapshot,
+        parse_codex_cli_version, parse_git_status_porcelain, persistence::ActivityEventKind,
+        prepare_workspace_launch, read_codex_session_summary, resolve_navigation_path,
+        save_workspace_text_file_snapshot, try_bind_pending_codex_start,
+        upsert_workspace_codex_restore_binding, validate_git_cli_arg, BatteryState,
+        CodexCliCandidateSnapshot, CodexCliSelectionMode, CodexCliSnapshot, CodexCliSource,
+        CodexCliStatus, ExternalWorkspaceTargetKind, GitFileKind, GitState,
+        PendingCodexStartRecord, RuntimeState, ThemeId, WorkspaceFileDraftRecord,
+        WorkspaceFileExplorerEntryKind, WorkspaceTextFileNewlineStyle, WorkspaceTodoRecord,
+        DEFAULT_INTERFACE_TEXT_SCALE, DEFAULT_TERMINAL_FONT_SIZE,
     };
 
     #[test]
@@ -6306,6 +6860,20 @@ mod tests {
             snapshot.icon_data_url.as_deref(),
             Some("data:image/png;base64,ZmFrZQ==")
         );
+    }
+
+    #[test]
+    fn file_manager_target_snapshot_uses_platform_label() {
+        let snapshot = build_external_workspace_target_snapshot(
+            external_workspace_target_spec("finder").expect("finder target should exist"),
+            None,
+        );
+
+        #[cfg(target_os = "windows")]
+        assert_eq!(snapshot.label, "Explorer");
+
+        #[cfg(not(target_os = "windows"))]
+        assert_eq!(snapshot.label, "Finder");
     }
 
     #[test]
@@ -7777,6 +8345,16 @@ mod tests {
     }
 
     #[test]
+    fn launcher_completion_split_supports_windows_separators() {
+        assert_eq!(
+            super::split_launcher_completion_target(r"C:\Users\ash\Crew"),
+            (r"C:\Users\ash", r"C:\Users\ash\", "Crew")
+        );
+        assert_eq!(super::launcher_completion_separator(r"C:\Users\ash"), "\\");
+        assert_eq!(super::launcher_completion_separator("backend/api"), "/");
+    }
+
+    #[test]
     fn parse_git_status_handles_clean_branch_headers() {
         let parsed = parse_git_status_porcelain(
             "\
@@ -7839,7 +8417,12 @@ mod tests {
             ],
         };
 
-        let resolved = super::resolve_release_download_url(&release, "0.1.1").unwrap();
+        let resolved = super::resolve_release_download_url_for_platform(
+            &release,
+            "0.1.1",
+            super::ReleaseDownloadPlatform::MacOs,
+        )
+        .unwrap();
         let expected = if super::current_release_arch_label() == "arm64" {
             "https://example.com/arm64.dmg"
         } else {
@@ -7847,6 +8430,38 @@ mod tests {
         };
 
         assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn release_download_url_prefers_windows_setup_exe_over_msi() {
+        let release = super::GithubReleaseApiResponse {
+            tag_name: "v0.1.1".to_string(),
+            name: "CrewDock v0.1.1".to_string(),
+            body: String::new(),
+            html_url: "https://github.com/Ashlo/CrewDock/releases/tag/v0.1.1".to_string(),
+            draft: false,
+            prerelease: false,
+            published_at: Some("2026-04-12T10:00:00Z".to_string()),
+            assets: vec![
+                super::GithubReleaseAssetResponse {
+                    name: "CrewDock_0.1.1_x64.msi".to_string(),
+                    browser_download_url: "https://example.com/windows.msi".to_string(),
+                },
+                super::GithubReleaseAssetResponse {
+                    name: "CrewDock_0.1.1_x64-setup.exe".to_string(),
+                    browser_download_url: "https://example.com/windows-setup.exe".to_string(),
+                },
+            ],
+        };
+
+        let resolved = super::resolve_release_download_url_for_platform(
+            &release,
+            "0.1.1",
+            super::ReleaseDownloadPlatform::Windows,
+        )
+        .unwrap();
+
+        assert_eq!(resolved, "https://example.com/windows-setup.exe");
     }
 
     #[test]
@@ -7873,6 +8488,34 @@ mod tests {
         assert_eq!(
             merged_entries,
             vec!["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin"]
+        );
+    }
+
+    #[test]
+    fn shell_command_builder_uses_posix_quoting_for_unix_shells() {
+        let command = super::build_shell_command(
+            "/bin/zsh",
+            "/usr/local/bin/codex",
+            &["resume", "session-1", "-C", "/tmp/space here"],
+        );
+
+        assert_eq!(
+            command,
+            "'/usr/local/bin/codex' 'resume' 'session-1' '-C' '/tmp/space here'\n"
+        );
+    }
+
+    #[test]
+    fn shell_command_builder_uses_powershell_call_operator_for_windows_shells() {
+        let command = super::build_shell_command(
+            "powershell.exe",
+            "C:\\Program Files\\Codex\\codex.exe",
+            &["resume", "session-1", "-C", "C:\\Users\\ash\\Crew Dock"],
+        );
+
+        assert_eq!(
+            command,
+            "& 'C:\\Program Files\\Codex\\codex.exe' 'resume' 'session-1' '-C' 'C:\\Users\\ash\\Crew Dock'\n"
         );
     }
 
@@ -8119,7 +8762,12 @@ src/old name.rs\0\
         cwd: &Path,
         first_prompt: Option<&str>,
     ) -> PathBuf {
-        let session_dir = home_root.join(".codex").join("sessions").join("2026").join("04").join("14");
+        let session_dir = home_root
+            .join(".codex")
+            .join("sessions")
+            .join("2026")
+            .join("04")
+            .join("14");
         fs::create_dir_all(&session_dir).expect("session directory should exist");
         let session_file = session_dir.join(format!("rollout-{session_id}.jsonl"));
         let mut content = format!(

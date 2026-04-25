@@ -1,0 +1,21 @@
+{
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "CrewDock",
+        "width": 1480,
+        "height": 920,
+        "minWidth": 1180,
+        "minHeight": 780,
+        "resizable": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "trafficLightPosition": {
+          "x": 14,
+          "y": 14
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,71 @@
+name: Windows Build
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - ".github/workflows/windows-build.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "scripts/**"
+      - "src-tauri/**"
+      - "src-web/**"
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/windows-build.yml"
+      - "package.json"
+      - "package-lock.json"
+      - "scripts/**"
+      - "src-tauri/**"
+      - "src-web/**"
+
+jobs:
+  windows-nsis:
+    runs-on: windows-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Run Rust checks
+        run: npm run check
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Build Windows NSIS bundle
+        run: npm run build:windows:nsis
+
+      - name: Upload Windows bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: CrewDock-windows-nsis
+          path: |
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+            src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.zip

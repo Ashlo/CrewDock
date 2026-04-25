@@ -7,11 +7,16 @@
   "type": "module",
   "scripts": {
     "postinstall": "npm run sync:xterm",
-    "sync:xterm": "mkdir -p src-web/vendor && cp node_modules/@xterm/xterm/lib/xterm.mjs src-web/vendor/xterm.mjs && cp node_modules/@xterm/xterm/css/xterm.css src-web/vendor/xterm.css && cp node_modules/@xterm/addon-fit/lib/addon-fit.mjs src-web/vendor/addon-fit.mjs && cp node_modules/mermaid/dist/mermaid.min.js src-web/vendor/mermaid.min.js",
-    "dev": "bash scripts/run-macos-dev-app.sh",
+    "sync:xterm": "node scripts/sync-xterm-assets.mjs",
+    "dev": "bash scripts/run-dev.sh",
+    "dev:mac": "bash scripts/run-macos-dev-app.sh",
+    "dev:tauri": "cargo tauri dev",
     "dev:bin": "cargo run --manifest-path src-tauri/Cargo.toml",
     "dev:build-app": "bash scripts/run-macos-dev-app.sh --build-only",
+    "build:tauri": "cargo tauri build",
     "build:mac": "bash scripts/build-macos-dmg.sh",
+    "build:windows:nsis": "cargo tauri build --target x86_64-pc-windows-msvc",
+    "build:windows:nsis:xwin": "cargo tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc",
     "check": "cargo check --manifest-path src-tauri/Cargo.toml",
     "fmt": "cargo fmt --manifest-path src-tauri/Cargo.toml --all"
   },

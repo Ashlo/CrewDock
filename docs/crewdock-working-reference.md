@@ -718,7 +718,7 @@ modular. Important constraints:
 - `src-tauri/src/lib.rs` still mixes commands, helpers, and tests
 - PTY sessions are recreated on relaunch
 - launcher is directory-only, not a full shell
-- `show_in_finder` currently uses macOS `open`
+- `show_in_file_manager` uses the platform file-manager launcher
 - Git refresh is frontend-driven and polling-based
 - browser/mock mode is useful but not equivalent to desktop runtime behavior
 

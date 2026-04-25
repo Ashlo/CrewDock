@@ -929,7 +929,33 @@ function detectPlatform() {
 }
 
 function supportsSystemHealth() {
-  return detectPlatform() === "macos" && typeof bridge.loadSystemHealthSnapshot === "function";
+  return typeof bridge.loadSystemHealthSnapshot === "function";
+}
+
+function getFileManagerLabel() {
+  const platform = detectPlatform();
+  if (platform === "macos") {
+    return "Finder";
+  }
+  if (platform === "windows") {
+    return "Explorer";
+  }
+  return "File manager";
+}
+
+function getAppUpdateDownloadActionLabel(appUpdate = uiState.appUpdate.snapshot) {
+  if (!appUpdate?.downloadUrl) {
+    return "View release";
+  }
+
+  const platform = detectPlatform();
+  if (platform === "macos") {
+    return "Download DMG";
+  }
+  if (platform === "windows") {
+    return "Download installer";
+  }
+  return "Download";
 }
 
 function getActiveWorkspace() {
@@ -2726,6 +2752,31 @@ function hasEnvironmentOpenAiApiKey(snapshot = uiState.snapshot) {
   return Boolean(snapshot?.settings?.hasEnvironmentOpenAiApiKey);
 }
 
+function getTelemetrySnapshot(snapshot = uiState.snapshot) {
+  const telemetry = snapshot?.settings?.telemetry;
+  const host = typeof telemetry?.host === "string" && telemetry.host.trim()
+    ? telemetry.host.trim()
+    : "https://us.i.posthog.com";
+  return {
+    enabled: Boolean(telemetry?.enabled),
+    host,
+    hasStoredPostHogProjectApiKey: Boolean(telemetry?.hasStoredPostHogProjectApiKey),
+    isConfigured: Boolean(telemetry?.isConfigured),
+  };
+}
+
+function getTelemetryEnabled(snapshot = uiState.snapshot) {
+  return Boolean(getTelemetrySnapshot(snapshot).enabled);
+}
+
+function getTelemetryHost(snapshot = uiState.snapshot) {
+  return getTelemetrySnapshot(snapshot).host;
+}
+
+function hasStoredPostHogProjectApiKey(snapshot = uiState.snapshot) {
+  return Boolean(getTelemetrySnapshot(snapshot).hasStoredPostHogProjectApiKey);
+}
+
 function getCodexCliSnapshot(snapshot = uiState.snapshot) {
   return snapshot?.settings?.codexCli || {
     status: "unavailable",
@@ -2814,6 +2865,7 @@ function patchSnapshotAppUpdateMeta(appUpdate) {
 
 function createSettingsDraft(snapshot = uiState.snapshot) {
   const codexCli = getCodexCliSnapshot(snapshot);
+  const telemetry = getTelemetrySnapshot(snapshot);
   return {
     themeId: getActiveThemeId(snapshot),
     interfaceTextScale: getInterfaceTextScale(snapshot),
@@ -2821,12 +2873,18 @@ function createSettingsDraft(snapshot = uiState.snapshot) {
     openAiApiKey: "",
     hasStoredOpenAiApiKey: hasStoredOpenAiApiKey(snapshot),
     hasEnvironmentOpenAiApiKey: hasEnvironmentOpenAiApiKey(snapshot),
+    telemetryEnabled: telemetry.enabled,
+    telemetryHost: telemetry.host,
+    postHogProjectApiKey: "",
+    hasStoredPostHogProjectApiKey: telemetry.hasStoredPostHogProjectApiKey,
     codexCli,
     codexCliSelectedPath: codexCli.configuredPath || "__auto__",
     codexCliCustomPath: codexCli.configuredPath || "",
     savingCodexCliPath: false,
     refreshingCodexCli: false,
     savingOpenAiApiKey: false,
+    savingTelemetryPreferences: false,
+    savingPostHogProjectApiKey: false,
     applyingAppearance: false,
   };
 }
@@ -2838,6 +2896,19 @@ function syncSettingsDraftFromSnapshot(snapshot = uiState.snapshot) {
 
 function getDraftThemeId(snapshot = uiState.snapshot) {
   return normalizeThemeId(uiState.settingsDraft?.themeId ?? snapshot?.settings?.themeId);
+}
+
+function getDraftTelemetryEnabled(snapshot = uiState.snapshot) {
+  return Boolean(uiState.settingsDraft?.telemetryEnabled ?? getTelemetryEnabled(snapshot));
+}
+
+function getDraftTelemetryHost(snapshot = uiState.snapshot) {
+  const value = uiState.settingsDraft?.telemetryHost ?? getTelemetryHost(snapshot);
+  return typeof value === "string" && value.trim() ? value.trim() : "https://us.i.posthog.com";
+}
+
+function getDraftPostHogProjectApiKey() {
+  return String(uiState.settingsDraft?.postHogProjectApiKey || "");
 }
 
 function getDraftInterfaceTextScale(snapshot = uiState.snapshot) {
@@ -3244,6 +3315,107 @@ async function clearStoredOpenAiApiKey() {
   }
 }
 
+async function commitTelemetryPreferences() {
+  if (!bridge.setTelemetryPreferences || !uiState.settingsVisible) {
+    return;
+  }
+
+  if (!uiState.settingsDraft) {
+    syncSettingsDraftFromSnapshot();
+  }
+
+  const nextHost = getDraftTelemetryHost();
+  uiState.settingsDraft.savingTelemetryPreferences = true;
+  render();
+
+  try {
+    uiState.snapshot = await bridge.setTelemetryPreferences(
+      getDraftTelemetryEnabled(),
+      nextHost,
+    );
+    syncSettingsDraftFromSnapshot(uiState.snapshot);
+    applySnapshotSettings(uiState.snapshot);
+  } catch (error) {
+    reportSourceControlError(error);
+  } finally {
+    if (uiState.settingsDraft) {
+      uiState.settingsDraft.savingTelemetryPreferences = false;
+    }
+    render();
+  }
+}
+
+async function commitPostHogProjectApiKey() {
+  if (!bridge.setPostHogProjectApiKey || !uiState.settingsVisible) {
+    return;
+  }
+
+  if (!uiState.settingsDraft) {
+    syncSettingsDraftFromSnapshot();
+  }
+
+  const nextKey = getDraftPostHogProjectApiKey().trim();
+  if (!nextKey) {
+    window.alert("Paste a PostHog project API key first, or use Remove to clear the stored one.");
+    return;
+  }
+
+  uiState.settingsDraft.savingPostHogProjectApiKey = true;
+  render();
+
+  try {
+    uiState.snapshot = await bridge.setPostHogProjectApiKey(nextKey);
+    syncSettingsDraftFromSnapshot(uiState.snapshot);
+    applySnapshotSettings(uiState.snapshot);
+  } catch (error) {
+    reportSourceControlError(error);
+  } finally {
+    if (uiState.settingsDraft) {
+      uiState.settingsDraft.savingPostHogProjectApiKey = false;
+    }
+    render();
+  }
+}
+
+async function clearStoredPostHogProjectApiKey() {
+  if (!bridge.setPostHogProjectApiKey || !uiState.settingsVisible) {
+    return;
+  }
+
+  const hasStoredKey = hasStoredPostHogProjectApiKey();
+  if (!hasStoredKey) {
+    if (uiState.settingsDraft) {
+      uiState.settingsDraft.postHogProjectApiKey = "";
+    }
+    render();
+    return;
+  }
+
+  if (!window.confirm("Remove the stored PostHog project API key from CrewDock settings?")) {
+    return;
+  }
+
+  if (!uiState.settingsDraft) {
+    syncSettingsDraftFromSnapshot();
+  }
+
+  uiState.settingsDraft.savingPostHogProjectApiKey = true;
+  render();
+
+  try {
+    uiState.snapshot = await bridge.setPostHogProjectApiKey(null);
+    syncSettingsDraftFromSnapshot(uiState.snapshot);
+    applySnapshotSettings(uiState.snapshot);
+  } catch (error) {
+    reportSourceControlError(error);
+  } finally {
+    if (uiState.settingsDraft) {
+      uiState.settingsDraft.savingPostHogProjectApiKey = false;
+    }
+    render();
+  }
+}
+
 async function saveCodexCliPath(nextPath) {
   if (!bridge.setCodexCliPath || !uiState.settingsVisible) {
     return;
@@ -3385,6 +3557,84 @@ function bindSettingsSheetControls(root = document) {
       event.preventDefault();
       event.stopPropagation();
       void clearStoredOpenAiApiKey();
+    });
+  }
+
+  const telemetryEnabledInput = root.querySelector("[data-settings-telemetry-enabled]");
+  if (telemetryEnabledInput instanceof HTMLInputElement) {
+    telemetryEnabledInput.addEventListener("change", (event) => {
+      event.stopPropagation();
+      if (!uiState.settingsDraft) {
+        syncSettingsDraftFromSnapshot();
+      }
+      uiState.settingsDraft.telemetryEnabled = telemetryEnabledInput.checked;
+    });
+  }
+
+  const telemetryHostInput = root.querySelector("[data-settings-telemetry-host-input]");
+  if (telemetryHostInput instanceof HTMLInputElement) {
+    telemetryHostInput.addEventListener("input", (event) => {
+      event.stopPropagation();
+      if (!uiState.settingsDraft) {
+        syncSettingsDraftFromSnapshot();
+      }
+      uiState.settingsDraft.telemetryHost = telemetryHostInput.value;
+    });
+    telemetryHostInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      void commitTelemetryPreferences();
+    });
+  }
+
+  const telemetrySaveButton = root.querySelector("[data-settings-telemetry-save]");
+  if (telemetrySaveButton instanceof HTMLButtonElement) {
+    telemetrySaveButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void commitTelemetryPreferences();
+    });
+  }
+
+  const posthogKeyInput = root.querySelector("[data-settings-posthog-project-api-key-input]");
+  if (posthogKeyInput instanceof HTMLInputElement) {
+    posthogKeyInput.addEventListener("input", (event) => {
+      event.stopPropagation();
+      if (!uiState.settingsDraft) {
+        syncSettingsDraftFromSnapshot();
+      }
+      uiState.settingsDraft.postHogProjectApiKey = posthogKeyInput.value;
+    });
+    posthogKeyInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      void commitPostHogProjectApiKey();
+    });
+  }
+
+  const posthogSaveButton = root.querySelector("[data-settings-posthog-save]");
+  if (posthogSaveButton instanceof HTMLButtonElement) {
+    posthogSaveButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void commitPostHogProjectApiKey();
+    });
+  }
+
+  const posthogClearButton = root.querySelector("[data-settings-posthog-clear]");
+  if (posthogClearButton instanceof HTMLButtonElement) {
+    posthogClearButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void clearStoredPostHogProjectApiKey();
     });
   }
 
@@ -6134,6 +6384,8 @@ function captureSettingsFocusState(root = document) {
 
   const selector = [
     "[data-settings-openai-api-key-input]",
+    "[data-settings-telemetry-host-input]",
+    "[data-settings-posthog-project-api-key-input]",
     "[data-settings-interface-range]",
     "[data-settings-terminal-range]",
   ].find((candidate) => activeElement.matches(candidate));
@@ -10224,7 +10476,7 @@ function renderAppUpdateBanner() {
           data-url="${escapeHtml(destinationUrl)}"
           ${destinationUrl ? "" : "disabled"}
         >
-          ${appUpdate.downloadUrl ? "Download" : "View release"}
+          ${getAppUpdateDownloadActionLabel(appUpdate)}
         </button>
         <button
           type="button"
@@ -10299,7 +10551,7 @@ function renderSettingsAppUpdateCard(snapshot) {
             ? escapeHtml(uiState.appUpdate.error)
             : isAvailable
               ? escapeHtml(`${publishedCopy}. CrewDock will keep install flow manual through GitHub Releases.`)
-              : "CrewDock checks GitHub Releases and lets you download the newest notarized DMG when a build is available."
+              : "CrewDock checks GitHub Releases and lets you download the latest platform build when one is available."
         }
       </p>
       <div class="settings-ai-actions">
@@ -10321,7 +10573,7 @@ function renderSettingsAppUpdateCard(snapshot) {
                   data-url="${escapeHtml(destinationUrl)}"
                   ${destinationUrl ? "" : "disabled"}
                 >
-                  ${appUpdate?.downloadUrl ? "Download DMG" : "View release"}
+                  ${getAppUpdateDownloadActionLabel(appUpdate)}
                 </button>
                 <button
                   type="button"
@@ -10428,6 +10680,7 @@ function renderSettingsSheet(snapshot) {
                 </div>
                 ${hasAvailableCodexCli(snapshot) ? renderSettingsCodexCard(getDraftCodexCli(snapshot)) : ""}
                 ${renderSettingsAppUpdateCard(snapshot)}
+                ${renderSettingsTelemetryCard(snapshot)}
                 ${renderSettingsAiCard({
                   hasStoredKey,
                   hasEnvironmentKey,
@@ -10897,6 +11150,103 @@ function renderSettingsAiCard({ hasStoredKey, hasEnvironmentKey }) {
             class="settings-ai-button"
             data-settings-openai-clear
             ${clearDisabled ? "disabled" : ""}
+          >
+            Remove
+          </button>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function renderSettingsTelemetryCard(snapshot) {
+  const telemetry = getTelemetrySnapshot(snapshot);
+  const host = getDraftTelemetryHost(snapshot);
+  const isEnabled = getDraftTelemetryEnabled(snapshot);
+  const hasStoredKey = hasStoredPostHogProjectApiKey(snapshot);
+  const draftKey = getDraftPostHogProjectApiKey();
+  const isSavingPreferences = Boolean(uiState.settingsDraft?.savingTelemetryPreferences);
+  const isSavingKey = Boolean(uiState.settingsDraft?.savingPostHogProjectApiKey);
+  const statusLabel = telemetry.isConfigured
+    ? "Enabled"
+    : hasStoredKey
+      ? "Configured"
+      : isEnabled
+        ? "Missing key"
+        : "Off";
+  const statusTone = telemetry.isConfigured || hasStoredKey ? "is-active" : "";
+  const saveKeyDisabled = isSavingKey || !draftKey.trim();
+  const clearKeyDisabled = isSavingKey || !hasStoredKey;
+  const hostSaveDisabled = isSavingPreferences || !host.trim();
+  const placeholder = hasStoredKey
+    ? "Stored locally. Paste a new project key to replace it."
+    : "Paste PostHog project API key";
+
+  return `
+    <section class="settings-ai-card settings-telemetry-card">
+      <div class="settings-ai-head">
+        <div>
+          <p class="settings-panel-kicker">Product analytics</p>
+          <h4 class="settings-adjustment-title">PostHog telemetry</h4>
+          <p class="settings-adjustment-copy">Sends anonymous CrewDock usage events only. No repo paths, terminal content, commands, prompts, filenames, or API keys are captured.</p>
+        </div>
+        <span class="settings-ai-status ${statusTone}">${escapeHtml(statusLabel)}</span>
+      </div>
+      <label class="settings-telemetry-toggle">
+        <input
+          type="checkbox"
+          data-settings-telemetry-enabled
+          ${isEnabled ? "checked" : ""}
+        />
+        <span>Enable anonymous analytics for CrewDock</span>
+      </label>
+      <div class="settings-ai-controls">
+        <input
+          class="settings-ai-input"
+          type="text"
+          value="${escapeHtml(host)}"
+          data-settings-telemetry-host-input
+          placeholder="https://us.i.posthog.com"
+          autocomplete="off"
+          autocapitalize="off"
+          spellcheck="false"
+        />
+        <div class="settings-ai-actions">
+          <button
+            type="button"
+            class="settings-ai-button settings-ai-button-primary"
+            data-settings-telemetry-save
+            ${hostSaveDisabled ? "disabled" : ""}
+          >
+            ${isSavingPreferences ? "Saving..." : "Save telemetry"}
+          </button>
+        </div>
+      </div>
+      <div class="settings-ai-controls">
+        <input
+          class="settings-ai-input"
+          type="password"
+          value="${escapeHtml(draftKey)}"
+          data-settings-posthog-project-api-key-input
+          placeholder="${escapeHtml(placeholder)}"
+          autocomplete="off"
+          autocapitalize="off"
+          spellcheck="false"
+        />
+        <div class="settings-ai-actions">
+          <button
+            type="button"
+            class="settings-ai-button settings-ai-button-primary"
+            data-settings-posthog-save
+            ${saveKeyDisabled ? "disabled" : ""}
+          >
+            ${isSavingKey ? "Saving..." : "Save key"}
+          </button>
+          <button
+            type="button"
+            class="settings-ai-button"
+            data-settings-posthog-clear
+            ${clearKeyDisabled ? "disabled" : ""}
           >
             Remove
           </button>
@@ -14274,6 +14624,8 @@ function renderPaneShell(pane, paneIndex) {
 function renderContextMenu(contextMenu, workspace) {
   const canSplit = workspace.panes.length < 16;
   const canClose = workspace.panes.length > 1;
+  const fileManagerLabel = getFileManagerLabel();
+  const primaryModifier = getPrimaryModifierLabel();
 
   return `
     <div
@@ -14285,16 +14637,16 @@ function renderContextMenu(contextMenu, workspace) {
       <button class="terminal-context-item" data-action="context-copy-path">
         <span>Copy Path</span>
       </button>
-      <button class="terminal-context-item" data-action="context-show-in-finder">
-        <span>Show in Finder</span>
+      <button class="terminal-context-item" data-action="context-show-in-file-manager">
+        <span>Show in ${escapeHtml(fileManagerLabel)}</span>
       </button>
       <div class="terminal-context-divider"></div>
-      ${renderContextSplitAction("Split pane right", "context-split-pane", "right", "⌘D", canSplit)}
+      ${renderContextSplitAction("Split pane right", "context-split-pane", "right", `${primaryModifier}+D`, canSplit)}
       ${renderContextSplitAction("Split pane left", "context-split-pane", "left", "", canSplit)}
-      ${renderContextSplitAction("Split pane down", "context-split-pane", "down", "⇧⌘D", canSplit)}
+      ${renderContextSplitAction("Split pane down", "context-split-pane", "down", `${primaryModifier}+Shift+D`, canSplit)}
       ${renderContextSplitAction("Split pane up", "context-split-pane", "up", "", canSplit)}
-      ${renderContextSplitAction("Maximize pane", "context-maximize-pane", "", "⇧⌘↩", true)}
-      ${renderContextSplitAction("Close pane", "context-close-pane", "", "⌘W", canClose)}
+      ${renderContextSplitAction("Maximize pane", "context-maximize-pane", "", `${primaryModifier}+Shift+Enter`, true)}
+      ${renderContextSplitAction("Close pane", "context-close-pane", "", `${primaryModifier}+W`, canClose)}
     </div>
   `;
 }
@@ -14410,8 +14762,12 @@ async function handleContextMenuAction(target) {
   try {
     if (action === "context-copy-path") {
       await copyText(workspace.path);
-    } else if (action === "context-show-in-finder") {
-      await bridge.showInFinder(workspace.path);
+    } else if (action === "context-show-in-file-manager") {
+      if (typeof bridge.showInFileManager === "function") {
+        await bridge.showInFileManager(workspace.path);
+      } else if (typeof bridge.showInFinder === "function") {
+        await bridge.showInFinder(workspace.path);
+      }
     } else if (
       action === "context-split-pane"
       || action === "context-close-pane"
@@ -15592,21 +15948,23 @@ async function copyText(value) {
 }
 
 function basename(path) {
-  const parts = String(path).split("/").filter(Boolean);
+  const parts = String(path || "").split(/[\\/]+/).filter(Boolean);
   return parts[parts.length - 1] || path;
 }
 
 function compactWorkspacePath(path) {
-  const parts = String(path || "").split("/").filter(Boolean);
+  const rawPath = String(path || "");
+  const parts = rawPath.split(/[\\/]+/).filter(Boolean);
+  const separator = rawPath.includes("\\") ? "\\" : "/";
   if (parts.length === 0) {
-    return "/";
+    return separator;
   }
 
   if (parts.length === 1) {
     return parts[0];
   }
 
-  return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
+  return `${parts[parts.length - 2]}${separator}${parts[parts.length - 1]}`;
 }
 
 function escapeHtml(value) {

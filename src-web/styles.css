@@ -3474,6 +3474,22 @@ button {
   gap: 10px;
 }
 
+.settings-telemetry-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.settings-telemetry-toggle input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
 .settings-ai-input {
   width: 100%;
   min-width: 0;

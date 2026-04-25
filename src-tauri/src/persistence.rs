@@ -117,6 +117,14 @@ pub(crate) struct PersistedSettings {
     #[serde(default)]
     pub(crate) codex_cli_path: Option<String>,
     #[serde(default)]
+    pub(crate) telemetry_enabled: Option<bool>,
+    #[serde(default)]
+    pub(crate) telemetry_install_id: Option<String>,
+    #[serde(default)]
+    pub(crate) telemetry_host: Option<String>,
+    #[serde(default)]
+    pub(crate) posthog_project_api_key: Option<String>,
+    #[serde(default)]
     pub(crate) dismissed_app_update_version: Option<String>,
     #[serde(default)]
     pub(crate) app_update_last_checked_at_ms: Option<u64>,
@@ -237,6 +245,10 @@ pub(crate) fn build_persisted_state(runtime: &RuntimeState) -> PersistedWorkspac
             terminal_font_size: Some(runtime.settings.terminal_font_size),
             openai_api_key: runtime.settings.openai_api_key.clone(),
             codex_cli_path: runtime.settings.codex_cli_path.clone(),
+            telemetry_enabled: Some(runtime.settings.telemetry_enabled),
+            telemetry_install_id: Some(runtime.settings.telemetry_install_id.clone()),
+            telemetry_host: Some(runtime.settings.telemetry_host.clone()),
+            posthog_project_api_key: runtime.settings.posthog_project_api_key.clone(),
             dismissed_app_update_version: runtime.settings.dismissed_app_update_version.clone(),
             app_update_last_checked_at_ms: runtime.settings.app_update_last_checked_at_ms,
         },
@@ -479,12 +491,22 @@ pub(crate) fn load_persisted_from_disk(
 
     runtime.settings.openai_api_key =
         crate::normalize_optional_openai_api_key(persisted.settings.openai_api_key);
+    runtime.settings.telemetry_enabled = persisted.settings.telemetry_enabled.unwrap_or(false);
+    runtime.settings.telemetry_install_id =
+        crate::telemetry::normalize_telemetry_install_id(persisted.settings.telemetry_install_id);
+    runtime.settings.telemetry_host =
+        crate::telemetry::normalize_posthog_host(persisted.settings.telemetry_host);
+    runtime.settings.posthog_project_api_key =
+        crate::telemetry::normalize_optional_posthog_project_api_key(
+            persisted.settings.posthog_project_api_key,
+        );
     runtime.settings.dismissed_app_update_version = persisted
         .settings
         .dismissed_app_update_version
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    runtime.settings.app_update_last_checked_at_ms = persisted.settings.app_update_last_checked_at_ms;
+    runtime.settings.app_update_last_checked_at_ms =
+        persisted.settings.app_update_last_checked_at_ms;
 
     let active_index = persisted.active_workspace_index;
     let active_path = persisted.active_workspace_path;
