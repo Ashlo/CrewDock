@@ -7227,7 +7227,7 @@ button {
 
 .workspace-file-explorer-entry.is-directory .workspace-file-explorer-entry-icon {
   color: var(--accent);
-  opacity: 0.8;
+  opacity: 1;
 }
 
 .workspace-file-explorer-entry.is-selected .workspace-file-explorer-entry-icon {
@@ -7238,6 +7238,14 @@ button {
 .workspace-file-explorer-entry-icon svg {
   width: 16px;
   height: 16px;
+}
+
+.workspace-file-explorer-theme-icon {
+  width: 16px;
+  height: 16px;
+  display: block;
+  object-fit: contain;
+  flex: 0 0 16px;
 }
 
 .workspace-file-explorer-entry-label {
@@ -7360,9 +7368,11 @@ button {
 }
 
 .workspace-file-editor-shell {
+  display: flex;
   flex: 0 0 0;
   width: 0;
   min-width: 0;
+  min-height: 0;
   opacity: 0;
   overflow: hidden;
   pointer-events: none;
@@ -7391,7 +7401,10 @@ button {
 }
 
 .workspace-file-editor-panel {
+  flex: 1 1 auto;
+  min-width: 0;
   height: 100%;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   background: color-mix(in srgb, var(--pane-surface) 82%, var(--bg));
@@ -7555,6 +7568,7 @@ button {
 }
 
 .workspace-file-editor-pane {
+  flex: 1 1 0;
   min-width: 0;
   min-height: 0;
   display: flex;

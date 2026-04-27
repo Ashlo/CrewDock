@@ -97,6 +97,186 @@ const MARKDOWN_RAW_HTML_BLOCK_TAGS = new Set([
   "tr",
   "ul",
 ]);
+const WORKSPACE_MATERIAL_ICON_PATH_PREFIX = "./vendor/material-icons/icons/";
+const WORKSPACE_MATERIAL_LIGHT_THEME_LUMINANCE_THRESHOLD = 0.58;
+function createWorkspaceMaterialIconDescriptor(assetName) {
+  return Object.freeze({ path: `${WORKSPACE_MATERIAL_ICON_PATH_PREFIX}${assetName}` });
+}
+
+const WORKSPACE_MATERIAL_ICON_THEME = Object.freeze({
+  file: "file",
+  folder: "folder",
+  folderExpanded: "folder-open",
+  rootFolder: "folder-root",
+  rootFolderExpanded: "folder-root-open",
+  iconDefinitions: Object.freeze({
+    file: createWorkspaceMaterialIconDescriptor("file.svg"),
+    folder: createWorkspaceMaterialIconDescriptor("folder.svg"),
+    "folder-open": createWorkspaceMaterialIconDescriptor("folder-open.svg"),
+    "folder-root": createWorkspaceMaterialIconDescriptor("folder-root.svg"),
+    "folder-root-open": createWorkspaceMaterialIconDescriptor("folder-root-open.svg"),
+    "folder-app": createWorkspaceMaterialIconDescriptor("folder-app.svg"),
+    "folder-app-open": createWorkspaceMaterialIconDescriptor("folder-app-open.svg"),
+    "folder-components": createWorkspaceMaterialIconDescriptor("folder-components.svg"),
+    "folder-components-open": createWorkspaceMaterialIconDescriptor("folder-components-open.svg"),
+    "folder-public": createWorkspaceMaterialIconDescriptor("folder-public.svg"),
+    "folder-public-open": createWorkspaceMaterialIconDescriptor("folder-public-open.svg"),
+    "folder-lib": createWorkspaceMaterialIconDescriptor("folder-lib.svg"),
+    "folder-lib-open": createWorkspaceMaterialIconDescriptor("folder-lib-open.svg"),
+    "folder-src": createWorkspaceMaterialIconDescriptor("folder-src.svg"),
+    "folder-src-open": createWorkspaceMaterialIconDescriptor("folder-src-open.svg"),
+    "folder-src-tauri": createWorkspaceMaterialIconDescriptor("folder-src-tauri.svg"),
+    "folder-src-tauri-open": createWorkspaceMaterialIconDescriptor("folder-src-tauri-open.svg"),
+    "folder-docs": createWorkspaceMaterialIconDescriptor("folder-docs.svg"),
+    "folder-docs-open": createWorkspaceMaterialIconDescriptor("folder-docs-open.svg"),
+    "folder-scripts": createWorkspaceMaterialIconDescriptor("folder-scripts.svg"),
+    "folder-scripts-open": createWorkspaceMaterialIconDescriptor("folder-scripts-open.svg"),
+    "folder-test": createWorkspaceMaterialIconDescriptor("folder-test.svg"),
+    "folder-test-open": createWorkspaceMaterialIconDescriptor("folder-test-open.svg"),
+    "folder-images": createWorkspaceMaterialIconDescriptor("folder-images.svg"),
+    "folder-images-open": createWorkspaceMaterialIconDescriptor("folder-images-open.svg"),
+    "folder-github": createWorkspaceMaterialIconDescriptor("folder-github.svg"),
+    "folder-github-open": createWorkspaceMaterialIconDescriptor("folder-github-open.svg"),
+    "folder-config": createWorkspaceMaterialIconDescriptor("folder-config.svg"),
+    "folder-config-open": createWorkspaceMaterialIconDescriptor("folder-config-open.svg"),
+    react: createWorkspaceMaterialIconDescriptor("react.svg"),
+    react_ts: createWorkspaceMaterialIconDescriptor("react_ts.svg"),
+    javascript: createWorkspaceMaterialIconDescriptor("javascript.svg"),
+    typescript: createWorkspaceMaterialIconDescriptor("typescript.svg"),
+    python: createWorkspaceMaterialIconDescriptor("python.svg"),
+    "python-misc": createWorkspaceMaterialIconDescriptor("python-misc.svg"),
+    rust: createWorkspaceMaterialIconDescriptor("rust.svg"),
+    markdown: createWorkspaceMaterialIconDescriptor("markdown.svg"),
+    json: createWorkspaceMaterialIconDescriptor("json.svg"),
+    yaml: createWorkspaceMaterialIconDescriptor("yaml.svg"),
+    html: createWorkspaceMaterialIconDescriptor("html.svg"),
+    css: createWorkspaceMaterialIconDescriptor("css.svg"),
+    database: createWorkspaceMaterialIconDescriptor("database.svg"),
+    table: createWorkspaceMaterialIconDescriptor("table.svg"),
+    toml: createWorkspaceMaterialIconDescriptor("toml.svg"),
+    toml_light: createWorkspaceMaterialIconDescriptor("toml_light.svg"),
+    go: createWorkspaceMaterialIconDescriptor("go.svg"),
+    swift: createWorkspaceMaterialIconDescriptor("swift.svg"),
+    java: createWorkspaceMaterialIconDescriptor("java.svg"),
+    kotlin: createWorkspaceMaterialIconDescriptor("kotlin.svg"),
+    ruby: createWorkspaceMaterialIconDescriptor("ruby.svg"),
+    php: createWorkspaceMaterialIconDescriptor("php.svg"),
+    console: createWorkspaceMaterialIconDescriptor("console.svg"),
+    xml: createWorkspaceMaterialIconDescriptor("xml.svg"),
+    svg: createWorkspaceMaterialIconDescriptor("svg.svg"),
+    image: createWorkspaceMaterialIconDescriptor("image.svg"),
+    pdf: createWorkspaceMaterialIconDescriptor("pdf.svg"),
+    word: createWorkspaceMaterialIconDescriptor("word.svg"),
+    document: createWorkspaceMaterialIconDescriptor("document.svg"),
+    git: createWorkspaceMaterialIconDescriptor("git.svg"),
+    docker: createWorkspaceMaterialIconDescriptor("docker.svg"),
+    tauri: createWorkspaceMaterialIconDescriptor("tauri.svg"),
+    favicon: createWorkspaceMaterialIconDescriptor("favicon.svg"),
+    readme: createWorkspaceMaterialIconDescriptor("readme.svg"),
+    license: createWorkspaceMaterialIconDescriptor("license.svg"),
+    nodejs: createWorkspaceMaterialIconDescriptor("nodejs.svg"),
+    pnpm: createWorkspaceMaterialIconDescriptor("pnpm.svg"),
+    tune: createWorkspaceMaterialIconDescriptor("tune.svg"),
+    tsconfig: createWorkspaceMaterialIconDescriptor("tsconfig.svg"),
+    lock: createWorkspaceMaterialIconDescriptor("lock.svg"),
+    next: createWorkspaceMaterialIconDescriptor("next.svg"),
+    next_light: createWorkspaceMaterialIconDescriptor("next_light.svg"),
+  }),
+});
+const WORKSPACE_MATERIAL_FILE_EXTENSION_ICON_IDS = Object.freeze({
+  js: "javascript",
+  mjs: "javascript",
+  cjs: "javascript",
+  jsx: "react",
+  ts: "typescript",
+  mts: "typescript",
+  cts: "typescript",
+  tsx: "react_ts",
+  json: "json",
+  jsonc: "json",
+  json5: "json",
+  md: "markdown",
+  mdx: "markdown",
+  py: "python",
+  rs: "rust",
+  go: "go",
+  swift: "swift",
+  java: "java",
+  kt: "kotlin",
+  kts: "kotlin",
+  rb: "ruby",
+  php: "php",
+  sh: "console",
+  bash: "console",
+  zsh: "console",
+  fish: "console",
+  html: "html",
+  htm: "html",
+  css: "css",
+  scss: "css",
+  sass: "css",
+  less: "css",
+  xml: "xml",
+  yaml: "yaml",
+  yml: "yaml",
+  sql: "database",
+  csv: "table",
+  tsv: "table",
+  psv: "table",
+  toml: "toml",
+  lock: "lock",
+  svg: "svg",
+  png: "image",
+  jpg: "image",
+  jpeg: "image",
+  gif: "image",
+  webp: "image",
+  avif: "image",
+  bmp: "image",
+  tif: "image",
+  tiff: "image",
+  ico: "image",
+  pdf: "pdf",
+  doc: "word",
+  docx: "word",
+  txt: "document",
+});
+const WORKSPACE_MATERIAL_FOLDER_ICON_IDS = Object.freeze({
+  app: "folder-app",
+  components: "folder-components",
+  public: "folder-public",
+  lib: "folder-lib",
+  src: "folder-src",
+  "src-tauri": "folder-src-tauri",
+  docs: "folder-docs",
+  scripts: "folder-scripts",
+  test: "folder-test",
+  tests: "folder-test",
+  images: "folder-images",
+  image: "folder-images",
+  icons: "folder-images",
+  assets: "folder-images",
+  ".github": "folder-github",
+  config: "folder-config",
+});
+const WORKSPACE_MATERIAL_FOLDER_EXPANDED_ICON_IDS = Object.freeze({
+  app: "folder-app-open",
+  components: "folder-components-open",
+  public: "folder-public-open",
+  lib: "folder-lib-open",
+  src: "folder-src-open",
+  "src-tauri": "folder-src-tauri-open",
+  docs: "folder-docs-open",
+  scripts: "folder-scripts-open",
+  test: "folder-test-open",
+  tests: "folder-test-open",
+  images: "folder-images-open",
+  image: "folder-images-open",
+  icons: "folder-images-open",
+  assets: "folder-images-open",
+  ".github": "folder-github-open",
+  config: "folder-config-open",
+});
 const MARKDOWN_RAW_HTML_ALLOWED_ATTRIBUTES = Object.freeze({
   a: new Set(["href", "title"]),
   blockquote: new Set(["align"]),
@@ -9183,6 +9363,214 @@ function renderFileIcon() {
   `;
 }
 
+function resolveWorkspaceMaterialIconById(iconId, fallbackId = WORKSPACE_MATERIAL_ICON_THEME.file) {
+  return (
+    WORKSPACE_MATERIAL_ICON_THEME.iconDefinitions[iconId]
+    || WORKSPACE_MATERIAL_ICON_THEME.iconDefinitions[fallbackId]
+    || null
+  );
+}
+
+function resolveWorkspaceMaterialSpecialFileIconId(normalizedName, lightTheme) {
+  if (!normalizedName) {
+    return "";
+  }
+
+  if (
+    normalizedName === ".gitignore"
+    || normalizedName === ".gitattributes"
+    || normalizedName === ".gitmodules"
+  ) {
+    return "git";
+  }
+
+  if (normalizedName === ".env" || normalizedName.startsWith(".env.")) {
+    return "tune";
+  }
+
+  if (
+    normalizedName === "dockerfile"
+    || normalizedName === "docker-compose.yml"
+    || normalizedName === "docker-compose.yaml"
+    || normalizedName === "compose.yml"
+    || normalizedName === "compose.yaml"
+  ) {
+    return "docker";
+  }
+
+  if (normalizedName === "package.json" || normalizedName === "package-lock.json") {
+    return "nodejs";
+  }
+
+  if (normalizedName === "pnpm-lock.yaml") {
+    return "pnpm";
+  }
+
+  if (normalizedName === "requirements.txt") {
+    return "python-misc";
+  }
+
+  if (normalizedName === "favicon.ico") {
+    return "favicon";
+  }
+
+  if (normalizedName === "tsconfig.json") {
+    return "tsconfig";
+  }
+
+  if (normalizedName.startsWith("tauri.") && normalizedName.endsWith(".conf.json")) {
+    return "tauri";
+  }
+
+  if (normalizedName === "readme" || normalizedName.startsWith("readme.")) {
+    return "readme";
+  }
+
+  if (normalizedName === "license" || normalizedName.startsWith("license.")) {
+    return "license";
+  }
+
+  if (normalizedName.startsWith("next.config.")) {
+    return lightTheme ? "next_light" : "next";
+  }
+
+  return "";
+}
+
+function parseThemeHexColor(color) {
+  if (typeof color !== "string") {
+    return null;
+  }
+
+  const value = color.trim();
+  const shortHexMatch = /^#([0-9a-fA-F]{3})$/.exec(value);
+  if (shortHexMatch) {
+    const [r, g, b] = shortHexMatch[1].split("").map((digit) => Number.parseInt(`${digit}${digit}`, 16));
+    return { r, g, b };
+  }
+
+  const hexMatch = /^#([0-9a-fA-F]{6})$/.exec(value);
+  if (!hexMatch) {
+    return null;
+  }
+
+  return {
+    r: Number.parseInt(hexMatch[1].slice(0, 2), 16),
+    g: Number.parseInt(hexMatch[1].slice(2, 4), 16),
+    b: Number.parseInt(hexMatch[1].slice(4, 6), 16),
+  };
+}
+
+function resolveThemeColorLuminance(color) {
+  const rgb = parseThemeHexColor(color);
+  if (!rgb) {
+    return null;
+  }
+
+  const normalizeChannel = (channel) => {
+    const value = channel / 255;
+    return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+  };
+
+  const red = normalizeChannel(rgb.r);
+  const green = normalizeChannel(rgb.g);
+  const blue = normalizeChannel(rgb.b);
+  return (0.2126 * red) + (0.7152 * green) + (0.0722 * blue);
+}
+
+function isWorkspaceMaterialLightTheme(themeId = getActiveThemeId()) {
+  const background = getThemeDefinition(themeId)?.appVars?.["--bg"];
+  const luminance = resolveThemeColorLuminance(background);
+  return typeof luminance === "number" && luminance >= WORKSPACE_MATERIAL_LIGHT_THEME_LUMINANCE_THRESHOLD;
+}
+
+function buildWorkspaceFileExtensionCandidates(name) {
+  const normalizedName = String(name || "").trim().toLowerCase();
+  if (!normalizedName) {
+    return [];
+  }
+
+  const candidates = [];
+  for (let index = normalizedName.indexOf("."); index >= 0; index = normalizedName.indexOf(".", index + 1)) {
+    const candidate = normalizedName.slice(index + 1);
+    if (candidate) {
+      candidates.push(candidate);
+    }
+  }
+  return candidates;
+}
+
+function resolveWorkspaceMaterialFileIcon(name) {
+  const normalizedName = String(name || "").trim().toLowerCase();
+  if (!normalizedName) {
+    return null;
+  }
+
+  const lightTheme = isWorkspaceMaterialLightTheme();
+  let iconId = resolveWorkspaceMaterialSpecialFileIconId(normalizedName, lightTheme);
+
+  if (!iconId) {
+    const extensionCandidates = buildWorkspaceFileExtensionCandidates(normalizedName);
+    for (const candidate of extensionCandidates) {
+      iconId = candidate === "toml" && lightTheme
+        ? "toml_light"
+        : WORKSPACE_MATERIAL_FILE_EXTENSION_ICON_IDS[candidate] || "";
+      if (iconId) {
+        break;
+      }
+    }
+  }
+
+  if (!iconId) {
+    iconId = WORKSPACE_MATERIAL_ICON_THEME.file;
+  }
+
+  return resolveWorkspaceMaterialIconById(iconId);
+}
+
+function resolveWorkspaceMaterialFolderIcon(name, { expanded = false, isRoot = false } = {}) {
+  const normalizedName = String(name || "").trim().toLowerCase();
+  let iconId = normalizedName
+    ? (
+        expanded
+          ? WORKSPACE_MATERIAL_FOLDER_EXPANDED_ICON_IDS[normalizedName]
+          : WORKSPACE_MATERIAL_FOLDER_ICON_IDS[normalizedName]
+      ) || ""
+    : "";
+
+  if (!iconId) {
+    if (expanded) {
+      iconId = isRoot
+        ? (WORKSPACE_MATERIAL_ICON_THEME.rootFolderExpanded || WORKSPACE_MATERIAL_ICON_THEME.folderExpanded)
+        : WORKSPACE_MATERIAL_ICON_THEME.folderExpanded;
+    } else {
+      iconId = isRoot
+        ? (WORKSPACE_MATERIAL_ICON_THEME.rootFolder || WORKSPACE_MATERIAL_ICON_THEME.folder)
+        : WORKSPACE_MATERIAL_ICON_THEME.folder;
+    }
+  }
+
+  return resolveWorkspaceMaterialIconById(iconId, WORKSPACE_MATERIAL_ICON_THEME.folder);
+}
+
+function renderWorkspaceMaterialThemeIcon(icon, className = "workspace-file-explorer-theme-icon") {
+  if (!icon?.path) {
+    return "";
+  }
+
+  return `<img class="${escapeHtml(className)}" src="${escapeHtml(icon.path)}" alt="" aria-hidden="true" decoding="async">`;
+}
+
+function renderWorkspaceFileExplorerFileTypeIcon(name) {
+  const icon = resolveWorkspaceMaterialFileIcon(name);
+  return icon ? renderWorkspaceMaterialThemeIcon(icon) : renderFileIcon();
+}
+
+function renderWorkspaceFileExplorerFolderTypeIcon(name, { expanded = false, isRoot = false } = {}) {
+  const icon = resolveWorkspaceMaterialFolderIcon(name, { expanded, isRoot });
+  return icon ? renderWorkspaceMaterialThemeIcon(icon) : renderFolderIcon();
+}
+
 function renderMoreIcon() {
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -13616,7 +14004,14 @@ function renderWorkspaceFileExplorerEntries(entries, explorerState, selectedPath
             ${disclosure}
             <div class="workspace-file-explorer-entry is-${escapeHtml(kind)} ${gitDecoration ? `is-git-${escapeHtml(gitDecoration.tone)}` : ""}">
               <span class="workspace-file-explorer-entry-icon">
-                ${kind === "directory" ? renderFolderIcon() : renderFileIcon()}
+                ${
+                  kind === "directory"
+                    ? renderWorkspaceFileExplorerFolderTypeIcon(entry.name, {
+                        expanded: isExpanded,
+                        isRoot: depth === 0,
+                      })
+                    : renderWorkspaceFileExplorerFileTypeIcon(entry.name)
+                }
               </span>
               <span class="workspace-file-explorer-entry-label">${escapeHtml(entry.name)}</span>
               ${badge}
