@@ -13,55 +13,12 @@ export function renderWorkspaceStrip({
   formatGitBadgeTitle,
 }) {
   const tabLabels = buildWorkspaceTabLabels(workspaces);
+  const activeWorkspace = workspaces.find((workspace) => workspace.id === activeWorkspaceId) || null;
   return `
     <div class="workspace-strip-track" data-tauri-drag-region>
       <div class="workspace-strip-leading" data-tauri-drag-region aria-hidden="true"></div>
       ${renderWindowSummary(windowSummary, workspaces.length, escapeHtml)}
-      <div class="workspace-tabs-shell" data-workspace-tabs-shell data-tauri-drag-region>
-        <button
-          class="workspace-tabs-scroll workspace-tabs-scroll-left"
-          type="button"
-          data-tauri-drag-region="false"
-          data-action="scroll-workspaces-left"
-          aria-label="Scroll workspaces left"
-          title="Scroll workspaces left"
-          disabled
-        >
-          ${renderChevronIcon("left")}
-        </button>
-        <div class="workspace-tabs-viewport" data-workspace-tabs-viewport data-tauri-drag-region>
-          <div class="workspace-tabs" data-workspace-tabs data-tauri-drag-region>
-            ${
-              workspaces.length
-                ? renderWorkspaceTabs({
-                    workspaces,
-                    activeWorkspaceId,
-                    workspaceRenameDraft,
-                    tabLabels,
-                    getWorkspaceAttention,
-                    hasWorkspaceFileDraftIndicator,
-                    getWorkspaceFileDraftIndicatorTitle,
-                    escapeHtml,
-                    getGitTone,
-                    formatGitBadgeTitle,
-                  })
-                : '<span class="workspace-tabs-empty" data-tauri-drag-region="true">No workspaces open</span>'
-            }
-            <div class="workspace-tab-drop-indicator" data-workspace-tab-drop-indicator aria-hidden="true"></div>
-          </div>
-        </div>
-        <button
-          class="workspace-tabs-scroll workspace-tabs-scroll-right"
-          type="button"
-          data-tauri-drag-region="false"
-          data-action="scroll-workspaces-right"
-          aria-label="Scroll workspaces right"
-          title="Scroll workspaces right"
-          disabled
-        >
-          ${renderChevronIcon("right")}
-        </button>
-      </div>
+      ${renderActiveWorkspaceCrumb(activeWorkspace, tabLabels, escapeHtml)}
       <div class="workspace-strip-actions">
         ${workspaceOpenControlHtml || ""}
         ${workspaceGitControlHtml || ""}
@@ -84,6 +41,105 @@ export function renderWorkspaceStrip({
           ${renderPlusIcon()}
         </button>
       </div>
+    </div>
+  `;
+}
+
+export function renderWorkspaceSidebar({
+  workspaces,
+  activeWorkspaceId,
+  workspaceRenameDraft,
+  collapsed,
+  getWorkspaceAttention,
+  hasWorkspaceFileDraftIndicator,
+  getWorkspaceFileDraftIndicatorTitle,
+  escapeHtml,
+  getGitTone,
+  formatGitBadgeTitle,
+}) {
+  const tabLabels = buildWorkspaceTabLabels(workspaces);
+  return `
+    <nav
+      class="workspace-sidebar ${collapsed ? "is-collapsed" : ""}"
+      aria-label="Workspaces"
+      data-workspace-sidebar
+    >
+      <div class="workspace-sidebar-header">
+        <div class="workspace-sidebar-heading">
+          <span>Workspaces</span>
+          <strong>${escapeHtml(String(workspaces.length))}</strong>
+        </div>
+        <button
+          class="workspace-sidebar-toggle"
+          type="button"
+          data-action="toggle-workspace-sidebar"
+          aria-label="${collapsed ? "Expand workspace sidebar" : "Collapse workspace sidebar"}"
+          title="${collapsed ? "Expand sidebar" : "Collapse sidebar"}"
+          aria-expanded="${collapsed ? "false" : "true"}"
+        >
+          ${renderSidebarToggleIcon(collapsed)}
+        </button>
+      </div>
+      <div
+        class="workspace-tabs-shell workspace-sidebar-tabs-shell"
+        data-workspace-tabs-shell
+        data-workspace-tabs-orientation="vertical"
+      >
+        <div class="workspace-tabs-viewport" data-workspace-tabs-viewport>
+          <div
+            class="workspace-tabs workspace-sidebar-tabs"
+            data-workspace-tabs
+            data-workspace-tabs-orientation="vertical"
+          >
+            ${
+              workspaces.length
+                ? renderWorkspaceTabs({
+                    workspaces,
+                    activeWorkspaceId,
+                    workspaceRenameDraft,
+                    tabLabels,
+                    getWorkspaceAttention,
+                    hasWorkspaceFileDraftIndicator,
+                    getWorkspaceFileDraftIndicatorTitle,
+                    escapeHtml,
+                    getGitTone,
+                    formatGitBadgeTitle,
+                  })
+                : '<span class="workspace-tabs-empty">No workspaces</span>'
+            }
+            <div class="workspace-tab-drop-indicator" data-workspace-tab-drop-indicator aria-hidden="true"></div>
+          </div>
+        </div>
+      </div>
+      <button
+        class="workspace-sidebar-new"
+        type="button"
+        data-action="show-launcher"
+        aria-label="New workspace"
+        title="New workspace"
+      >
+        ${renderPlusIcon()}
+        <span>New workspace</span>
+      </button>
+    </nav>
+  `;
+}
+
+function renderActiveWorkspaceCrumb(activeWorkspace, tabLabels, escapeHtml) {
+  if (!activeWorkspace) {
+    return `
+      <div class="workspace-strip-current" data-tauri-drag-region>
+        <span>No workspace selected</span>
+      </div>
+    `;
+  }
+
+  const label = tabLabels.get(activeWorkspace.id) || activeWorkspace.name;
+  return `
+    <div class="workspace-strip-current" data-tauri-drag-region title="${escapeHtml(activeWorkspace.path)}">
+      <span class="workspace-strip-current-dot ${activeWorkspace.isLive ? "is-live" : "is-idle"}" aria-hidden="true"></span>
+      <strong>${escapeHtml(label)}</strong>
+      <span>${escapeHtml(activeWorkspace.path)}</span>
     </div>
   `;
 }
@@ -226,6 +282,7 @@ function renderWorkspaceTab({
         title="${escapeHtml(tabTitle)}"
       >
         <span class="workspace-tab-status ${liveClass}" aria-hidden="true"></span>
+        <span class="workspace-tab-initial" aria-hidden="true">${escapeHtml(getWorkspaceTabInitial(label))}</span>
         <span class="workspace-tab-name">${escapeHtml(label)}</span>
         ${renderWorkspaceFileDraftIndicator(hasFileDraft, fileDraftTitle, escapeHtml)}
         ${renderWorkspaceAttentionBadge(workspace, attention, escapeHtml)}
@@ -255,6 +312,11 @@ function renderWorkspaceTab({
       }
     </div>
   `;
+}
+
+function getWorkspaceTabInitial(label) {
+  const normalized = String(label || "").trim();
+  return (normalized[0] || "W").toUpperCase();
 }
 
 function renderWorkspaceGitIndicator(summary, getGitTone, formatGitBadgeTitle, escapeHtml) {
@@ -338,12 +400,22 @@ function renderPlusIcon() {
 }
 
 function renderChevronIcon(direction) {
-  const rotation = direction === "left" ? " style=\"transform: rotate(180deg)\"" : "";
+  const rotation = direction === "left"
+    ? " style=\"transform: rotate(180deg)\""
+    : direction === "up"
+      ? " style=\"transform: rotate(-90deg)\""
+      : direction === "down"
+        ? " style=\"transform: rotate(90deg)\""
+        : "";
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"${rotation}>
       <path fill-rule="evenodd" d="M16.28 11.47a.75.75 0 0 1 0 1.06l-7.5 7.5a.75.75 0 0 1-1.06-1.06L14.69 12 7.72 5.03a.75.75 0 0 1 1.06-1.06l7.5 7.5Z" clip-rule="evenodd" fill="currentColor"></path>
     </svg>
   `;
+}
+
+function renderSidebarToggleIcon(collapsed) {
+  return renderChevronIcon(collapsed ? "right" : "left");
 }
 
 function renderTabRenameIcon() {

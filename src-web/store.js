@@ -97,6 +97,7 @@ export function createUiState() {
     paneAttentionById: new Map(),
     workspaceFileExplorer: new Map(),
     workspaceFileEditor: new Map(),
+    workspaceSidebarCollapsed: false,
     workspaceRenameDraft: null,
     workspaceRenameShouldFocus: false,
     workspaceRenameSaving: false,

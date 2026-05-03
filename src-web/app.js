@@ -18,6 +18,7 @@ import { renderActivityRail } from "./activity-rail.js";
 import { createRuntimeStore, createUiState } from "./store.js";
 import {
   buildWorkspaceTabLabels,
+  renderWorkspaceSidebar,
   renderWorkspaceStrip,
 } from "./workspace-strip.js";
 
@@ -47,6 +48,7 @@ const WORKSPACE_TAB_DRAG_THRESHOLD_PX = 6;
 const WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX = 32;
 const WORKSPACE_TAB_EDGE_SCROLL_MAX_PX_PER_FRAME = 18;
 const WORKSPACE_TAB_CLICK_SUPPRESS_MS = 250;
+const WORKSPACE_SIDEBAR_COLLAPSED_STORAGE_KEY = "crewdock.workspaceSidebarCollapsed";
 const MARKDOWN_VIEW_MODES = new Set(["write", "preview", "split"]);
 const MARKDOWN_MERMAID_LANGUAGES = new Set(["mermaid"]);
 const MARKDOWN_MERMAID_RENDER_ID_PREFIX = "crewdock-mermaid";
@@ -894,6 +896,7 @@ const bridge = createBridge({
 });
 
 const uiState = createUiState();
+uiState.workspaceSidebarCollapsed = loadWorkspaceSidebarCollapsedPreference();
 const runtimeStore = createRuntimeStore();
 const {
   paneTerminals,
@@ -906,6 +909,22 @@ const {
 window.__crewdockRenderDebug = runtimeStore.renderMetrics;
 
 void init();
+
+function loadWorkspaceSidebarCollapsedPreference() {
+  try {
+    return window.localStorage?.getItem(WORKSPACE_SIDEBAR_COLLAPSED_STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function persistWorkspaceSidebarCollapsedPreference(collapsed) {
+  try {
+    window.localStorage?.setItem(WORKSPACE_SIDEBAR_COLLAPSED_STORAGE_KEY, collapsed ? "true" : "false");
+  } catch {
+    // Ignore storage failures; the sidebar still works for the current session.
+  }
+}
 
 function applyAppSnapshot(snapshot, { hydrateActivity = false } = {}) {
   uiState.snapshot = snapshot;
@@ -4089,6 +4108,13 @@ async function handleClick(event) {
     return;
   }
 
+  if (target.dataset.action === "toggle-workspace-sidebar") {
+    uiState.workspaceSidebarCollapsed = !uiState.workspaceSidebarCollapsed;
+    persistWorkspaceSidebarCollapsedPreference(uiState.workspaceSidebarCollapsed);
+    requestRender(RENDER_STRIP | RENDER_TERMINALS);
+    return;
+  }
+
   if (target.dataset.action === "close-settings") {
     closeSettingsSheet();
     return;
@@ -4460,7 +4486,7 @@ async function handleClick(event) {
 
     closeQuickSwitcher();
     startWorkspaceRename(workspaceId);
-    requestRender(RENDER_STRIP);
+    requestRender(RENDER_STRIP | RENDER_TERMINALS);
     return;
   }
 
@@ -4836,7 +4862,7 @@ function updateWorkspaceTabDrag(clientX, clientY) {
 
   syncWorkspaceTabDraggedShellPosition();
 
-  const nextTargetIndex = resolveWorkspaceTabTargetIndex(drag.tabsEl, drag.workspaceId, clientX);
+  const nextTargetIndex = resolveWorkspaceTabTargetIndex(drag.tabsEl, drag.workspaceId, clientX, clientY);
   if (nextTargetIndex !== drag.targetIndex) {
     moveWorkspaceTabDropSlot(nextTargetIndex);
   } else {
@@ -4962,6 +4988,28 @@ function renderWorkspaceStripRegion(
     getGitTone,
     formatGitBadgeTitle,
   });
+}
+
+function renderWorkspaceSidebarRegion(
+  sidebarRegion = app.querySelector('[data-region="sidebar"]'),
+  snapshot = uiState.snapshot,
+) {
+  if (!sidebarRegion || !snapshot) {
+    return;
+  }
+
+  sidebarRegion.innerHTML = renderWorkspaceSidebar({
+    workspaces: snapshot.workspaces,
+    activeWorkspaceId: snapshot.activeWorkspaceId,
+    workspaceRenameDraft: uiState.workspaceRenameDraft,
+    collapsed: uiState.workspaceSidebarCollapsed,
+    getWorkspaceAttention,
+    hasWorkspaceFileDraftIndicator: workspaceHasFileDraftIndicator,
+    getWorkspaceFileDraftIndicatorTitle,
+    escapeHtml,
+    getGitTone,
+    formatGitBadgeTitle,
+  });
   syncWorkspaceTabRail(snapshot.activeWorkspaceId, snapshot.workspaces.length);
   if (
     uiState.workspaceRenameDraft
@@ -5017,6 +5065,7 @@ function cleanupWorkspaceTabDragChrome(drag) {
   if (drag.indicatorEl instanceof HTMLElement) {
     drag.indicatorEl.classList.remove("is-active", "is-immediate");
     drag.indicatorEl.style.left = "";
+    drag.indicatorEl.style.top = "";
   }
 
   if (drag.tabShellEl instanceof HTMLElement) {
@@ -5108,7 +5157,13 @@ function syncWorkspaceTabDropIndicator({ immediate = false } = {}) {
     drag.indicatorEl.classList.add("is-immediate");
   }
 
-  drag.indicatorEl.style.left = `${(drag.dropSlotEl.offsetLeft + drag.dropSlotEl.offsetWidth / 2).toFixed(2)}px`;
+  if (isWorkspaceTabsVertical(drag.tabsEl)) {
+    drag.indicatorEl.style.left = "";
+    drag.indicatorEl.style.top = `${drag.dropSlotEl.offsetTop.toFixed(2)}px`;
+  } else {
+    drag.indicatorEl.style.top = "";
+    drag.indicatorEl.style.left = `${(drag.dropSlotEl.offsetLeft + drag.dropSlotEl.offsetWidth / 2).toFixed(2)}px`;
+  }
   drag.indicatorEl.classList.add("is-active");
 
   if (immediate) {
@@ -5144,13 +5199,15 @@ function animateWorkspaceTabShellReflow(previousRects, shells) {
     }
 
     const nextRect = shell.getBoundingClientRect();
-    const deltaX = previousRect.left - nextRect.left;
-    if (Math.abs(deltaX) <= 0.5) {
+    const isVertical = isWorkspaceTabsVertical(shell);
+    const deltaX = isVertical ? 0 : previousRect.left - nextRect.left;
+    const deltaY = isVertical ? previousRect.top - nextRect.top : 0;
+    if (Math.hypot(deltaX, deltaY) <= 0.5) {
       continue;
     }
 
     shell.style.transition = "none";
-    shell.style.transform = `translate3d(${deltaX}px, 0, 0)`;
+    shell.style.transform = `translate3d(${deltaX}px, ${deltaY}px, 0)`;
     animatedShells.push(shell);
   }
 
@@ -5166,17 +5223,20 @@ function animateWorkspaceTabShellReflow(previousRects, shells) {
   });
 }
 
-function resolveWorkspaceTabTargetIndex(tabs, draggedWorkspaceId, clientX) {
+function resolveWorkspaceTabTargetIndex(tabs, draggedWorkspaceId, clientX, clientY = 0) {
   if (!tabs) {
     return 0;
   }
 
+  const isVertical = isWorkspaceTabsVertical(tabs);
   const tabShells = Array.from(tabs.querySelectorAll("[data-workspace-tab-shell]"))
     .filter((element) => element instanceof HTMLElement)
     .filter((element) => element.dataset.workspaceId !== draggedWorkspaceId);
   for (let index = 0; index < tabShells.length; index += 1) {
     const rect = tabShells[index].getBoundingClientRect();
-    if (clientX < rect.left + rect.width / 2) {
+    const pointerPosition = isVertical ? clientY : clientX;
+    const midpoint = isVertical ? rect.top + rect.height / 2 : rect.left + rect.width / 2;
+    if (pointerPosition < midpoint) {
       return index;
     }
   }
@@ -5213,7 +5273,12 @@ function syncWorkspaceTabAutoScroll() {
 
   const viewport = uiState.workspaceTabDrag?.tabsEl?.closest?.("[data-workspace-tabs-viewport]")
     || document.querySelector("[data-workspace-tabs-viewport]");
-  const delta = getWorkspaceTabAutoScrollDelta(viewport, uiState.workspaceTabDrag?.currentX || 0);
+  const drag = uiState.workspaceTabDrag;
+  const delta = getWorkspaceTabAutoScrollDelta(
+    viewport,
+    isWorkspaceTabsVertical(drag?.tabsEl) ? drag?.currentY || 0 : drag?.currentX || 0,
+    isWorkspaceTabsVertical(drag?.tabsEl) ? "vertical" : "horizontal",
+  );
   if (!delta) {
     stopWorkspaceTabAutoScroll();
     return;
@@ -5235,21 +5300,33 @@ function stepWorkspaceTabAutoScroll() {
     return;
   }
 
-  const delta = getWorkspaceTabAutoScrollDelta(viewport, drag.currentX);
+  const isVertical = isWorkspaceTabsVertical(tabs);
+  const delta = getWorkspaceTabAutoScrollDelta(
+    viewport,
+    isVertical ? drag.currentY : drag.currentX,
+    isVertical ? "vertical" : "horizontal",
+  );
   if (!delta) {
     return;
   }
 
-  const maxScrollLeft = Math.max(0, tabs.scrollWidth - tabs.clientWidth);
-  const nextLeft = Math.max(0, Math.min(maxScrollLeft, tabs.scrollLeft + delta));
-  if (Math.abs(nextLeft - tabs.scrollLeft) <= 0.5) {
+  const maxScroll = isVertical
+    ? Math.max(0, tabs.scrollHeight - tabs.clientHeight)
+    : Math.max(0, tabs.scrollWidth - tabs.clientWidth);
+  const currentScroll = isVertical ? tabs.scrollTop : tabs.scrollLeft;
+  const nextScroll = Math.max(0, Math.min(maxScroll, currentScroll + delta));
+  if (Math.abs(nextScroll - currentScroll) <= 0.5) {
     return;
   }
 
-  tabs.scrollLeft = nextLeft;
+  if (isVertical) {
+    tabs.scrollTop = nextScroll;
+  } else {
+    tabs.scrollLeft = nextScroll;
+  }
   rememberWorkspaceTabsScroll(tabs);
   syncWorkspaceTabsOverflow(tabs, drag.stripShellEl || tabs.closest("[data-workspace-tabs-shell]"));
-  const nextTargetIndex = resolveWorkspaceTabTargetIndex(tabs, drag.workspaceId, drag.currentX);
+  const nextTargetIndex = resolveWorkspaceTabTargetIndex(tabs, drag.workspaceId, drag.currentX, drag.currentY);
   if (nextTargetIndex !== drag.targetIndex) {
     moveWorkspaceTabDropSlot(nextTargetIndex);
   } else {
@@ -5265,25 +5342,28 @@ function stopWorkspaceTabAutoScroll() {
   }
 }
 
-function getWorkspaceTabAutoScrollDelta(viewport, clientX) {
+function getWorkspaceTabAutoScrollDelta(viewport, pointerPosition, orientation = "horizontal") {
   if (!(viewport instanceof HTMLElement)) {
     return 0;
   }
 
   const rect = viewport.getBoundingClientRect();
-  if (rect.width <= 0) {
+  const size = orientation === "vertical" ? rect.height : rect.width;
+  const start = orientation === "vertical" ? rect.top : rect.left;
+  const end = orientation === "vertical" ? rect.bottom : rect.right;
+  if (size <= 0) {
     return 0;
   }
 
-  if (clientX < rect.left + WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX) {
-    const strength = (rect.left + WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX - clientX)
+  if (pointerPosition < start + WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX) {
+    const strength = (start + WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX - pointerPosition)
       / WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX;
     const easedStrength = Math.min(1, strength) ** 1.35;
     return -(1.5 + WORKSPACE_TAB_EDGE_SCROLL_MAX_PX_PER_FRAME * easedStrength);
   }
 
-  if (clientX > rect.right - WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX) {
-    const strength = (clientX - (rect.right - WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX))
+  if (pointerPosition > end - WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX) {
+    const strength = (pointerPosition - (end - WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX))
       / WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX;
     const easedStrength = Math.min(1, strength) ** 1.35;
     return 1.5 + WORKSPACE_TAB_EDGE_SCROLL_MAX_PX_PER_FRAME * easedStrength;
@@ -5410,6 +5490,10 @@ function handleWheel(event) {
 
   const tabs = shell.querySelector("[data-workspace-tabs]");
   if (!tabs || tabs.scrollWidth <= tabs.clientWidth + 1) {
+    return;
+  }
+
+  if (isWorkspaceTabsVertical(tabs)) {
     return;
   }
 
@@ -8751,6 +8835,8 @@ function startWorkspaceRename(workspaceId) {
   };
   uiState.workspaceRenameShouldFocus = true;
   uiState.workspaceRenameSaving = false;
+  uiState.workspaceSidebarCollapsed = false;
+  persistWorkspaceSidebarCollapsedPreference(false);
   uiState.launcherVisible = false;
   hideSettingsSheet();
   uiState.gitPanelVisible = false;
@@ -8807,7 +8893,10 @@ function ensureFrame() {
     <div class="app-shell">
       <header class="workspace-strip" data-region="strip"></header>
       <div class="workspace-update-region" data-region="update"></div>
-      <section class="workspace-stage" data-region="stage"></section>
+      <div class="workspace-main-shell">
+        <aside class="workspace-sidebar-region" data-region="sidebar"></aside>
+        <section class="workspace-stage" data-region="stage"></section>
+      </div>
       <footer class="workspace-statusbar-region" data-region="status"></footer>
       <div class="workspace-activity-layer" data-region="activity"></div>
       <div class="workspace-context-layer" data-region="context"></div>
@@ -9025,6 +9114,7 @@ function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskInterse
   }
 
   const stripRegion = app.querySelector('[data-region="strip"]');
+  const sidebarRegion = app.querySelector('[data-region="sidebar"]');
   const updateRegion = app.querySelector('[data-region="update"]');
   const stageRegion = app.querySelector('[data-region="stage"]');
   const statusRegion = app.querySelector('[data-region="status"]');
@@ -9033,6 +9123,7 @@ function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskInterse
   const modalRegion = app.querySelector('[data-region="modal"]');
   if (renderMaskIncludes(mask, RENDER_STRIP)) {
     renderWorkspaceStripRegion(stripRegion, snapshot);
+    renderWorkspaceSidebarRegion(sidebarRegion, snapshot);
     recordRenderMetric("strip");
   }
   if (renderMaskIncludes(mask, RENDER_STATUS)) {
@@ -10716,8 +10807,8 @@ function syncWorkspaceTabRail(activeWorkspaceId, workspaceCount) {
   }
 
   if (isWorkspaceTabDragActive()) {
-    if (Math.abs(tabs.scrollLeft - uiState.workspaceTabsScrollLeft) > 1) {
-      tabs.scrollLeft = uiState.workspaceTabsScrollLeft;
+    if (Math.abs(getWorkspaceTabsScrollPosition(tabs) - uiState.workspaceTabsScrollLeft) > 1) {
+      setWorkspaceTabsScrollPosition(tabs, uiState.workspaceTabsScrollLeft);
     }
     rememberWorkspaceTabsScroll(tabs);
     syncWorkspaceTabsOverflow(tabs, shell);
@@ -10730,8 +10821,8 @@ function syncWorkspaceTabRail(activeWorkspaceId, workspaceCount) {
   const countChanged = workspaceCount !== uiState.workspaceTabsLastCount;
   if (activeChanged || countChanged) {
     scrollWorkspaceTabIntoView(tabs, activeWorkspaceId, "smooth");
-  } else if (Math.abs(tabs.scrollLeft - uiState.workspaceTabsScrollLeft) > 1) {
-    tabs.scrollLeft = uiState.workspaceTabsScrollLeft;
+  } else if (Math.abs(getWorkspaceTabsScrollPosition(tabs) - uiState.workspaceTabsScrollLeft) > 1) {
+    setWorkspaceTabsScrollPosition(tabs, uiState.workspaceTabsScrollLeft);
     rememberWorkspaceTabsScroll(tabs);
   } else {
     rememberWorkspaceTabsScroll(tabs);
@@ -10748,15 +10839,17 @@ function scrollWorkspaceTabs(direction) {
     return;
   }
 
-  const distance = Math.max(180, Math.round(tabs.clientWidth * 0.68));
-  const maxScrollLeft = Math.max(0, tabs.scrollWidth - tabs.clientWidth);
-  const nextLeft = Math.min(maxScrollLeft, Math.max(0, tabs.scrollLeft + distance * direction));
-  tabs.scrollTo({
-    left: nextLeft,
-    behavior: "smooth",
-  });
+  const isVertical = isWorkspaceTabsVertical(tabs);
+  const viewportSize = isVertical ? tabs.clientHeight : tabs.clientWidth;
+  const contentSize = isVertical ? tabs.scrollHeight : tabs.scrollWidth;
+  const distance = Math.max(180, Math.round(viewportSize * 0.68));
+  const maxScroll = Math.max(0, contentSize - viewportSize);
+  const nextScroll = Math.min(maxScroll, Math.max(0, getWorkspaceTabsScrollPosition(tabs) + distance * direction));
+  tabs.scrollTo(isVertical
+    ? { top: nextScroll, behavior: "smooth" }
+    : { left: nextScroll, behavior: "smooth" });
 
-  uiState.workspaceTabsScrollLeft = nextLeft;
+  uiState.workspaceTabsScrollLeft = nextScroll;
   window.setTimeout(() => {
     rememberWorkspaceTabsScroll(tabs);
     syncWorkspaceTabsOverflow(tabs);
@@ -10772,6 +10865,24 @@ function scrollWorkspaceTabIntoView(tabs, workspaceId, behavior = "auto") {
   const activeTabButton = tabs.querySelector(selector);
   const activeTab = activeTabButton?.closest?.("[data-workspace-tab-shell]");
   if (!(activeTab instanceof HTMLElement)) {
+    return;
+  }
+
+  if (isWorkspaceTabsVertical(tabs)) {
+    const tabTop = activeTab.offsetTop;
+    const tabHeight = activeTab.offsetHeight;
+    const viewportHeight = tabs.clientHeight;
+    const maxScrollTop = Math.max(0, tabs.scrollHeight - viewportHeight);
+    const nextTop = Math.min(
+      maxScrollTop,
+      Math.max(0, tabTop - (viewportHeight - tabHeight) / 2),
+    );
+
+    tabs.scrollTo({
+      top: nextTop,
+      behavior,
+    });
+    uiState.workspaceTabsScrollLeft = nextTop;
     return;
   }
 
@@ -10796,13 +10907,17 @@ function syncWorkspaceTabsOverflow(tabs, shell = tabs.closest("[data-workspace-t
     return;
   }
 
-  const maxScrollLeft = Math.max(0, tabs.scrollWidth - tabs.clientWidth);
-  const hasLeft = tabs.scrollLeft > 6;
-  const hasRight = tabs.scrollLeft < maxScrollLeft - 6;
+  const isVertical = isWorkspaceTabsVertical(tabs);
+  const maxScroll = isVertical
+    ? Math.max(0, tabs.scrollHeight - tabs.clientHeight)
+    : Math.max(0, tabs.scrollWidth - tabs.clientWidth);
+  const scrollPosition = getWorkspaceTabsScrollPosition(tabs);
+  const hasLeft = scrollPosition > 6;
+  const hasRight = scrollPosition < maxScroll - 6;
 
   shell.classList.toggle("has-overflow-left", hasLeft);
   shell.classList.toggle("has-overflow-right", hasRight);
-  shell.classList.toggle("has-overflow-any", maxScrollLeft > 6);
+  shell.classList.toggle("has-overflow-any", maxScroll > 6);
 
   const leftButton = shell.querySelector(".workspace-tabs-scroll-left");
   const rightButton = shell.querySelector(".workspace-tabs-scroll-right");
@@ -10815,7 +10930,32 @@ function syncWorkspaceTabsOverflow(tabs, shell = tabs.closest("[data-workspace-t
 }
 
 function rememberWorkspaceTabsScroll(tabs) {
-  uiState.workspaceTabsScrollLeft = tabs ? Math.max(0, tabs.scrollLeft) : 0;
+  uiState.workspaceTabsScrollLeft = tabs ? Math.max(0, getWorkspaceTabsScrollPosition(tabs)) : 0;
+}
+
+function isWorkspaceTabsVertical(tabs) {
+  const element = tabs instanceof Element ? tabs : null;
+  const shell = element?.closest?.("[data-workspace-tabs-shell]");
+  return element?.dataset?.workspaceTabsOrientation === "vertical"
+    || shell?.dataset?.workspaceTabsOrientation === "vertical";
+}
+
+function getWorkspaceTabsScrollPosition(tabs) {
+  if (!tabs) {
+    return 0;
+  }
+  return isWorkspaceTabsVertical(tabs) ? tabs.scrollTop : tabs.scrollLeft;
+}
+
+function setWorkspaceTabsScrollPosition(tabs, value) {
+  if (!tabs) {
+    return;
+  }
+  if (isWorkspaceTabsVertical(tabs)) {
+    tabs.scrollTop = value;
+  } else {
+    tabs.scrollLeft = value;
+  }
 }
 
 function normalizeWheelDelta(event, tabs) {
@@ -13828,8 +13968,6 @@ function renderWorkspace(workspace) {
   const fileEditorVisible = isWorkspaceFileEditorVisible(workspace.id);
   return `
     <main class="workspace-screen ${maximizedPane ? "is-maximized" : ""} ${fileExplorerVisible ? "has-file-explorer" : ""} ${fileEditorVisible ? "has-file-editor" : ""}">
-      ${renderWorkspaceFileExplorerShell(workspace)}
-      ${renderWorkspaceFileEditorShell(workspace)}
       <section class="terminal-layout">
         ${
           maximizedPane
@@ -13837,6 +13975,8 @@ function renderWorkspace(workspace) {
             : renderPaneLayout(paneLayout, workspace, paneIndexById)
         }
       </section>
+      ${renderWorkspaceFileExplorerShell(workspace)}
+      ${renderWorkspaceFileEditorShell(workspace)}
     </main>
   `;
 }
