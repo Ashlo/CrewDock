@@ -9,12 +9,14 @@ use std::{
 
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use tauri::AppHandle;
 
 use crate::{
     collect_git_detail,
     events::{emit_runtime_event, RuntimeEvent},
     persistence::{self, ActivityEventKind},
+    telemetry,
     run_git_command, validate_git_cli_arg, GitFileSnapshot, GitState, GitSummarySnapshot,
     RuntimeState,
 };
@@ -770,6 +772,10 @@ fn format_git_task_start_output(args: &[String]) -> String {
     format!("$ git {}\n\nStarting task...\n", args.join(" "))
 }
 
+fn is_commit_task(task: &GitTaskSnapshot) -> bool {
+    task.command.starts_with("git commit ")
+}
+
 fn git_task_output_requests_input(output: &str) -> bool {
     let last_line = output.lines().rev().map(str::trim).find(|line| {
         !line.is_empty() && !line.starts_with("$ git ") && *line != "Starting task..."
@@ -1043,6 +1049,13 @@ fn stream_git_task_output(
                 &RuntimeEvent::ActivityRecorded {
                     event: activity_event,
                 },
+            );
+        }
+        if task.status == GitTaskStatus::Succeeded && is_commit_task(&task) {
+            telemetry::queue_event(
+                &shared,
+                "git_commit_succeeded",
+                telemetry::object(json!({})),
             );
         }
     }

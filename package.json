@@ -1,23 +1,44 @@
 {
   "name": "crewdock",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "license": "MIT",
   "description": "Desktop workspace switcher with PTY-backed terminals and built-in source control",
   "type": "module",
   "scripts": {
-    "postinstall": "npm run sync:xterm",
-    "sync:xterm": "mkdir -p src-web/vendor && cp node_modules/@xterm/xterm/lib/xterm.mjs src-web/vendor/xterm.mjs && cp node_modules/@xterm/xterm/css/xterm.css src-web/vendor/xterm.css && cp node_modules/@xterm/addon-fit/lib/addon-fit.mjs src-web/vendor/addon-fit.mjs && cp node_modules/mermaid/dist/mermaid.min.js src-web/vendor/mermaid.min.js",
-    "dev": "bash scripts/run-macos-dev-app.sh",
+    "postinstall": "npm run sync:xterm && npm run sync:codemirror",
+    "sync:xterm": "node scripts/sync-xterm-assets.mjs",
+    "sync:codemirror": "node scripts/sync-codemirror-assets.mjs",
+    "dev": "bash scripts/run-dev.sh",
+    "dev:mac": "bash scripts/run-macos-dev-app.sh",
+    "dev:tauri": "cargo tauri dev",
     "dev:bin": "cargo run --manifest-path src-tauri/Cargo.toml",
     "dev:build-app": "bash scripts/run-macos-dev-app.sh --build-only",
+    "build:tauri": "cargo tauri build",
     "build:mac": "bash scripts/build-macos-dmg.sh",
+    "build:windows:nsis": "cargo tauri build --target x86_64-pc-windows-msvc",
+    "build:windows:nsis:xwin": "cargo tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc",
     "check": "cargo check --manifest-path src-tauri/Cargo.toml",
     "fmt": "cargo fmt --manifest-path src-tauri/Cargo.toml --all"
   },
   "dependencies": {
+    "@codemirror/lang-css": "^6.3.1",
+    "@codemirror/lang-html": "^6.4.11",
+    "@codemirror/lang-javascript": "^6.2.5",
+    "@codemirror/lang-json": "^6.0.2",
+    "@codemirror/lang-markdown": "^6.5.0",
+    "@codemirror/lang-python": "^6.2.1",
+    "@codemirror/lang-rust": "^6.0.2",
+    "@codemirror/lang-sql": "^6.10.0",
+    "@codemirror/lang-xml": "^6.1.0",
+    "@codemirror/lang-yaml": "^6.1.3",
+    "@codemirror/legacy-modes": "^6.5.2",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
+    "codemirror": "^6.0.2",
     "mermaid": "^11.14.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.0"
   }
 }

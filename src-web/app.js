@@ -18,6 +18,7 @@ import { renderActivityRail } from "./activity-rail.js";
 import { createRuntimeStore, createUiState } from "./store.js";
 import {
   buildWorkspaceTabLabels,
+  renderWorkspaceSidebar,
   renderWorkspaceStrip,
 } from "./workspace-strip.js";
 
@@ -47,9 +48,20 @@ const WORKSPACE_TAB_DRAG_THRESHOLD_PX = 6;
 const WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX = 32;
 const WORKSPACE_TAB_EDGE_SCROLL_MAX_PX_PER_FRAME = 18;
 const WORKSPACE_TAB_CLICK_SUPPRESS_MS = 250;
+const WORKSPACE_SIDEBAR_COLLAPSED_STORAGE_KEY = "crewdock.workspaceSidebarCollapsed";
+const WORKSPACE_FILE_EDITOR_WIDTH_STORAGE_KEY = "crewdock.workspaceFileEditorWidth";
+const WORKSPACE_FILE_EDITOR_MIN_WIDTH = 340;
+const WORKSPACE_FILE_EDITOR_MAX_WIDTH = 1160;
+const WORKSPACE_FILE_EDITOR_MIN_STAGE_WIDTH = 420;
+const TIME_BLOCK_STATE_STORAGE_KEY = "crewdock.timeBlock.state";
+const TIME_BLOCK_DEFAULT_DURATION_MINUTES = 50;
+const TIME_BLOCK_MIN_DURATION_MINUTES = 1;
+const TIME_BLOCK_MAX_DURATION_MINUTES = 240;
+const TIME_BLOCK_PRESETS_MINUTES = Object.freeze([25, 50, 90]);
 const MARKDOWN_VIEW_MODES = new Set(["write", "preview", "split"]);
 const MARKDOWN_MERMAID_LANGUAGES = new Set(["mermaid"]);
 const MARKDOWN_MERMAID_RENDER_ID_PREFIX = "crewdock-mermaid";
+const CODEMIRROR_VENDOR_MODULE_URL = "./vendor/codemirror.bundle.mjs";
 const MARKDOWN_RAW_HTML_ALLOWED_TAGS = new Set([
   "a",
   "blockquote",
@@ -97,6 +109,186 @@ const MARKDOWN_RAW_HTML_BLOCK_TAGS = new Set([
   "tr",
   "ul",
 ]);
+const WORKSPACE_MATERIAL_ICON_PATH_PREFIX = "./vendor/material-icons/icons/";
+const WORKSPACE_MATERIAL_LIGHT_THEME_LUMINANCE_THRESHOLD = 0.58;
+function createWorkspaceMaterialIconDescriptor(assetName) {
+  return Object.freeze({ path: `${WORKSPACE_MATERIAL_ICON_PATH_PREFIX}${assetName}` });
+}
+
+const WORKSPACE_MATERIAL_ICON_THEME = Object.freeze({
+  file: "file",
+  folder: "folder",
+  folderExpanded: "folder-open",
+  rootFolder: "folder-root",
+  rootFolderExpanded: "folder-root-open",
+  iconDefinitions: Object.freeze({
+    file: createWorkspaceMaterialIconDescriptor("file.svg"),
+    folder: createWorkspaceMaterialIconDescriptor("folder.svg"),
+    "folder-open": createWorkspaceMaterialIconDescriptor("folder-open.svg"),
+    "folder-root": createWorkspaceMaterialIconDescriptor("folder-root.svg"),
+    "folder-root-open": createWorkspaceMaterialIconDescriptor("folder-root-open.svg"),
+    "folder-app": createWorkspaceMaterialIconDescriptor("folder-app.svg"),
+    "folder-app-open": createWorkspaceMaterialIconDescriptor("folder-app-open.svg"),
+    "folder-components": createWorkspaceMaterialIconDescriptor("folder-components.svg"),
+    "folder-components-open": createWorkspaceMaterialIconDescriptor("folder-components-open.svg"),
+    "folder-public": createWorkspaceMaterialIconDescriptor("folder-public.svg"),
+    "folder-public-open": createWorkspaceMaterialIconDescriptor("folder-public-open.svg"),
+    "folder-lib": createWorkspaceMaterialIconDescriptor("folder-lib.svg"),
+    "folder-lib-open": createWorkspaceMaterialIconDescriptor("folder-lib-open.svg"),
+    "folder-src": createWorkspaceMaterialIconDescriptor("folder-src.svg"),
+    "folder-src-open": createWorkspaceMaterialIconDescriptor("folder-src-open.svg"),
+    "folder-src-tauri": createWorkspaceMaterialIconDescriptor("folder-src-tauri.svg"),
+    "folder-src-tauri-open": createWorkspaceMaterialIconDescriptor("folder-src-tauri-open.svg"),
+    "folder-docs": createWorkspaceMaterialIconDescriptor("folder-docs.svg"),
+    "folder-docs-open": createWorkspaceMaterialIconDescriptor("folder-docs-open.svg"),
+    "folder-scripts": createWorkspaceMaterialIconDescriptor("folder-scripts.svg"),
+    "folder-scripts-open": createWorkspaceMaterialIconDescriptor("folder-scripts-open.svg"),
+    "folder-test": createWorkspaceMaterialIconDescriptor("folder-test.svg"),
+    "folder-test-open": createWorkspaceMaterialIconDescriptor("folder-test-open.svg"),
+    "folder-images": createWorkspaceMaterialIconDescriptor("folder-images.svg"),
+    "folder-images-open": createWorkspaceMaterialIconDescriptor("folder-images-open.svg"),
+    "folder-github": createWorkspaceMaterialIconDescriptor("folder-github.svg"),
+    "folder-github-open": createWorkspaceMaterialIconDescriptor("folder-github-open.svg"),
+    "folder-config": createWorkspaceMaterialIconDescriptor("folder-config.svg"),
+    "folder-config-open": createWorkspaceMaterialIconDescriptor("folder-config-open.svg"),
+    react: createWorkspaceMaterialIconDescriptor("react.svg"),
+    react_ts: createWorkspaceMaterialIconDescriptor("react_ts.svg"),
+    javascript: createWorkspaceMaterialIconDescriptor("javascript.svg"),
+    typescript: createWorkspaceMaterialIconDescriptor("typescript.svg"),
+    python: createWorkspaceMaterialIconDescriptor("python.svg"),
+    "python-misc": createWorkspaceMaterialIconDescriptor("python-misc.svg"),
+    rust: createWorkspaceMaterialIconDescriptor("rust.svg"),
+    markdown: createWorkspaceMaterialIconDescriptor("markdown.svg"),
+    json: createWorkspaceMaterialIconDescriptor("json.svg"),
+    yaml: createWorkspaceMaterialIconDescriptor("yaml.svg"),
+    html: createWorkspaceMaterialIconDescriptor("html.svg"),
+    css: createWorkspaceMaterialIconDescriptor("css.svg"),
+    database: createWorkspaceMaterialIconDescriptor("database.svg"),
+    table: createWorkspaceMaterialIconDescriptor("table.svg"),
+    toml: createWorkspaceMaterialIconDescriptor("toml.svg"),
+    toml_light: createWorkspaceMaterialIconDescriptor("toml_light.svg"),
+    go: createWorkspaceMaterialIconDescriptor("go.svg"),
+    swift: createWorkspaceMaterialIconDescriptor("swift.svg"),
+    java: createWorkspaceMaterialIconDescriptor("java.svg"),
+    kotlin: createWorkspaceMaterialIconDescriptor("kotlin.svg"),
+    ruby: createWorkspaceMaterialIconDescriptor("ruby.svg"),
+    php: createWorkspaceMaterialIconDescriptor("php.svg"),
+    console: createWorkspaceMaterialIconDescriptor("console.svg"),
+    xml: createWorkspaceMaterialIconDescriptor("xml.svg"),
+    svg: createWorkspaceMaterialIconDescriptor("svg.svg"),
+    image: createWorkspaceMaterialIconDescriptor("image.svg"),
+    pdf: createWorkspaceMaterialIconDescriptor("pdf.svg"),
+    word: createWorkspaceMaterialIconDescriptor("word.svg"),
+    document: createWorkspaceMaterialIconDescriptor("document.svg"),
+    git: createWorkspaceMaterialIconDescriptor("git.svg"),
+    docker: createWorkspaceMaterialIconDescriptor("docker.svg"),
+    tauri: createWorkspaceMaterialIconDescriptor("tauri.svg"),
+    favicon: createWorkspaceMaterialIconDescriptor("favicon.svg"),
+    readme: createWorkspaceMaterialIconDescriptor("readme.svg"),
+    license: createWorkspaceMaterialIconDescriptor("license.svg"),
+    nodejs: createWorkspaceMaterialIconDescriptor("nodejs.svg"),
+    pnpm: createWorkspaceMaterialIconDescriptor("pnpm.svg"),
+    tune: createWorkspaceMaterialIconDescriptor("tune.svg"),
+    tsconfig: createWorkspaceMaterialIconDescriptor("tsconfig.svg"),
+    lock: createWorkspaceMaterialIconDescriptor("lock.svg"),
+    next: createWorkspaceMaterialIconDescriptor("next.svg"),
+    next_light: createWorkspaceMaterialIconDescriptor("next_light.svg"),
+  }),
+});
+const WORKSPACE_MATERIAL_FILE_EXTENSION_ICON_IDS = Object.freeze({
+  js: "javascript",
+  mjs: "javascript",
+  cjs: "javascript",
+  jsx: "react",
+  ts: "typescript",
+  mts: "typescript",
+  cts: "typescript",
+  tsx: "react_ts",
+  json: "json",
+  jsonc: "json",
+  json5: "json",
+  md: "markdown",
+  mdx: "markdown",
+  py: "python",
+  rs: "rust",
+  go: "go",
+  swift: "swift",
+  java: "java",
+  kt: "kotlin",
+  kts: "kotlin",
+  rb: "ruby",
+  php: "php",
+  sh: "console",
+  bash: "console",
+  zsh: "console",
+  fish: "console",
+  html: "html",
+  htm: "html",
+  css: "css",
+  scss: "css",
+  sass: "css",
+  less: "css",
+  xml: "xml",
+  yaml: "yaml",
+  yml: "yaml",
+  sql: "database",
+  csv: "table",
+  tsv: "table",
+  psv: "table",
+  toml: "toml",
+  lock: "lock",
+  svg: "svg",
+  png: "image",
+  jpg: "image",
+  jpeg: "image",
+  gif: "image",
+  webp: "image",
+  avif: "image",
+  bmp: "image",
+  tif: "image",
+  tiff: "image",
+  ico: "image",
+  pdf: "pdf",
+  doc: "word",
+  docx: "word",
+  txt: "document",
+});
+const WORKSPACE_MATERIAL_FOLDER_ICON_IDS = Object.freeze({
+  app: "folder-app",
+  components: "folder-components",
+  public: "folder-public",
+  lib: "folder-lib",
+  src: "folder-src",
+  "src-tauri": "folder-src-tauri",
+  docs: "folder-docs",
+  scripts: "folder-scripts",
+  test: "folder-test",
+  tests: "folder-test",
+  images: "folder-images",
+  image: "folder-images",
+  icons: "folder-images",
+  assets: "folder-images",
+  ".github": "folder-github",
+  config: "folder-config",
+});
+const WORKSPACE_MATERIAL_FOLDER_EXPANDED_ICON_IDS = Object.freeze({
+  app: "folder-app-open",
+  components: "folder-components-open",
+  public: "folder-public-open",
+  lib: "folder-lib-open",
+  src: "folder-src-open",
+  "src-tauri": "folder-src-tauri-open",
+  docs: "folder-docs-open",
+  scripts: "folder-scripts-open",
+  test: "folder-test-open",
+  tests: "folder-test-open",
+  images: "folder-images-open",
+  image: "folder-images-open",
+  icons: "folder-images-open",
+  assets: "folder-images-open",
+  ".github": "folder-github-open",
+  config: "folder-config-open",
+});
 const MARKDOWN_RAW_HTML_ALLOWED_ATTRIBUTES = Object.freeze({
   a: new Set(["href", "title"]),
   blockquote: new Set(["align"]),
@@ -714,6 +906,9 @@ const bridge = createBridge({
 });
 
 const uiState = createUiState();
+uiState.workspaceSidebarCollapsed = loadWorkspaceSidebarCollapsedPreference();
+uiState.workspaceFileEditorWidth = loadWorkspaceFileEditorWidthPreference();
+uiState.timeBlock = loadTimeBlockState();
 const runtimeStore = createRuntimeStore();
 const {
   paneTerminals,
@@ -726,6 +921,175 @@ const {
 window.__crewdockRenderDebug = runtimeStore.renderMetrics;
 
 void init();
+
+function loadWorkspaceSidebarCollapsedPreference() {
+  try {
+    return window.localStorage?.getItem(WORKSPACE_SIDEBAR_COLLAPSED_STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function clampNumber(value, min, max) {
+  return Math.max(min, Math.min(max, Number(value || 0)));
+}
+
+function getWorkspaceFileEditorMaxWidth() {
+  const viewportWidth = Math.max(window.innerWidth || 0, 960);
+  return Math.max(
+    WORKSPACE_FILE_EDITOR_MIN_WIDTH,
+    Math.min(WORKSPACE_FILE_EDITOR_MAX_WIDTH, viewportWidth - WORKSPACE_FILE_EDITOR_MIN_STAGE_WIDTH),
+  );
+}
+
+function clampWorkspaceFileEditorWidth(value) {
+  const numeric = Math.round(Number(value || 0));
+  if (!numeric) {
+    return 0;
+  }
+  return Math.round(clampNumber(
+    numeric,
+    WORKSPACE_FILE_EDITOR_MIN_WIDTH,
+    getWorkspaceFileEditorMaxWidth(),
+  ));
+}
+
+function loadWorkspaceFileEditorWidthPreference() {
+  try {
+    return clampWorkspaceFileEditorWidth(
+      Number(window.localStorage?.getItem(WORKSPACE_FILE_EDITOR_WIDTH_STORAGE_KEY) || 0),
+    );
+  } catch {
+    return 0;
+  }
+}
+
+function persistWorkspaceFileEditorWidthPreference(width) {
+  try {
+    const nextWidth = clampWorkspaceFileEditorWidth(width);
+    if (nextWidth) {
+      window.localStorage?.setItem(WORKSPACE_FILE_EDITOR_WIDTH_STORAGE_KEY, String(nextWidth));
+    } else {
+      window.localStorage?.removeItem(WORKSPACE_FILE_EDITOR_WIDTH_STORAGE_KEY);
+    }
+  } catch {
+    // Local storage is a preference only; resizing should still work without it.
+  }
+}
+
+function syncWorkspaceFileEditorWidthDom(width = uiState.workspaceFileEditorWidth) {
+  const nextWidth = clampWorkspaceFileEditorWidth(width);
+  uiState.workspaceFileEditorWidth = nextWidth;
+  const shells = document.querySelectorAll("[data-workspace-file-editor]");
+  for (const shell of shells) {
+    if (!(shell instanceof HTMLElement)) {
+      continue;
+    }
+    shell.classList.toggle("is-user-sized", Boolean(nextWidth));
+    if (nextWidth) {
+      shell.style.setProperty("--workspace-file-editor-width", `${nextWidth}px`);
+    } else {
+      shell.style.removeProperty("--workspace-file-editor-width");
+    }
+  }
+}
+
+function clampTimeBlockDurationMinutes(value) {
+  const numeric = Math.round(Number(value || 0));
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return TIME_BLOCK_DEFAULT_DURATION_MINUTES;
+  }
+
+  return Math.max(
+    TIME_BLOCK_MIN_DURATION_MINUTES,
+    Math.min(TIME_BLOCK_MAX_DURATION_MINUTES, numeric),
+  );
+}
+
+function createDefaultTimeBlockState() {
+  return {
+    popoverVisible: false,
+    taskDraft: "",
+    durationMinutes: TIME_BLOCK_DEFAULT_DURATION_MINUTES,
+    current: null,
+  };
+}
+
+function normalizeTimeBlockCurrent(value) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const durationMs = Math.max(60 * 1000, Number(value.durationMs || 0));
+  const startedAtMs = Math.max(0, Number(value.startedAtMs || 0));
+  const pausedElapsedMs = Math.max(0, Number(value.pausedElapsedMs || 0));
+  const status = value.status === "paused" ? "paused" : "running";
+  const task = String(value.task || "").trim() || "Focus block";
+
+  if (!durationMs || (!startedAtMs && status === "running")) {
+    return null;
+  }
+
+  return {
+    id: String(value.id || `time-block-${Date.now()}`),
+    task,
+    durationMs,
+    startedAtMs: status === "running" ? startedAtMs : 0,
+    pausedElapsedMs,
+    status,
+  };
+}
+
+function normalizeTimeBlockState(value) {
+  return {
+    ...createDefaultTimeBlockState(),
+    taskDraft: String(value?.taskDraft || "").slice(0, 120),
+    durationMinutes: clampTimeBlockDurationMinutes(value?.durationMinutes),
+    current: normalizeTimeBlockCurrent(value?.current),
+  };
+}
+
+function loadTimeBlockState() {
+  try {
+    const raw = window.localStorage?.getItem(TIME_BLOCK_STATE_STORAGE_KEY);
+    return normalizeTimeBlockState(raw ? JSON.parse(raw) : null);
+  } catch {
+    return createDefaultTimeBlockState();
+  }
+}
+
+function persistTimeBlockState() {
+  try {
+    window.localStorage?.setItem(
+      TIME_BLOCK_STATE_STORAGE_KEY,
+      JSON.stringify({
+        taskDraft: uiState.timeBlock.taskDraft,
+        durationMinutes: uiState.timeBlock.durationMinutes,
+        current: uiState.timeBlock.current,
+      }),
+    );
+  } catch {
+    // Time blocking is a local convenience feature; it should not block the workbench.
+  }
+}
+
+function isTimeBlockingEnabled(snapshot = uiState.snapshot) {
+  return snapshot?.settings?.timeBlockingEnabled !== false;
+}
+
+function getDraftTimeBlockingEnabled(snapshot = uiState.snapshot) {
+  return Boolean(
+    uiState.settingsDraft?.timeBlockingEnabled ?? isTimeBlockingEnabled(snapshot),
+  );
+}
+
+function persistWorkspaceSidebarCollapsedPreference(collapsed) {
+  try {
+    window.localStorage?.setItem(WORKSPACE_SIDEBAR_COLLAPSED_STORAGE_KEY, collapsed ? "true" : "false");
+  } catch {
+    // Ignore storage failures; the sidebar still works for the current session.
+  }
+}
 
 function applyAppSnapshot(snapshot, { hydrateActivity = false } = {}) {
   uiState.snapshot = snapshot;
@@ -929,7 +1293,33 @@ function detectPlatform() {
 }
 
 function supportsSystemHealth() {
-  return detectPlatform() === "macos" && typeof bridge.loadSystemHealthSnapshot === "function";
+  return typeof bridge.loadSystemHealthSnapshot === "function";
+}
+
+function getFileManagerLabel() {
+  const platform = detectPlatform();
+  if (platform === "macos") {
+    return "Finder";
+  }
+  if (platform === "windows") {
+    return "Explorer";
+  }
+  return "File manager";
+}
+
+function getAppUpdateDownloadActionLabel(appUpdate = uiState.appUpdate.snapshot) {
+  if (!appUpdate?.downloadUrl) {
+    return "View release";
+  }
+
+  const platform = detectPlatform();
+  if (platform === "macos") {
+    return "Download DMG";
+  }
+  if (platform === "windows") {
+    return "Download installer";
+  }
+  return "Download";
 }
 
 function getActiveWorkspace() {
@@ -1533,6 +1923,7 @@ function pruneWorkspaceFileEditorState(snapshot = uiState.snapshot) {
   const workspaceIds = new Set((snapshot?.workspaces || []).map((workspace) => workspace.id));
   for (const workspaceId of uiState.workspaceFileEditor.keys()) {
     if (!workspaceIds.has(workspaceId)) {
+      destroyWorkspaceCodeEditor(workspaceId);
       cancelWorkspaceFileDraftPersistence(workspaceId);
       uiState.workspaceFileEditor.delete(workspaceId);
     }
@@ -1540,6 +1931,7 @@ function pruneWorkspaceFileEditorState(snapshot = uiState.snapshot) {
 }
 
 function clearWorkspaceFileEditorState(workspaceId) {
+  destroyWorkspaceCodeEditor(workspaceId);
   const state = getWorkspaceFileEditorState(workspaceId, { create: false });
   if (!state) {
     return;
@@ -1735,6 +2127,374 @@ function workspaceFileEditorShowsMarkdownWrite(editorState) {
   return mode === "write" || mode === "split";
 }
 
+function loadCodeMirrorModule() {
+  if (!runtimeStore.codeMirrorModulePromise) {
+    runtimeStore.codeMirrorModulePromise = import(CODEMIRROR_VENDOR_MODULE_URL).catch((error) => {
+      runtimeStore.codeMirrorModulePromise = null;
+      throw error;
+    });
+  }
+
+  return runtimeStore.codeMirrorModulePromise;
+}
+
+function destroyWorkspaceCodeEditor(workspaceId) {
+  const editor = runtimeStore.workspaceCodeEditors.get(workspaceId);
+  if (editor?.view) {
+    editor.view.destroy();
+  }
+  runtimeStore.workspaceCodeEditors.delete(workspaceId);
+}
+
+function getWorkspaceCodeEditorFileMeta(relativePath) {
+  const fileName = basename(relativePath || "").toLowerCase();
+  const extension = fileName.includes(".") ? fileName.split(".").pop() : "";
+  return { fileName, extension };
+}
+
+function getWorkspaceCodeEditorLanguageExtension(codeMirror, relativePath) {
+  const { fileName, extension } = getWorkspaceCodeEditorFileMeta(relativePath);
+
+  if (fileName === "dockerfile" || fileName.endsWith(".dockerfile")) {
+    return codeMirror.StreamLanguage.define(codeMirror.dockerFile);
+  }
+
+  if (["js", "mjs", "cjs"].includes(extension)) {
+    return codeMirror.javascript();
+  }
+
+  if (extension === "jsx") {
+    return codeMirror.javascript({ jsx: true });
+  }
+
+  if (["ts", "mts", "cts"].includes(extension)) {
+    return codeMirror.javascript({ typescript: true });
+  }
+
+  if (extension === "tsx") {
+    return codeMirror.javascript({ jsx: true, typescript: true });
+  }
+
+  if (["py", "pyw"].includes(extension)) {
+    return codeMirror.python();
+  }
+
+  if (extension === "rs") {
+    return codeMirror.rust();
+  }
+
+  if (["html", "htm"].includes(extension)) {
+    return codeMirror.html();
+  }
+
+  if (["css", "scss", "sass", "less"].includes(extension)) {
+    return codeMirror.css();
+  }
+
+  if (["json", "jsonc", "json5"].includes(extension)) {
+    return codeMirror.json();
+  }
+
+  if (isMarkdownFilePath(relativePath)) {
+    return codeMirror.markdown();
+  }
+
+  if (["sql", "psql"].includes(extension)) {
+    return codeMirror.sql();
+  }
+
+  if (["yaml", "yml"].includes(extension)) {
+    return codeMirror.yaml();
+  }
+
+  if (["xml", "svg"].includes(extension)) {
+    return codeMirror.xml();
+  }
+
+  if (["toml"].includes(extension)) {
+    return codeMirror.StreamLanguage.define(codeMirror.toml);
+  }
+
+  if (["sh", "bash", "zsh", "fish", "env"].includes(extension)) {
+    return codeMirror.StreamLanguage.define(codeMirror.shell);
+  }
+
+  return [];
+}
+
+function createWorkspaceCodeEditorTheme(codeMirror) {
+  const tags = codeMirror.tags;
+  return [
+    codeMirror.EditorView.theme({
+      "&": {
+        height: "100%",
+        color: "var(--text)",
+        backgroundColor: "transparent",
+      },
+      "&.cm-focused": {
+        outline: "none",
+      },
+      ".cm-scroller": {
+        fontFamily: "\"SF Mono\", SFMono-Regular, ui-monospace, Menlo, Monaco, Consolas, monospace",
+        fontSize: "12.5px",
+        lineHeight: "1.62",
+      },
+      ".cm-content": {
+        minHeight: "100%",
+        padding: "14px 0 18px",
+        caretColor: "var(--accent)",
+      },
+      ".cm-line": {
+        padding: "0 14px",
+      },
+      ".cm-gutters": {
+        backgroundColor: "transparent",
+        color: "color-mix(in srgb, var(--muted) 74%, transparent)",
+        borderRight: "1px solid color-mix(in srgb, var(--chrome-divider) 74%, transparent)",
+      },
+      ".cm-gutterElement": {
+        padding: "0 9px 0 12px",
+      },
+      ".cm-activeLine": {
+        backgroundColor: "color-mix(in srgb, var(--accent-soft) 30%, transparent)",
+      },
+      ".cm-activeLineGutter": {
+        color: "color-mix(in srgb, var(--accent) 82%, white)",
+        backgroundColor: "color-mix(in srgb, var(--accent-soft) 34%, transparent)",
+      },
+      ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": {
+        backgroundColor: "color-mix(in srgb, var(--accent) 28%, transparent)",
+      },
+      ".cm-cursor": {
+        borderLeftColor: "var(--accent)",
+      },
+      ".cm-matchingBracket": {
+        backgroundColor: "color-mix(in srgb, var(--accent-soft) 48%, transparent)",
+        color: "var(--tab-text-active)",
+      },
+      ".cm-searchMatch": {
+        backgroundColor: "color-mix(in srgb, var(--warning, #e5c07b) 36%, transparent)",
+      },
+      ".cm-panels": {
+        backgroundColor: "color-mix(in srgb, var(--panel-strong) 96%, black)",
+        color: "var(--text)",
+      },
+      ".cm-panels input": {
+        backgroundColor: "var(--pane-bg)",
+        color: "var(--text)",
+        border: "1px solid var(--chrome-divider)",
+      },
+      ".cm-tooltip": {
+        backgroundColor: "var(--panel-strong)",
+        color: "var(--text)",
+        border: "1px solid var(--chrome-divider)",
+      },
+    }, { dark: true }),
+    codeMirror.syntaxHighlighting(codeMirror.HighlightStyle.define([
+      { tag: tags.keyword, color: "#c678dd" },
+      { tag: [tags.name, tags.deleted, tags.character, tags.macroName], color: "#e06c75" },
+      { tag: [tags.propertyName, tags.variableName, tags.labelName], color: "#dfe5ec" },
+      { tag: [tags.function(tags.variableName), tags.definition(tags.function(tags.variableName))], color: "#61afef" },
+      { tag: [tags.color, tags.constant(tags.name), tags.standard(tags.name)], color: "#d19a66" },
+      { tag: [tags.definition(tags.name), tags.separator], color: "#e5c07b" },
+      { tag: [tags.typeName, tags.className, tags.number, tags.bool], color: "#e5c07b" },
+      { tag: [tags.string, tags.special(tags.string), tags.regexp], color: "#98c379" },
+      { tag: [tags.comment, tags.quote], color: "#7f8797", fontStyle: "italic" },
+      { tag: tags.meta, color: "#56b6c2" },
+      { tag: tags.link, color: "#61afef", textDecoration: "underline" },
+      { tag: tags.heading, color: "#d7dcff", fontWeight: "700" },
+      { tag: tags.emphasis, fontStyle: "italic" },
+      { tag: tags.strong, fontWeight: "700" },
+      { tag: tags.invalid, color: "#e06c75" },
+    ]), { fallback: true }),
+  ];
+}
+
+function clampCodeMirrorSelection(value, documentLength) {
+  return Math.max(0, Math.min(Number(value || 0), documentLength));
+}
+
+function createWorkspaceCodeEditorSelection(editorState, focusState) {
+  const documentLength = String(editorState?.draft || "").length;
+  if (focusState?.isCodeMirror) {
+    return {
+      anchor: clampCodeMirrorSelection(focusState.anchor, documentLength),
+      head: clampCodeMirrorSelection(focusState.head, documentLength),
+    };
+  }
+
+  if (editorState?.shouldFocus) {
+    return { anchor: documentLength };
+  }
+
+  return null;
+}
+
+function updateWorkspaceFileEditorDraft(workspaceId, nextDraft) {
+  const editorState = getWorkspaceFileEditorState(workspaceId, { create: false });
+  if (!editorState) {
+    return;
+  }
+
+  editorState.draft = String(nextDraft || "");
+  const shouldRefreshSurface = Boolean(
+    editorState.notice || (!editorState.conflict && editorState.saveError),
+  );
+  const shouldRefreshMarkdownPreview = workspaceFileEditorShowsMarkdownPreview(editorState);
+  editorState.notice = "";
+  if (!editorState.conflict) {
+    editorState.saveError = "";
+  }
+
+  const dirtyDidChange = syncWorkspaceFileEditorDirtyState(editorState);
+  if (shouldRefreshSurface) {
+    requestRender(RENDER_EXPLORER | (dirtyDidChange ? (RENDER_STRIP | RENDER_STATUS) : 0));
+  } else {
+    syncWorkspaceFileEditorLiveDom(workspaceId);
+    if (shouldRefreshMarkdownPreview) {
+      syncWorkspaceFileEditorMarkdownPreviewDom(workspaceId);
+    }
+    if (dirtyDidChange) {
+      if (!editorState.dirty) {
+        syncWorkspaceFileDraftSnapshotState(workspaceId, null);
+      }
+      requestRender(RENDER_STRIP | RENDER_STATUS);
+    }
+  }
+
+  scheduleWorkspaceFileDraftPersistence(workspaceId);
+}
+
+function renderWorkspaceCodeEditorHost(editorState, snapshot) {
+  return `
+    <div
+      class="workspace-file-editor-code-host"
+      data-workspace-code-editor-host
+      data-relative-path="${escapeHtml(editorState?.activePath || "")}"
+      data-readonly="${snapshot?.readOnly ? "true" : "false"}"
+    >
+      <textarea
+        class="workspace-file-editor-input is-fallback"
+        data-workspace-file-editor-input
+        spellcheck="false"
+        autocapitalize="off"
+        autocorrect="off"
+        ${snapshot?.readOnly ? "readonly" : ""}
+      >${escapeHtml(editorState?.draft || "")}</textarea>
+    </div>
+  `;
+}
+
+function syncWorkspaceFileEditorMarkdownPreviewDom(workspaceId) {
+  const workspace = getWorkspaceById(workspaceId);
+  const editorState = getWorkspaceFileEditorState(workspaceId, { create: false });
+  const shell = document.querySelector(`[data-workspace-file-editor="${workspaceId}"]`);
+  const previewShell = shell?.querySelector("[data-workspace-file-editor-preview]");
+  if (!workspace || !editorState || !(previewShell instanceof HTMLElement)) {
+    return;
+  }
+
+  previewShell.innerHTML = renderWorkspaceFileMarkdownPreview(workspace, editorState);
+  syncWorkspaceFileEditorMarkdownDiagrams(previewShell);
+}
+
+async function syncWorkspaceCodeEditorSurface(workspace, shell, { focusState = null } = {}) {
+  const host = shell.querySelector("[data-workspace-code-editor-host]");
+  const editorState = getWorkspaceFileEditorState(workspace?.id, { create: false });
+  if (!(host instanceof HTMLElement) || !workspace || !editorState?.activePath) {
+    destroyWorkspaceCodeEditor(workspace?.id || "");
+    return;
+  }
+
+  const requestToken = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  host.dataset.codeMirrorRequest = requestToken;
+  const activePath = editorState.activePath;
+  const readOnly = Boolean(editorState.snapshot?.readOnly);
+  const shouldFocus = Boolean(editorState.shouldFocus);
+  const selection = createWorkspaceCodeEditorSelection(editorState, focusState);
+
+  try {
+    const codeMirror = await loadCodeMirrorModule();
+    const latestState = getWorkspaceFileEditorState(workspace.id, { create: false });
+    if (
+      host.dataset.codeMirrorRequest !== requestToken
+      || !document.body.contains(host)
+      || !latestState
+      || latestState.activePath !== activePath
+    ) {
+      return;
+    }
+
+    destroyWorkspaceCodeEditor(workspace.id);
+    host.innerHTML = "";
+    host.classList.add("is-ready");
+
+    const extensions = [
+      codeMirror.basicSetup,
+      createWorkspaceCodeEditorTheme(codeMirror),
+      getWorkspaceCodeEditorLanguageExtension(codeMirror, activePath),
+      codeMirror.EditorView.lineWrapping,
+      codeMirror.EditorState.readOnly.of(readOnly),
+      codeMirror.EditorView.editable.of(!readOnly),
+      codeMirror.keymap.of([
+        {
+          key: "Mod-s",
+          preventDefault: true,
+          run: () => {
+            void saveWorkspaceTextFile();
+            return true;
+          },
+        },
+        {
+          key: "Escape",
+          run: () => {
+            if (closeWorkspaceFileEditor(workspace.id)) {
+              requestRender(RENDER_EXPLORER | RENDER_TERMINALS | RENDER_STRIP | RENDER_STATUS);
+            }
+            return true;
+          },
+        },
+      ]),
+      codeMirror.EditorView.updateListener.of((update) => {
+        if (update.docChanged) {
+          updateWorkspaceFileEditorDraft(workspace.id, update.state.doc.toString());
+        }
+      }),
+    ];
+
+    const stateConfig = {
+      doc: latestState.draft || "",
+      extensions,
+    };
+    if (selection) {
+      stateConfig.selection = selection;
+    }
+
+    const view = new codeMirror.EditorView({
+      state: codeMirror.EditorState.create(stateConfig),
+      parent: host,
+    });
+    runtimeStore.workspaceCodeEditors.set(workspace.id, {
+      view,
+      host,
+      relativePath: activePath,
+    });
+
+    if (focusState?.isCodeMirror && Number.isFinite(focusState.scrollTop)) {
+      view.scrollDOM.scrollTop = focusState.scrollTop;
+      view.scrollDOM.scrollLeft = focusState.scrollLeft || 0;
+    }
+
+    if ((shouldFocus || focusState?.isCodeMirror) && !readOnly) {
+      view.focus();
+    }
+    latestState.shouldFocus = false;
+  } catch (error) {
+    host.classList.add("is-fallback");
+    console.warn("CodeMirror editor failed to load; using textarea fallback.", error);
+  }
+}
+
 function applyWorkspaceTextFileNewlineStyle(value, newlineStyle = "lf") {
   const normalized = normalizeWorkspaceTextContentForComparison(value);
   if (newlineStyle === "crLf") {
@@ -1898,6 +2658,24 @@ function confirmWorkspaceFileEditorDiscard(workspaceId, actionLabel = "continue"
 }
 
 function captureWorkspaceFileEditorFocusState(root = document) {
+  const codeHost = root.querySelector("[data-workspace-code-editor-host]");
+  if (codeHost instanceof HTMLElement && document.activeElement instanceof Element) {
+    const workspaceId = codeHost.closest("[data-workspace-file-editor]")?.dataset.workspaceFileEditor || "";
+    const editor = runtimeStore.workspaceCodeEditors.get(workspaceId);
+    if (editor?.view?.dom?.contains(document.activeElement)) {
+      const selection = editor.view.state.selection.main;
+      return {
+        isCodeMirror: true,
+        hasFocus: true,
+        workspaceId,
+        anchor: selection?.anchor || 0,
+        head: selection?.head || selection?.anchor || 0,
+        scrollTop: editor.view.scrollDOM?.scrollTop || 0,
+        scrollLeft: editor.view.scrollDOM?.scrollLeft || 0,
+      };
+    }
+  }
+
   const input = root.querySelector("[data-workspace-file-editor-input]");
   if (!(input instanceof HTMLTextAreaElement)) {
     return null;
@@ -1914,6 +2692,23 @@ function captureWorkspaceFileEditorFocusState(root = document) {
 
 function restoreWorkspaceFileEditorFocusState(focusState, root = document) {
   if (!focusState?.hasFocus) {
+    return;
+  }
+
+  if (focusState.isCodeMirror) {
+    const editor = runtimeStore.workspaceCodeEditors.get(focusState.workspaceId || "");
+    if (editor?.view) {
+      const documentLength = editor.view.state.doc.length;
+      editor.view.dispatch({
+        selection: {
+          anchor: clampCodeMirrorSelection(focusState.anchor, documentLength),
+          head: clampCodeMirrorSelection(focusState.head, documentLength),
+        },
+      });
+      editor.view.scrollDOM.scrollTop = focusState.scrollTop || 0;
+      editor.view.scrollDOM.scrollLeft = focusState.scrollLeft || 0;
+      editor.view.focus();
+    }
     return;
   }
 
@@ -2726,6 +3521,31 @@ function hasEnvironmentOpenAiApiKey(snapshot = uiState.snapshot) {
   return Boolean(snapshot?.settings?.hasEnvironmentOpenAiApiKey);
 }
 
+function getTelemetrySnapshot(snapshot = uiState.snapshot) {
+  const telemetry = snapshot?.settings?.telemetry;
+  const host = typeof telemetry?.host === "string" && telemetry.host.trim()
+    ? telemetry.host.trim()
+    : "https://us.i.posthog.com";
+  return {
+    enabled: Boolean(telemetry?.enabled),
+    host,
+    hasStoredPostHogProjectApiKey: Boolean(telemetry?.hasStoredPostHogProjectApiKey),
+    isConfigured: Boolean(telemetry?.isConfigured),
+  };
+}
+
+function getTelemetryEnabled(snapshot = uiState.snapshot) {
+  return Boolean(getTelemetrySnapshot(snapshot).enabled);
+}
+
+function getTelemetryHost(snapshot = uiState.snapshot) {
+  return getTelemetrySnapshot(snapshot).host;
+}
+
+function hasStoredPostHogProjectApiKey(snapshot = uiState.snapshot) {
+  return Boolean(getTelemetrySnapshot(snapshot).hasStoredPostHogProjectApiKey);
+}
+
 function getCodexCliSnapshot(snapshot = uiState.snapshot) {
   return snapshot?.settings?.codexCli || {
     status: "unavailable",
@@ -2814,6 +3634,7 @@ function patchSnapshotAppUpdateMeta(appUpdate) {
 
 function createSettingsDraft(snapshot = uiState.snapshot) {
   const codexCli = getCodexCliSnapshot(snapshot);
+  const telemetry = getTelemetrySnapshot(snapshot);
   return {
     themeId: getActiveThemeId(snapshot),
     interfaceTextScale: getInterfaceTextScale(snapshot),
@@ -2821,12 +3642,20 @@ function createSettingsDraft(snapshot = uiState.snapshot) {
     openAiApiKey: "",
     hasStoredOpenAiApiKey: hasStoredOpenAiApiKey(snapshot),
     hasEnvironmentOpenAiApiKey: hasEnvironmentOpenAiApiKey(snapshot),
+    telemetryEnabled: telemetry.enabled,
+    telemetryHost: telemetry.host,
+    postHogProjectApiKey: "",
+    hasStoredPostHogProjectApiKey: telemetry.hasStoredPostHogProjectApiKey,
+    timeBlockingEnabled: isTimeBlockingEnabled(snapshot),
     codexCli,
     codexCliSelectedPath: codexCli.configuredPath || "__auto__",
     codexCliCustomPath: codexCli.configuredPath || "",
     savingCodexCliPath: false,
     refreshingCodexCli: false,
     savingOpenAiApiKey: false,
+    savingTelemetryPreferences: false,
+    savingPostHogProjectApiKey: false,
+    savingTimeBlockingEnabled: false,
     applyingAppearance: false,
   };
 }
@@ -2838,6 +3667,19 @@ function syncSettingsDraftFromSnapshot(snapshot = uiState.snapshot) {
 
 function getDraftThemeId(snapshot = uiState.snapshot) {
   return normalizeThemeId(uiState.settingsDraft?.themeId ?? snapshot?.settings?.themeId);
+}
+
+function getDraftTelemetryEnabled(snapshot = uiState.snapshot) {
+  return Boolean(uiState.settingsDraft?.telemetryEnabled ?? getTelemetryEnabled(snapshot));
+}
+
+function getDraftTelemetryHost(snapshot = uiState.snapshot) {
+  const value = uiState.settingsDraft?.telemetryHost ?? getTelemetryHost(snapshot);
+  return typeof value === "string" && value.trim() ? value.trim() : "https://us.i.posthog.com";
+}
+
+function getDraftPostHogProjectApiKey() {
+  return String(uiState.settingsDraft?.postHogProjectApiKey || "");
 }
 
 function getDraftInterfaceTextScale(snapshot = uiState.snapshot) {
@@ -3244,6 +4086,138 @@ async function clearStoredOpenAiApiKey() {
   }
 }
 
+async function commitTelemetryPreferences() {
+  if (!bridge.setTelemetryPreferences || !uiState.settingsVisible) {
+    return;
+  }
+
+  if (!uiState.settingsDraft) {
+    syncSettingsDraftFromSnapshot();
+  }
+
+  const nextHost = getDraftTelemetryHost();
+  uiState.settingsDraft.savingTelemetryPreferences = true;
+  render();
+
+  try {
+    uiState.snapshot = await bridge.setTelemetryPreferences(
+      getDraftTelemetryEnabled(),
+      nextHost,
+    );
+    syncSettingsDraftFromSnapshot(uiState.snapshot);
+    applySnapshotSettings(uiState.snapshot);
+  } catch (error) {
+    reportSourceControlError(error);
+  } finally {
+    if (uiState.settingsDraft) {
+      uiState.settingsDraft.savingTelemetryPreferences = false;
+    }
+    render();
+  }
+}
+
+async function commitPostHogProjectApiKey() {
+  if (!bridge.setPostHogProjectApiKey || !uiState.settingsVisible) {
+    return;
+  }
+
+  if (!uiState.settingsDraft) {
+    syncSettingsDraftFromSnapshot();
+  }
+
+  const nextKey = getDraftPostHogProjectApiKey().trim();
+  if (!nextKey) {
+    window.alert("Paste a PostHog project API key first, or use Remove to clear the stored one.");
+    return;
+  }
+
+  uiState.settingsDraft.savingPostHogProjectApiKey = true;
+  render();
+
+  try {
+    uiState.snapshot = await bridge.setPostHogProjectApiKey(nextKey);
+    syncSettingsDraftFromSnapshot(uiState.snapshot);
+    applySnapshotSettings(uiState.snapshot);
+  } catch (error) {
+    reportSourceControlError(error);
+  } finally {
+    if (uiState.settingsDraft) {
+      uiState.settingsDraft.savingPostHogProjectApiKey = false;
+    }
+    render();
+  }
+}
+
+async function clearStoredPostHogProjectApiKey() {
+  if (!bridge.setPostHogProjectApiKey || !uiState.settingsVisible) {
+    return;
+  }
+
+  const hasStoredKey = hasStoredPostHogProjectApiKey();
+  if (!hasStoredKey) {
+    if (uiState.settingsDraft) {
+      uiState.settingsDraft.postHogProjectApiKey = "";
+    }
+    render();
+    return;
+  }
+
+  if (!window.confirm("Remove the stored PostHog project API key from CrewDock settings?")) {
+    return;
+  }
+
+  if (!uiState.settingsDraft) {
+    syncSettingsDraftFromSnapshot();
+  }
+
+  uiState.settingsDraft.savingPostHogProjectApiKey = true;
+  render();
+
+  try {
+    uiState.snapshot = await bridge.setPostHogProjectApiKey(null);
+    syncSettingsDraftFromSnapshot(uiState.snapshot);
+    applySnapshotSettings(uiState.snapshot);
+  } catch (error) {
+    reportSourceControlError(error);
+  } finally {
+    if (uiState.settingsDraft) {
+      uiState.settingsDraft.savingPostHogProjectApiKey = false;
+    }
+    render();
+  }
+}
+
+async function saveTimeBlockingEnabled(enabled) {
+  if (!bridge.setTimeBlockingEnabled || !uiState.settingsVisible) {
+    return;
+  }
+
+  if (!uiState.settingsDraft) {
+    syncSettingsDraftFromSnapshot();
+  }
+
+  const nextEnabled = Boolean(enabled);
+  uiState.settingsDraft.timeBlockingEnabled = nextEnabled;
+  uiState.settingsDraft.savingTimeBlockingEnabled = true;
+  render();
+
+  try {
+    uiState.snapshot = await bridge.setTimeBlockingEnabled(nextEnabled);
+    syncSettingsDraftFromSnapshot(uiState.snapshot);
+    if (!nextEnabled) {
+      uiState.timeBlock.popoverVisible = false;
+    }
+    syncTimeBlockTicker(uiState.snapshot);
+  } catch (error) {
+    reportSourceControlError(error);
+  } finally {
+    if (uiState.settingsDraft) {
+      uiState.settingsDraft.savingTimeBlockingEnabled = false;
+    }
+    render();
+  }
+}
+
 async function saveCodexCliPath(nextPath) {
   if (!bridge.setCodexCliPath || !uiState.settingsVisible) {
     return;
@@ -3385,6 +4359,92 @@ function bindSettingsSheetControls(root = document) {
       event.preventDefault();
       event.stopPropagation();
       void clearStoredOpenAiApiKey();
+    });
+  }
+
+  const telemetryEnabledInput = root.querySelector("[data-settings-telemetry-enabled]");
+  if (telemetryEnabledInput instanceof HTMLInputElement) {
+    telemetryEnabledInput.addEventListener("change", (event) => {
+      event.stopPropagation();
+      if (!uiState.settingsDraft) {
+        syncSettingsDraftFromSnapshot();
+      }
+      uiState.settingsDraft.telemetryEnabled = telemetryEnabledInput.checked;
+    });
+  }
+
+  const telemetryHostInput = root.querySelector("[data-settings-telemetry-host-input]");
+  if (telemetryHostInput instanceof HTMLInputElement) {
+    telemetryHostInput.addEventListener("input", (event) => {
+      event.stopPropagation();
+      if (!uiState.settingsDraft) {
+        syncSettingsDraftFromSnapshot();
+      }
+      uiState.settingsDraft.telemetryHost = telemetryHostInput.value;
+    });
+    telemetryHostInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      void commitTelemetryPreferences();
+    });
+  }
+
+  const telemetrySaveButton = root.querySelector("[data-settings-telemetry-save]");
+  if (telemetrySaveButton instanceof HTMLButtonElement) {
+    telemetrySaveButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void commitTelemetryPreferences();
+    });
+  }
+
+  const posthogKeyInput = root.querySelector("[data-settings-posthog-project-api-key-input]");
+  if (posthogKeyInput instanceof HTMLInputElement) {
+    posthogKeyInput.addEventListener("input", (event) => {
+      event.stopPropagation();
+      if (!uiState.settingsDraft) {
+        syncSettingsDraftFromSnapshot();
+      }
+      uiState.settingsDraft.postHogProjectApiKey = posthogKeyInput.value;
+    });
+    posthogKeyInput.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      void commitPostHogProjectApiKey();
+    });
+  }
+
+  const posthogSaveButton = root.querySelector("[data-settings-posthog-save]");
+  if (posthogSaveButton instanceof HTMLButtonElement) {
+    posthogSaveButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void commitPostHogProjectApiKey();
+    });
+  }
+
+  const posthogClearButton = root.querySelector("[data-settings-posthog-clear]");
+  if (posthogClearButton instanceof HTMLButtonElement) {
+    posthogClearButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void clearStoredPostHogProjectApiKey();
+    });
+  }
+
+  const timeBlockingEnabledInput = root.querySelector("[data-settings-time-blocking-enabled]");
+  if (timeBlockingEnabledInput instanceof HTMLInputElement) {
+    timeBlockingEnabledInput.addEventListener("change", (event) => {
+      event.stopPropagation();
+      void saveTimeBlockingEnabled(timeBlockingEnabledInput.checked);
     });
   }
 
@@ -3555,6 +4615,15 @@ function syncMountedTerminalAppearance(
 async function handleClick(event) {
   const clickedElement = event.target instanceof Element ? event.target : null;
   const target = clickedElement?.closest("[data-action]");
+  if (
+    uiState.timeBlock.popoverVisible
+    && clickedElement
+    && !clickedElement.closest("[data-time-block-shell]")
+  ) {
+    closeTimeBlockPopover();
+    requestRender(RENDER_STRIP);
+  }
+
   if (!target) {
     return;
   }
@@ -3627,6 +4696,36 @@ async function handleClick(event) {
     return;
   }
 
+  if (target.dataset.action === "toggle-time-block-popover") {
+    toggleTimeBlockPopover();
+    requestRender(RENDER_STRIP);
+    return;
+  }
+
+  if (target.dataset.action === "set-time-block-duration") {
+    setTimeBlockDurationMinutes(target.dataset.durationMinutes);
+    requestRender(RENDER_STRIP);
+    return;
+  }
+
+  if (target.dataset.action === "pause-time-block") {
+    pauseTimeBlock();
+    requestRender(RENDER_STRIP);
+    return;
+  }
+
+  if (target.dataset.action === "resume-time-block") {
+    resumeTimeBlock();
+    requestRender(RENDER_STRIP);
+    return;
+  }
+
+  if (target.dataset.action === "finish-time-block") {
+    finishTimeBlock();
+    requestRender(RENDER_STRIP);
+    return;
+  }
+
   if (target.dataset.action === "toggle-workspace-open-menu") {
     await toggleWorkspaceOpenMenu();
     return;
@@ -3656,6 +4755,13 @@ async function handleClick(event) {
     uiState.pendingWorkspaceDraft = null;
     uiState.contextMenu = null;
     requestRender(RENDER_STRIP | RENDER_PANEL_SURFACES);
+    return;
+  }
+
+  if (target.dataset.action === "toggle-workspace-sidebar") {
+    uiState.workspaceSidebarCollapsed = !uiState.workspaceSidebarCollapsed;
+    persistWorkspaceSidebarCollapsedPreference(uiState.workspaceSidebarCollapsed);
+    requestRender(RENDER_STRIP | RENDER_TERMINALS);
     return;
   }
 
@@ -4030,7 +5136,7 @@ async function handleClick(event) {
 
     closeQuickSwitcher();
     startWorkspaceRename(workspaceId);
-    requestRender(RENDER_STRIP);
+    requestRender(RENDER_STRIP | RENDER_TERMINALS);
     return;
   }
 
@@ -4211,6 +5317,9 @@ function handleMouseDown(event) {
 
 function handlePointerDown(event) {
   const target = event.target instanceof Element ? event.target : null;
+  if (maybeBeginWorkspaceFileEditorResize(event, target)) {
+    return;
+  }
   maybeBeginWorkspaceTabDrag(event, target);
   const paneId = target?.closest("[data-pane-id]")?.dataset?.paneId || null;
   if (paneId) {
@@ -4258,6 +5367,10 @@ function handlePointerDown(event) {
 }
 
 function handlePointerMove(event) {
+  if (updateWorkspaceFileEditorResize(event)) {
+    return;
+  }
+
   const drag = uiState.workspaceTabDrag;
   if (!drag || event.pointerId !== drag.pointerId) {
     return;
@@ -4277,6 +5390,10 @@ function handlePointerMove(event) {
 }
 
 async function handlePointerUp(event) {
+  if (completeWorkspaceFileEditorResize(event)) {
+    return;
+  }
+
   const drag = uiState.workspaceTabDrag;
   if (!drag || event.pointerId !== drag.pointerId) {
     return;
@@ -4292,12 +5409,127 @@ async function handlePointerUp(event) {
 }
 
 function handlePointerCancel(event) {
+  if (cancelWorkspaceFileEditorResize(event)) {
+    return;
+  }
+
   const drag = uiState.workspaceTabDrag;
   if (!drag || event.pointerId !== drag.pointerId) {
     return;
   }
 
   cancelWorkspaceTabDrag();
+}
+
+function maybeBeginWorkspaceFileEditorResize(event, target) {
+  const handle = target?.closest("[data-workspace-file-editor-resizer]");
+  if (
+    event.button !== 0
+    || !(handle instanceof HTMLElement)
+    || runtimeStore.workspaceFileEditorResizeDrag
+  ) {
+    return false;
+  }
+
+  const shell = handle.closest("[data-workspace-file-editor]");
+  if (!(shell instanceof HTMLElement)) {
+    return false;
+  }
+
+  const rect = shell.getBoundingClientRect();
+  const workspaceId = shell.dataset.workspaceFileEditor || "";
+  runtimeStore.workspaceFileEditorResizeDrag = {
+    pointerId: event.pointerId,
+    workspaceId,
+    startX: event.clientX,
+    startWidth: rect.width,
+    shell,
+    handle,
+  };
+
+  shell.classList.add("is-resizing");
+  document.body.classList.add("is-resizing-workspace-file-editor");
+  if (typeof handle.setPointerCapture === "function") {
+    try {
+      handle.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture can fail if the element rerenders mid-gesture.
+    }
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function updateWorkspaceFileEditorResize(event) {
+  const resize = runtimeStore.workspaceFileEditorResizeDrag;
+  if (!resize || event.pointerId !== resize.pointerId) {
+    return false;
+  }
+
+  const nextWidth = clampWorkspaceFileEditorWidth(resize.startWidth + resize.startX - event.clientX);
+  uiState.workspaceFileEditorWidth = nextWidth;
+  if (resize.shell instanceof HTMLElement) {
+    resize.shell.classList.add("is-user-sized");
+    resize.shell.style.setProperty("--workspace-file-editor-width", `${nextWidth}px`);
+  }
+  scheduleVisibleTerminalRefresh();
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function cleanupWorkspaceFileEditorResizeDrag({ persist = false } = {}) {
+  const resize = runtimeStore.workspaceFileEditorResizeDrag;
+  if (!resize) {
+    return false;
+  }
+
+  if (resize.shell instanceof HTMLElement) {
+    resize.shell.classList.remove("is-resizing");
+  }
+  if (resize.handle instanceof HTMLElement && typeof resize.handle.releasePointerCapture === "function") {
+    try {
+      if (resize.handle.hasPointerCapture(resize.pointerId)) {
+        resize.handle.releasePointerCapture(resize.pointerId);
+      }
+    } catch {
+      // Ignore stale pointer handles after rerenders.
+    }
+  }
+  document.body.classList.remove("is-resizing-workspace-file-editor");
+  runtimeStore.workspaceFileEditorResizeDrag = null;
+
+  uiState.workspaceFileEditorWidth = clampWorkspaceFileEditorWidth(uiState.workspaceFileEditorWidth);
+  syncWorkspaceFileEditorWidthDom(uiState.workspaceFileEditorWidth);
+  if (persist) {
+    persistWorkspaceFileEditorWidthPreference(uiState.workspaceFileEditorWidth);
+  }
+  scheduleVisibleTerminalRefresh();
+  return true;
+}
+
+function completeWorkspaceFileEditorResize(event) {
+  const resize = runtimeStore.workspaceFileEditorResizeDrag;
+  if (!resize || event.pointerId !== resize.pointerId) {
+    return false;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+  return cleanupWorkspaceFileEditorResizeDrag({ persist: true });
+}
+
+function cancelWorkspaceFileEditorResize(event) {
+  const resize = runtimeStore.workspaceFileEditorResizeDrag;
+  if (!resize || event.pointerId !== resize.pointerId) {
+    return false;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+  return cleanupWorkspaceFileEditorResizeDrag({ persist: true });
 }
 
 function maybeBeginWorkspaceTabDrag(event, target) {
@@ -4406,7 +5638,7 @@ function updateWorkspaceTabDrag(clientX, clientY) {
 
   syncWorkspaceTabDraggedShellPosition();
 
-  const nextTargetIndex = resolveWorkspaceTabTargetIndex(drag.tabsEl, drag.workspaceId, clientX);
+  const nextTargetIndex = resolveWorkspaceTabTargetIndex(drag.tabsEl, drag.workspaceId, clientX, clientY);
   if (nextTargetIndex !== drag.targetIndex) {
     moveWorkspaceTabDropSlot(nextTargetIndex);
   } else {
@@ -4525,6 +5757,162 @@ function renderWorkspaceStripRegion(
     workspaceGitControlHtml: snapshot.activeWorkspace
       ? renderWorkspaceGitControl(snapshot.activeWorkspace)
       : "",
+    timeBlockControlHtml: renderTimeBlockControl(snapshot),
+    getWorkspaceAttention,
+    hasWorkspaceFileDraftIndicator: workspaceHasFileDraftIndicator,
+    getWorkspaceFileDraftIndicatorTitle,
+    escapeHtml,
+    getGitTone,
+    formatGitBadgeTitle,
+  });
+}
+
+function renderTimeBlockControl(snapshot = uiState.snapshot) {
+  if (!isTimeBlockingEnabled(snapshot)) {
+    return "";
+  }
+
+  const display = getTimeBlockDisplay();
+  const isOpen = uiState.timeBlock.popoverVisible;
+  const hasBlock = Boolean(display);
+  const buttonLabel = display
+    ? display.isOvertime
+      ? `Overtime +${formatTimeBlockClock(display.clockMs)}`
+      : display.status === "paused"
+        ? `Paused ${formatTimeBlockClock(display.clockMs)}`
+        : formatTimeBlockClock(display.clockMs)
+    : "Time Block";
+  const taskLabel = display?.task || "Start a focus timer";
+  const tone = display
+    ? display.isOvertime
+      ? "is-overtime"
+      : display.status === "paused"
+        ? "is-paused"
+        : "is-running"
+    : "is-idle";
+
+  return `
+    <div class="workspace-time-block-shell ${isOpen ? "is-open" : ""} ${tone}" data-time-block-shell>
+      <button
+        class="workspace-time-block-button"
+        type="button"
+        data-action="toggle-time-block-popover"
+        data-tauri-drag-region="false"
+        title="${escapeHtml(hasBlock ? taskLabel : "Start a Time Block")}"
+        aria-label="${escapeHtml(hasBlock ? `Time Block: ${taskLabel}` : "Start a Time Block")}"
+        aria-expanded="${isOpen ? "true" : "false"}"
+      >
+        <span class="workspace-time-block-dot" aria-hidden="true"></span>
+        <span class="workspace-time-block-task">${escapeHtml(taskLabel)}</span>
+        <strong>${escapeHtml(buttonLabel)}</strong>
+      </button>
+      ${isOpen ? renderTimeBlockPopover(display) : ""}
+    </div>
+  `;
+}
+
+function renderTimeBlockPopover(display) {
+  const durationMinutes = clampTimeBlockDurationMinutes(uiState.timeBlock.durationMinutes);
+  const taskDraft = uiState.timeBlock.taskDraft;
+  return `
+    <div class="workspace-time-block-popover" role="dialog" aria-label="Time Block">
+      <form class="workspace-time-block-form" data-action="start-time-block">
+        <div class="workspace-time-block-popover-head">
+          <span>Time Blocking</span>
+          <strong>${display ? escapeHtml(display.task) : "Set the next block"}</strong>
+        </div>
+        ${
+          display
+            ? `
+              <div class="workspace-time-block-current">
+                <span>${escapeHtml(display.isOvertime ? "Overtime" : display.status === "paused" ? "Paused" : "Remaining")}</span>
+                <strong>${escapeHtml(`${display.isOvertime ? "+" : ""}${formatTimeBlockClock(display.clockMs)}`)}</strong>
+              </div>
+            `
+            : ""
+        }
+        <label class="workspace-time-block-field">
+          <span>Task</span>
+          <input
+            class="workspace-time-block-input"
+            type="text"
+            value="${escapeHtml(taskDraft)}"
+            data-time-block-task-input
+            placeholder="What are you blocking time for?"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </label>
+        <div class="workspace-time-block-presets" aria-label="Duration presets">
+          ${TIME_BLOCK_PRESETS_MINUTES.map((minutes) => `
+            <button
+              class="workspace-time-block-preset ${durationMinutes === minutes ? "is-active" : ""}"
+              type="button"
+              data-action="set-time-block-duration"
+              data-duration-minutes="${escapeHtml(String(minutes))}"
+            >
+              ${escapeHtml(`${minutes}m`)}
+            </button>
+          `).join("")}
+          <label class="workspace-time-block-custom">
+            <span>Custom</span>
+            <input
+              type="number"
+              min="${TIME_BLOCK_MIN_DURATION_MINUTES}"
+              max="${TIME_BLOCK_MAX_DURATION_MINUTES}"
+              value="${escapeHtml(String(durationMinutes))}"
+              data-time-block-duration-input
+              aria-label="Custom time block duration in minutes"
+            />
+          </label>
+        </div>
+        <div class="workspace-time-block-actions">
+          <button class="workspace-time-block-primary" type="submit">
+            ${display ? "Start new block" : "Start block"}
+          </button>
+          ${
+            display
+              ? display.status === "paused"
+                ? `
+                  <button class="workspace-time-block-secondary" type="button" data-action="resume-time-block">
+                    Resume
+                  </button>
+                `
+                : `
+                  <button class="workspace-time-block-secondary" type="button" data-action="pause-time-block">
+                    Pause
+                  </button>
+                `
+              : ""
+          }
+          ${
+            display
+              ? `
+                <button class="workspace-time-block-secondary is-danger" type="button" data-action="finish-time-block">
+                  Finish
+                </button>
+              `
+              : ""
+          }
+        </div>
+      </form>
+    </div>
+  `;
+}
+
+function renderWorkspaceSidebarRegion(
+  sidebarRegion = app.querySelector('[data-region="sidebar"]'),
+  snapshot = uiState.snapshot,
+) {
+  if (!sidebarRegion || !snapshot) {
+    return;
+  }
+
+  sidebarRegion.innerHTML = renderWorkspaceSidebar({
+    workspaces: snapshot.workspaces,
+    activeWorkspaceId: snapshot.activeWorkspaceId,
+    workspaceRenameDraft: uiState.workspaceRenameDraft,
+    collapsed: uiState.workspaceSidebarCollapsed,
     getWorkspaceAttention,
     hasWorkspaceFileDraftIndicator: workspaceHasFileDraftIndicator,
     getWorkspaceFileDraftIndicatorTitle,
@@ -4587,6 +5975,7 @@ function cleanupWorkspaceTabDragChrome(drag) {
   if (drag.indicatorEl instanceof HTMLElement) {
     drag.indicatorEl.classList.remove("is-active", "is-immediate");
     drag.indicatorEl.style.left = "";
+    drag.indicatorEl.style.top = "";
   }
 
   if (drag.tabShellEl instanceof HTMLElement) {
@@ -4678,7 +6067,13 @@ function syncWorkspaceTabDropIndicator({ immediate = false } = {}) {
     drag.indicatorEl.classList.add("is-immediate");
   }
 
-  drag.indicatorEl.style.left = `${(drag.dropSlotEl.offsetLeft + drag.dropSlotEl.offsetWidth / 2).toFixed(2)}px`;
+  if (isWorkspaceTabsVertical(drag.tabsEl)) {
+    drag.indicatorEl.style.left = "";
+    drag.indicatorEl.style.top = `${drag.dropSlotEl.offsetTop.toFixed(2)}px`;
+  } else {
+    drag.indicatorEl.style.top = "";
+    drag.indicatorEl.style.left = `${(drag.dropSlotEl.offsetLeft + drag.dropSlotEl.offsetWidth / 2).toFixed(2)}px`;
+  }
   drag.indicatorEl.classList.add("is-active");
 
   if (immediate) {
@@ -4714,13 +6109,15 @@ function animateWorkspaceTabShellReflow(previousRects, shells) {
     }
 
     const nextRect = shell.getBoundingClientRect();
-    const deltaX = previousRect.left - nextRect.left;
-    if (Math.abs(deltaX) <= 0.5) {
+    const isVertical = isWorkspaceTabsVertical(shell);
+    const deltaX = isVertical ? 0 : previousRect.left - nextRect.left;
+    const deltaY = isVertical ? previousRect.top - nextRect.top : 0;
+    if (Math.hypot(deltaX, deltaY) <= 0.5) {
       continue;
     }
 
     shell.style.transition = "none";
-    shell.style.transform = `translate3d(${deltaX}px, 0, 0)`;
+    shell.style.transform = `translate3d(${deltaX}px, ${deltaY}px, 0)`;
     animatedShells.push(shell);
   }
 
@@ -4736,17 +6133,20 @@ function animateWorkspaceTabShellReflow(previousRects, shells) {
   });
 }
 
-function resolveWorkspaceTabTargetIndex(tabs, draggedWorkspaceId, clientX) {
+function resolveWorkspaceTabTargetIndex(tabs, draggedWorkspaceId, clientX, clientY = 0) {
   if (!tabs) {
     return 0;
   }
 
+  const isVertical = isWorkspaceTabsVertical(tabs);
   const tabShells = Array.from(tabs.querySelectorAll("[data-workspace-tab-shell]"))
     .filter((element) => element instanceof HTMLElement)
     .filter((element) => element.dataset.workspaceId !== draggedWorkspaceId);
   for (let index = 0; index < tabShells.length; index += 1) {
     const rect = tabShells[index].getBoundingClientRect();
-    if (clientX < rect.left + rect.width / 2) {
+    const pointerPosition = isVertical ? clientY : clientX;
+    const midpoint = isVertical ? rect.top + rect.height / 2 : rect.left + rect.width / 2;
+    if (pointerPosition < midpoint) {
       return index;
     }
   }
@@ -4783,7 +6183,12 @@ function syncWorkspaceTabAutoScroll() {
 
   const viewport = uiState.workspaceTabDrag?.tabsEl?.closest?.("[data-workspace-tabs-viewport]")
     || document.querySelector("[data-workspace-tabs-viewport]");
-  const delta = getWorkspaceTabAutoScrollDelta(viewport, uiState.workspaceTabDrag?.currentX || 0);
+  const drag = uiState.workspaceTabDrag;
+  const delta = getWorkspaceTabAutoScrollDelta(
+    viewport,
+    isWorkspaceTabsVertical(drag?.tabsEl) ? drag?.currentY || 0 : drag?.currentX || 0,
+    isWorkspaceTabsVertical(drag?.tabsEl) ? "vertical" : "horizontal",
+  );
   if (!delta) {
     stopWorkspaceTabAutoScroll();
     return;
@@ -4805,21 +6210,33 @@ function stepWorkspaceTabAutoScroll() {
     return;
   }
 
-  const delta = getWorkspaceTabAutoScrollDelta(viewport, drag.currentX);
+  const isVertical = isWorkspaceTabsVertical(tabs);
+  const delta = getWorkspaceTabAutoScrollDelta(
+    viewport,
+    isVertical ? drag.currentY : drag.currentX,
+    isVertical ? "vertical" : "horizontal",
+  );
   if (!delta) {
     return;
   }
 
-  const maxScrollLeft = Math.max(0, tabs.scrollWidth - tabs.clientWidth);
-  const nextLeft = Math.max(0, Math.min(maxScrollLeft, tabs.scrollLeft + delta));
-  if (Math.abs(nextLeft - tabs.scrollLeft) <= 0.5) {
+  const maxScroll = isVertical
+    ? Math.max(0, tabs.scrollHeight - tabs.clientHeight)
+    : Math.max(0, tabs.scrollWidth - tabs.clientWidth);
+  const currentScroll = isVertical ? tabs.scrollTop : tabs.scrollLeft;
+  const nextScroll = Math.max(0, Math.min(maxScroll, currentScroll + delta));
+  if (Math.abs(nextScroll - currentScroll) <= 0.5) {
     return;
   }
 
-  tabs.scrollLeft = nextLeft;
+  if (isVertical) {
+    tabs.scrollTop = nextScroll;
+  } else {
+    tabs.scrollLeft = nextScroll;
+  }
   rememberWorkspaceTabsScroll(tabs);
   syncWorkspaceTabsOverflow(tabs, drag.stripShellEl || tabs.closest("[data-workspace-tabs-shell]"));
-  const nextTargetIndex = resolveWorkspaceTabTargetIndex(tabs, drag.workspaceId, drag.currentX);
+  const nextTargetIndex = resolveWorkspaceTabTargetIndex(tabs, drag.workspaceId, drag.currentX, drag.currentY);
   if (nextTargetIndex !== drag.targetIndex) {
     moveWorkspaceTabDropSlot(nextTargetIndex);
   } else {
@@ -4835,25 +6252,28 @@ function stopWorkspaceTabAutoScroll() {
   }
 }
 
-function getWorkspaceTabAutoScrollDelta(viewport, clientX) {
+function getWorkspaceTabAutoScrollDelta(viewport, pointerPosition, orientation = "horizontal") {
   if (!(viewport instanceof HTMLElement)) {
     return 0;
   }
 
   const rect = viewport.getBoundingClientRect();
-  if (rect.width <= 0) {
+  const size = orientation === "vertical" ? rect.height : rect.width;
+  const start = orientation === "vertical" ? rect.top : rect.left;
+  const end = orientation === "vertical" ? rect.bottom : rect.right;
+  if (size <= 0) {
     return 0;
   }
 
-  if (clientX < rect.left + WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX) {
-    const strength = (rect.left + WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX - clientX)
+  if (pointerPosition < start + WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX) {
+    const strength = (start + WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX - pointerPosition)
       / WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX;
     const easedStrength = Math.min(1, strength) ** 1.35;
     return -(1.5 + WORKSPACE_TAB_EDGE_SCROLL_MAX_PX_PER_FRAME * easedStrength);
   }
 
-  if (clientX > rect.right - WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX) {
-    const strength = (clientX - (rect.right - WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX))
+  if (pointerPosition > end - WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX) {
+    const strength = (pointerPosition - (end - WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX))
       / WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX;
     const easedStrength = Math.min(1, strength) ** 1.35;
     return 1.5 + WORKSPACE_TAB_EDGE_SCROLL_MAX_PX_PER_FRAME * easedStrength;
@@ -4983,6 +6403,10 @@ function handleWheel(event) {
     return;
   }
 
+  if (isWorkspaceTabsVertical(tabs)) {
+    return;
+  }
+
   if (Math.abs(event.deltaX) > Math.abs(event.deltaY) && event.deltaY !== 0) {
     return;
   }
@@ -4999,6 +6423,9 @@ function handleWheel(event) {
 }
 
 function handleWindowResize() {
+  if (uiState.workspaceFileEditorWidth) {
+    syncWorkspaceFileEditorWidthDom(uiState.workspaceFileEditorWidth);
+  }
   fitAllTerminals();
   syncWorkspaceTabRail(
     uiState.snapshot?.activeWorkspaceId || null,
@@ -5090,6 +6517,16 @@ async function handleSubmit(event) {
     return;
   }
 
+  const timeBlockForm = event.target.closest('[data-action="start-time-block"]');
+  if (timeBlockForm) {
+    event.preventDefault();
+    if (isTimeBlockingEnabled()) {
+      startTimeBlock();
+      requestRender(RENDER_STRIP);
+    }
+    return;
+  }
+
   const form = event.target.closest('[data-action="run-launcher-command"]');
   if (!form) {
     return;
@@ -5106,33 +6543,7 @@ function handleInput(event) {
   const fileEditorInput = event.target.closest("[data-workspace-file-editor-input]");
   if (fileEditorInput) {
     const workspace = getActiveWorkspace();
-    const editorState = getWorkspaceFileEditorState(workspace?.id, { create: false });
-    if (editorState) {
-      editorState.draft = fileEditorInput.value;
-      const shouldRefreshSurface = Boolean(
-        editorState.notice || (!editorState.conflict && editorState.saveError),
-      );
-      const shouldRefreshMarkdownPreview = workspaceFileEditorShowsMarkdownPreview(editorState);
-      editorState.notice = "";
-      if (!editorState.conflict) {
-        editorState.saveError = "";
-      }
-      const dirtyDidChange = syncWorkspaceFileEditorDirtyState(editorState);
-      if (shouldRefreshSurface) {
-        requestRender(RENDER_EXPLORER | (dirtyDidChange ? (RENDER_STRIP | RENDER_STATUS) : 0));
-      } else if (shouldRefreshMarkdownPreview) {
-        requestRender(RENDER_EXPLORER | (dirtyDidChange ? (RENDER_STRIP | RENDER_STATUS) : 0));
-      } else {
-        syncWorkspaceFileEditorLiveDom(workspace?.id);
-        if (dirtyDidChange) {
-          if (!editorState.dirty) {
-            syncWorkspaceFileDraftSnapshotState(workspace?.id || "", null);
-          }
-          requestRender(RENDER_STRIP | RENDER_STATUS);
-        }
-      }
-      scheduleWorkspaceFileDraftPersistence(workspace?.id || "");
-    }
+    updateWorkspaceFileEditorDraft(workspace?.id || "", fileEditorInput.value);
     return;
   }
 
@@ -5188,6 +6599,20 @@ function handleInput(event) {
     return;
   }
 
+  const timeBlockTaskInput = event.target.closest("[data-time-block-task-input]");
+  if (timeBlockTaskInput) {
+    uiState.timeBlock.taskDraft = timeBlockTaskInput.value.slice(0, 120);
+    persistTimeBlockState();
+    return;
+  }
+
+  const timeBlockDurationInput = event.target.closest("[data-time-block-duration-input]");
+  if (timeBlockDurationInput) {
+    uiState.timeBlock.durationMinutes = clampTimeBlockDurationMinutes(timeBlockDurationInput.value);
+    persistTimeBlockState();
+    return;
+  }
+
   const renameInput = event.target.closest("[data-workspace-rename-input]");
   if (renameInput && uiState.workspaceRenameDraft) {
     uiState.workspaceRenameDraft = {
@@ -5212,6 +6637,12 @@ function handleInput(event) {
 }
 
 async function handleChange(event) {
+  const timeBlockingEnabledInput = event.target.closest("[data-settings-time-blocking-enabled]");
+  if (timeBlockingEnabledInput instanceof HTMLInputElement) {
+    await saveTimeBlockingEnabled(timeBlockingEnabledInput.checked);
+    return;
+  }
+
   const publishRemoteSelect = event.target.closest("[data-scm-publish-remote]");
   if (publishRemoteSelect) {
     uiState.sourceControl.publishModalSelectedRemote = publishRemoteSelect.value;
@@ -5981,6 +7412,151 @@ function toggleSystemHealthPanel(forceVisible = !uiState.systemHealthPanelVisibl
   syncSystemHealthLoop();
 }
 
+function closeTimeBlockPopover() {
+  if (!uiState.timeBlock.popoverVisible) {
+    return false;
+  }
+
+  uiState.timeBlock.popoverVisible = false;
+  return true;
+}
+
+function toggleTimeBlockPopover(forceVisible = !uiState.timeBlock.popoverVisible) {
+  if (!isTimeBlockingEnabled()) {
+    return false;
+  }
+
+  uiState.timeBlock.popoverVisible = Boolean(forceVisible);
+  if (uiState.timeBlock.popoverVisible) {
+    closeWorkspaceOpenMenu();
+    closeWorkspaceGitMenu();
+    hideSettingsSheet();
+    closeQuickSwitcher();
+    uiState.contextMenu = null;
+  }
+  return true;
+}
+
+function setTimeBlockDurationMinutes(value) {
+  uiState.timeBlock.durationMinutes = clampTimeBlockDurationMinutes(value);
+  persistTimeBlockState();
+}
+
+function getTimeBlockElapsedMs(current = uiState.timeBlock.current, now = Date.now()) {
+  if (!current) {
+    return 0;
+  }
+
+  const pausedElapsedMs = Math.max(0, Number(current.pausedElapsedMs || 0));
+  if (current.status === "paused") {
+    return pausedElapsedMs;
+  }
+
+  return pausedElapsedMs + Math.max(0, now - Number(current.startedAtMs || now));
+}
+
+function getTimeBlockDisplay(current = uiState.timeBlock.current, now = Date.now()) {
+  if (!current) {
+    return null;
+  }
+
+  const elapsedMs = getTimeBlockElapsedMs(current, now);
+  const durationMs = Math.max(60 * 1000, Number(current.durationMs || 0));
+  const remainingMs = durationMs - elapsedMs;
+  const isOvertime = remainingMs < 0;
+
+  return {
+    task: current.task || "Focus block",
+    status: current.status === "paused" ? "paused" : "running",
+    elapsedMs,
+    durationMs,
+    remainingMs,
+    isOvertime,
+    clockMs: Math.abs(remainingMs),
+  };
+}
+
+function formatTimeBlockClock(durationMs) {
+  const totalSeconds = Math.max(0, Math.floor(Number(durationMs || 0) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function startTimeBlock() {
+  const task = uiState.timeBlock.taskDraft.trim() || "Focus block";
+  const durationMinutes = clampTimeBlockDurationMinutes(uiState.timeBlock.durationMinutes);
+  const now = Date.now();
+
+  uiState.timeBlock.current = {
+    id: `time-block-${now}`,
+    task,
+    durationMs: durationMinutes * 60 * 1000,
+    startedAtMs: now,
+    pausedElapsedMs: 0,
+    status: "running",
+  };
+  uiState.timeBlock.taskDraft = task;
+  uiState.timeBlock.durationMinutes = durationMinutes;
+  uiState.timeBlock.popoverVisible = false;
+  persistTimeBlockState();
+  syncTimeBlockTicker();
+}
+
+function pauseTimeBlock() {
+  const current = uiState.timeBlock.current;
+  if (!current || current.status === "paused") {
+    return;
+  }
+
+  current.pausedElapsedMs = getTimeBlockElapsedMs(current);
+  current.startedAtMs = 0;
+  current.status = "paused";
+  persistTimeBlockState();
+  syncTimeBlockTicker();
+}
+
+function resumeTimeBlock() {
+  const current = uiState.timeBlock.current;
+  if (!current || current.status !== "paused") {
+    return;
+  }
+
+  current.startedAtMs = Date.now();
+  current.status = "running";
+  persistTimeBlockState();
+  syncTimeBlockTicker();
+}
+
+function finishTimeBlock() {
+  uiState.timeBlock.current = null;
+  uiState.timeBlock.popoverVisible = false;
+  persistTimeBlockState();
+  syncTimeBlockTicker();
+}
+
+function syncTimeBlockTicker(snapshot = uiState.snapshot) {
+  if (runtimeStore.timeBlockTickTimer) {
+    clearTimeout(runtimeStore.timeBlockTickTimer);
+    runtimeStore.timeBlockTickTimer = 0;
+  }
+
+  if (!isTimeBlockingEnabled(snapshot) || uiState.timeBlock.current?.status !== "running") {
+    return;
+  }
+
+  runtimeStore.timeBlockTickTimer = window.setTimeout(() => {
+    runtimeStore.timeBlockTickTimer = 0;
+    requestRender(RENDER_STRIP);
+  }, 1000);
+}
+
 function closeSourceControlRowMenu() {
   if (!uiState.sourceControl.activeRowMenuKey) {
     return false;
@@ -6134,6 +7710,8 @@ function captureSettingsFocusState(root = document) {
 
   const selector = [
     "[data-settings-openai-api-key-input]",
+    "[data-settings-telemetry-host-input]",
+    "[data-settings-posthog-project-api-key-input]",
     "[data-settings-interface-range]",
     "[data-settings-terminal-range]",
   ].find((candidate) => activeElement.matches(candidate));
@@ -8319,6 +9897,8 @@ function startWorkspaceRename(workspaceId) {
   };
   uiState.workspaceRenameShouldFocus = true;
   uiState.workspaceRenameSaving = false;
+  uiState.workspaceSidebarCollapsed = false;
+  persistWorkspaceSidebarCollapsedPreference(false);
   uiState.launcherVisible = false;
   hideSettingsSheet();
   uiState.gitPanelVisible = false;
@@ -8375,7 +9955,10 @@ function ensureFrame() {
     <div class="app-shell">
       <header class="workspace-strip" data-region="strip"></header>
       <div class="workspace-update-region" data-region="update"></div>
-      <section class="workspace-stage" data-region="stage"></section>
+      <div class="workspace-main-shell">
+        <aside class="workspace-sidebar-region" data-region="sidebar"></aside>
+        <section class="workspace-stage" data-region="stage"></section>
+      </div>
       <footer class="workspace-statusbar-region" data-region="status"></footer>
       <div class="workspace-activity-layer" data-region="activity"></div>
       <div class="workspace-context-layer" data-region="context"></div>
@@ -8416,6 +9999,8 @@ function discardCachedWorkspaceScreen(workspaceId, { dispose = true } = {}) {
   if (!cached) {
     return;
   }
+
+  destroyWorkspaceCodeEditor(workspaceId);
 
   if (dispose) {
     for (const paneId of collectPaneIdsFromElement(cached.element)) {
@@ -8538,6 +10123,10 @@ function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskInterse
   pruneCodexRestoreState(snapshot);
   prunePaneAttentionState(snapshot);
   ensureFrame();
+  if (!isTimeBlockingEnabled(snapshot)) {
+    closeTimeBlockPopover();
+  }
+  syncTimeBlockTicker(snapshot);
 
   const activeWorkspace = snapshot.activeWorkspace;
   const shouldShowLauncher = uiState.launcherVisible || !activeWorkspace;
@@ -8593,6 +10182,7 @@ function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskInterse
   }
 
   const stripRegion = app.querySelector('[data-region="strip"]');
+  const sidebarRegion = app.querySelector('[data-region="sidebar"]');
   const updateRegion = app.querySelector('[data-region="update"]');
   const stageRegion = app.querySelector('[data-region="stage"]');
   const statusRegion = app.querySelector('[data-region="status"]');
@@ -8601,6 +10191,7 @@ function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskInterse
   const modalRegion = app.querySelector('[data-region="modal"]');
   if (renderMaskIncludes(mask, RENDER_STRIP)) {
     renderWorkspaceStripRegion(stripRegion, snapshot);
+    renderWorkspaceSidebarRegion(sidebarRegion, snapshot);
     recordRenderMetric("strip");
   }
   if (renderMaskIncludes(mask, RENDER_STATUS)) {
@@ -8929,6 +10520,214 @@ function renderFileIcon() {
       <path d="M7 3h6.8L19 8.2V19a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Zm6 1.8V9h4.2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></path>
     </svg>
   `;
+}
+
+function resolveWorkspaceMaterialIconById(iconId, fallbackId = WORKSPACE_MATERIAL_ICON_THEME.file) {
+  return (
+    WORKSPACE_MATERIAL_ICON_THEME.iconDefinitions[iconId]
+    || WORKSPACE_MATERIAL_ICON_THEME.iconDefinitions[fallbackId]
+    || null
+  );
+}
+
+function resolveWorkspaceMaterialSpecialFileIconId(normalizedName, lightTheme) {
+  if (!normalizedName) {
+    return "";
+  }
+
+  if (
+    normalizedName === ".gitignore"
+    || normalizedName === ".gitattributes"
+    || normalizedName === ".gitmodules"
+  ) {
+    return "git";
+  }
+
+  if (normalizedName === ".env" || normalizedName.startsWith(".env.")) {
+    return "tune";
+  }
+
+  if (
+    normalizedName === "dockerfile"
+    || normalizedName === "docker-compose.yml"
+    || normalizedName === "docker-compose.yaml"
+    || normalizedName === "compose.yml"
+    || normalizedName === "compose.yaml"
+  ) {
+    return "docker";
+  }
+
+  if (normalizedName === "package.json" || normalizedName === "package-lock.json") {
+    return "nodejs";
+  }
+
+  if (normalizedName === "pnpm-lock.yaml") {
+    return "pnpm";
+  }
+
+  if (normalizedName === "requirements.txt") {
+    return "python-misc";
+  }
+
+  if (normalizedName === "favicon.ico") {
+    return "favicon";
+  }
+
+  if (normalizedName === "tsconfig.json") {
+    return "tsconfig";
+  }
+
+  if (normalizedName.startsWith("tauri.") && normalizedName.endsWith(".conf.json")) {
+    return "tauri";
+  }
+
+  if (normalizedName === "readme" || normalizedName.startsWith("readme.")) {
+    return "readme";
+  }
+
+  if (normalizedName === "license" || normalizedName.startsWith("license.")) {
+    return "license";
+  }
+
+  if (normalizedName.startsWith("next.config.")) {
+    return lightTheme ? "next_light" : "next";
+  }
+
+  return "";
+}
+
+function parseThemeHexColor(color) {
+  if (typeof color !== "string") {
+    return null;
+  }
+
+  const value = color.trim();
+  const shortHexMatch = /^#([0-9a-fA-F]{3})$/.exec(value);
+  if (shortHexMatch) {
+    const [r, g, b] = shortHexMatch[1].split("").map((digit) => Number.parseInt(`${digit}${digit}`, 16));
+    return { r, g, b };
+  }
+
+  const hexMatch = /^#([0-9a-fA-F]{6})$/.exec(value);
+  if (!hexMatch) {
+    return null;
+  }
+
+  return {
+    r: Number.parseInt(hexMatch[1].slice(0, 2), 16),
+    g: Number.parseInt(hexMatch[1].slice(2, 4), 16),
+    b: Number.parseInt(hexMatch[1].slice(4, 6), 16),
+  };
+}
+
+function resolveThemeColorLuminance(color) {
+  const rgb = parseThemeHexColor(color);
+  if (!rgb) {
+    return null;
+  }
+
+  const normalizeChannel = (channel) => {
+    const value = channel / 255;
+    return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+  };
+
+  const red = normalizeChannel(rgb.r);
+  const green = normalizeChannel(rgb.g);
+  const blue = normalizeChannel(rgb.b);
+  return (0.2126 * red) + (0.7152 * green) + (0.0722 * blue);
+}
+
+function isWorkspaceMaterialLightTheme(themeId = getActiveThemeId()) {
+  const background = getThemeDefinition(themeId)?.appVars?.["--bg"];
+  const luminance = resolveThemeColorLuminance(background);
+  return typeof luminance === "number" && luminance >= WORKSPACE_MATERIAL_LIGHT_THEME_LUMINANCE_THRESHOLD;
+}
+
+function buildWorkspaceFileExtensionCandidates(name) {
+  const normalizedName = String(name || "").trim().toLowerCase();
+  if (!normalizedName) {
+    return [];
+  }
+
+  const candidates = [];
+  for (let index = normalizedName.indexOf("."); index >= 0; index = normalizedName.indexOf(".", index + 1)) {
+    const candidate = normalizedName.slice(index + 1);
+    if (candidate) {
+      candidates.push(candidate);
+    }
+  }
+  return candidates;
+}
+
+function resolveWorkspaceMaterialFileIcon(name) {
+  const normalizedName = String(name || "").trim().toLowerCase();
+  if (!normalizedName) {
+    return null;
+  }
+
+  const lightTheme = isWorkspaceMaterialLightTheme();
+  let iconId = resolveWorkspaceMaterialSpecialFileIconId(normalizedName, lightTheme);
+
+  if (!iconId) {
+    const extensionCandidates = buildWorkspaceFileExtensionCandidates(normalizedName);
+    for (const candidate of extensionCandidates) {
+      iconId = candidate === "toml" && lightTheme
+        ? "toml_light"
+        : WORKSPACE_MATERIAL_FILE_EXTENSION_ICON_IDS[candidate] || "";
+      if (iconId) {
+        break;
+      }
+    }
+  }
+
+  if (!iconId) {
+    iconId = WORKSPACE_MATERIAL_ICON_THEME.file;
+  }
+
+  return resolveWorkspaceMaterialIconById(iconId);
+}
+
+function resolveWorkspaceMaterialFolderIcon(name, { expanded = false, isRoot = false } = {}) {
+  const normalizedName = String(name || "").trim().toLowerCase();
+  let iconId = normalizedName
+    ? (
+        expanded
+          ? WORKSPACE_MATERIAL_FOLDER_EXPANDED_ICON_IDS[normalizedName]
+          : WORKSPACE_MATERIAL_FOLDER_ICON_IDS[normalizedName]
+      ) || ""
+    : "";
+
+  if (!iconId) {
+    if (expanded) {
+      iconId = isRoot
+        ? (WORKSPACE_MATERIAL_ICON_THEME.rootFolderExpanded || WORKSPACE_MATERIAL_ICON_THEME.folderExpanded)
+        : WORKSPACE_MATERIAL_ICON_THEME.folderExpanded;
+    } else {
+      iconId = isRoot
+        ? (WORKSPACE_MATERIAL_ICON_THEME.rootFolder || WORKSPACE_MATERIAL_ICON_THEME.folder)
+        : WORKSPACE_MATERIAL_ICON_THEME.folder;
+    }
+  }
+
+  return resolveWorkspaceMaterialIconById(iconId, WORKSPACE_MATERIAL_ICON_THEME.folder);
+}
+
+function renderWorkspaceMaterialThemeIcon(icon, className = "workspace-file-explorer-theme-icon") {
+  if (!icon?.path) {
+    return "";
+  }
+
+  return `<img class="${escapeHtml(className)}" src="${escapeHtml(icon.path)}" alt="" aria-hidden="true" decoding="async">`;
+}
+
+function renderWorkspaceFileExplorerFileTypeIcon(name) {
+  const icon = resolveWorkspaceMaterialFileIcon(name);
+  return icon ? renderWorkspaceMaterialThemeIcon(icon) : renderFileIcon();
+}
+
+function renderWorkspaceFileExplorerFolderTypeIcon(name, { expanded = false, isRoot = false } = {}) {
+  const icon = resolveWorkspaceMaterialFolderIcon(name, { expanded, isRoot });
+  return icon ? renderWorkspaceMaterialThemeIcon(icon) : renderFolderIcon();
 }
 
 function renderMoreIcon() {
@@ -10076,8 +11875,8 @@ function syncWorkspaceTabRail(activeWorkspaceId, workspaceCount) {
   }
 
   if (isWorkspaceTabDragActive()) {
-    if (Math.abs(tabs.scrollLeft - uiState.workspaceTabsScrollLeft) > 1) {
-      tabs.scrollLeft = uiState.workspaceTabsScrollLeft;
+    if (Math.abs(getWorkspaceTabsScrollPosition(tabs) - uiState.workspaceTabsScrollLeft) > 1) {
+      setWorkspaceTabsScrollPosition(tabs, uiState.workspaceTabsScrollLeft);
     }
     rememberWorkspaceTabsScroll(tabs);
     syncWorkspaceTabsOverflow(tabs, shell);
@@ -10090,8 +11889,8 @@ function syncWorkspaceTabRail(activeWorkspaceId, workspaceCount) {
   const countChanged = workspaceCount !== uiState.workspaceTabsLastCount;
   if (activeChanged || countChanged) {
     scrollWorkspaceTabIntoView(tabs, activeWorkspaceId, "smooth");
-  } else if (Math.abs(tabs.scrollLeft - uiState.workspaceTabsScrollLeft) > 1) {
-    tabs.scrollLeft = uiState.workspaceTabsScrollLeft;
+  } else if (Math.abs(getWorkspaceTabsScrollPosition(tabs) - uiState.workspaceTabsScrollLeft) > 1) {
+    setWorkspaceTabsScrollPosition(tabs, uiState.workspaceTabsScrollLeft);
     rememberWorkspaceTabsScroll(tabs);
   } else {
     rememberWorkspaceTabsScroll(tabs);
@@ -10108,15 +11907,17 @@ function scrollWorkspaceTabs(direction) {
     return;
   }
 
-  const distance = Math.max(180, Math.round(tabs.clientWidth * 0.68));
-  const maxScrollLeft = Math.max(0, tabs.scrollWidth - tabs.clientWidth);
-  const nextLeft = Math.min(maxScrollLeft, Math.max(0, tabs.scrollLeft + distance * direction));
-  tabs.scrollTo({
-    left: nextLeft,
-    behavior: "smooth",
-  });
+  const isVertical = isWorkspaceTabsVertical(tabs);
+  const viewportSize = isVertical ? tabs.clientHeight : tabs.clientWidth;
+  const contentSize = isVertical ? tabs.scrollHeight : tabs.scrollWidth;
+  const distance = Math.max(180, Math.round(viewportSize * 0.68));
+  const maxScroll = Math.max(0, contentSize - viewportSize);
+  const nextScroll = Math.min(maxScroll, Math.max(0, getWorkspaceTabsScrollPosition(tabs) + distance * direction));
+  tabs.scrollTo(isVertical
+    ? { top: nextScroll, behavior: "smooth" }
+    : { left: nextScroll, behavior: "smooth" });
 
-  uiState.workspaceTabsScrollLeft = nextLeft;
+  uiState.workspaceTabsScrollLeft = nextScroll;
   window.setTimeout(() => {
     rememberWorkspaceTabsScroll(tabs);
     syncWorkspaceTabsOverflow(tabs);
@@ -10132,6 +11933,24 @@ function scrollWorkspaceTabIntoView(tabs, workspaceId, behavior = "auto") {
   const activeTabButton = tabs.querySelector(selector);
   const activeTab = activeTabButton?.closest?.("[data-workspace-tab-shell]");
   if (!(activeTab instanceof HTMLElement)) {
+    return;
+  }
+
+  if (isWorkspaceTabsVertical(tabs)) {
+    const tabTop = activeTab.offsetTop;
+    const tabHeight = activeTab.offsetHeight;
+    const viewportHeight = tabs.clientHeight;
+    const maxScrollTop = Math.max(0, tabs.scrollHeight - viewportHeight);
+    const nextTop = Math.min(
+      maxScrollTop,
+      Math.max(0, tabTop - (viewportHeight - tabHeight) / 2),
+    );
+
+    tabs.scrollTo({
+      top: nextTop,
+      behavior,
+    });
+    uiState.workspaceTabsScrollLeft = nextTop;
     return;
   }
 
@@ -10156,13 +11975,17 @@ function syncWorkspaceTabsOverflow(tabs, shell = tabs.closest("[data-workspace-t
     return;
   }
 
-  const maxScrollLeft = Math.max(0, tabs.scrollWidth - tabs.clientWidth);
-  const hasLeft = tabs.scrollLeft > 6;
-  const hasRight = tabs.scrollLeft < maxScrollLeft - 6;
+  const isVertical = isWorkspaceTabsVertical(tabs);
+  const maxScroll = isVertical
+    ? Math.max(0, tabs.scrollHeight - tabs.clientHeight)
+    : Math.max(0, tabs.scrollWidth - tabs.clientWidth);
+  const scrollPosition = getWorkspaceTabsScrollPosition(tabs);
+  const hasLeft = scrollPosition > 6;
+  const hasRight = scrollPosition < maxScroll - 6;
 
   shell.classList.toggle("has-overflow-left", hasLeft);
   shell.classList.toggle("has-overflow-right", hasRight);
-  shell.classList.toggle("has-overflow-any", maxScrollLeft > 6);
+  shell.classList.toggle("has-overflow-any", maxScroll > 6);
 
   const leftButton = shell.querySelector(".workspace-tabs-scroll-left");
   const rightButton = shell.querySelector(".workspace-tabs-scroll-right");
@@ -10175,7 +11998,32 @@ function syncWorkspaceTabsOverflow(tabs, shell = tabs.closest("[data-workspace-t
 }
 
 function rememberWorkspaceTabsScroll(tabs) {
-  uiState.workspaceTabsScrollLeft = tabs ? Math.max(0, tabs.scrollLeft) : 0;
+  uiState.workspaceTabsScrollLeft = tabs ? Math.max(0, getWorkspaceTabsScrollPosition(tabs)) : 0;
+}
+
+function isWorkspaceTabsVertical(tabs) {
+  const element = tabs instanceof Element ? tabs : null;
+  const shell = element?.closest?.("[data-workspace-tabs-shell]");
+  return element?.dataset?.workspaceTabsOrientation === "vertical"
+    || shell?.dataset?.workspaceTabsOrientation === "vertical";
+}
+
+function getWorkspaceTabsScrollPosition(tabs) {
+  if (!tabs) {
+    return 0;
+  }
+  return isWorkspaceTabsVertical(tabs) ? tabs.scrollTop : tabs.scrollLeft;
+}
+
+function setWorkspaceTabsScrollPosition(tabs, value) {
+  if (!tabs) {
+    return;
+  }
+  if (isWorkspaceTabsVertical(tabs)) {
+    tabs.scrollTop = value;
+  } else {
+    tabs.scrollLeft = value;
+  }
 }
 
 function normalizeWheelDelta(event, tabs) {
@@ -10224,7 +12072,7 @@ function renderAppUpdateBanner() {
           data-url="${escapeHtml(destinationUrl)}"
           ${destinationUrl ? "" : "disabled"}
         >
-          ${appUpdate.downloadUrl ? "Download" : "View release"}
+          ${getAppUpdateDownloadActionLabel(appUpdate)}
         </button>
         <button
           type="button"
@@ -10299,7 +12147,7 @@ function renderSettingsAppUpdateCard(snapshot) {
             ? escapeHtml(uiState.appUpdate.error)
             : isAvailable
               ? escapeHtml(`${publishedCopy}. CrewDock will keep install flow manual through GitHub Releases.`)
-              : "CrewDock checks GitHub Releases and lets you download the newest notarized DMG when a build is available."
+              : "CrewDock checks GitHub Releases and lets you download the latest platform build when one is available."
         }
       </p>
       <div class="settings-ai-actions">
@@ -10321,7 +12169,7 @@ function renderSettingsAppUpdateCard(snapshot) {
                   data-url="${escapeHtml(destinationUrl)}"
                   ${destinationUrl ? "" : "disabled"}
                 >
-                  ${appUpdate?.downloadUrl ? "Download DMG" : "View release"}
+                  ${getAppUpdateDownloadActionLabel(appUpdate)}
                 </button>
                 <button
                   type="button"
@@ -10426,8 +12274,10 @@ function renderSettingsSheet(snapshot) {
                     preview: renderTerminalTextPreview(),
                   })}
                 </div>
+                ${renderSettingsTimeBlockCard(snapshot)}
                 ${hasAvailableCodexCli(snapshot) ? renderSettingsCodexCard(getDraftCodexCli(snapshot)) : ""}
                 ${renderSettingsAppUpdateCard(snapshot)}
+                ${renderSettingsTelemetryCard(snapshot)}
                 ${renderSettingsAiCard({
                   hasStoredKey,
                   hasEnvironmentKey,
@@ -10709,6 +12559,45 @@ function renderTerminalTextPreview() {
   `;
 }
 
+function renderSettingsTimeBlockCard(snapshot) {
+  const isEnabled = getDraftTimeBlockingEnabled(snapshot);
+  const isSaving = Boolean(uiState.settingsDraft?.savingTimeBlockingEnabled);
+  const current = getTimeBlockDisplay();
+  const statusLabel = isSaving
+    ? "Saving"
+    : isEnabled
+      ? current
+        ? "Active"
+        : "Enabled"
+      : "Off";
+  const statusTone = isEnabled ? "is-active" : "";
+  const copy = isEnabled
+    ? "Shows a small top-bar timer for the current focus block. Timer state stays local to this machine."
+    : "Hide Time Blocking from the top bar when you want the chrome as quiet as possible.";
+
+  return `
+    <section class="settings-ai-card settings-time-block-card">
+      <div class="settings-ai-head">
+        <div>
+          <p class="settings-panel-kicker">Focus</p>
+          <h4 class="settings-adjustment-title">Time Blocking</h4>
+          <p class="settings-adjustment-copy">${escapeHtml(copy)}</p>
+        </div>
+        <span class="settings-ai-status ${statusTone}">${escapeHtml(statusLabel)}</span>
+      </div>
+      <label class="settings-telemetry-toggle">
+        <input
+          type="checkbox"
+          data-settings-time-blocking-enabled
+          ${isEnabled ? "checked" : ""}
+          ${isSaving ? "disabled" : ""}
+        />
+        <span>Show Time Blocking in the top bar</span>
+      </label>
+    </section>
+  `;
+}
+
 function labelCodexCliSource(source) {
   switch (source) {
     case "homebrew":
@@ -10897,6 +12786,103 @@ function renderSettingsAiCard({ hasStoredKey, hasEnvironmentKey }) {
             class="settings-ai-button"
             data-settings-openai-clear
             ${clearDisabled ? "disabled" : ""}
+          >
+            Remove
+          </button>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function renderSettingsTelemetryCard(snapshot) {
+  const telemetry = getTelemetrySnapshot(snapshot);
+  const host = getDraftTelemetryHost(snapshot);
+  const isEnabled = getDraftTelemetryEnabled(snapshot);
+  const hasStoredKey = hasStoredPostHogProjectApiKey(snapshot);
+  const draftKey = getDraftPostHogProjectApiKey();
+  const isSavingPreferences = Boolean(uiState.settingsDraft?.savingTelemetryPreferences);
+  const isSavingKey = Boolean(uiState.settingsDraft?.savingPostHogProjectApiKey);
+  const statusLabel = telemetry.isConfigured
+    ? "Enabled"
+    : hasStoredKey
+      ? "Configured"
+      : isEnabled
+        ? "Missing key"
+        : "Off";
+  const statusTone = telemetry.isConfigured || hasStoredKey ? "is-active" : "";
+  const saveKeyDisabled = isSavingKey || !draftKey.trim();
+  const clearKeyDisabled = isSavingKey || !hasStoredKey;
+  const hostSaveDisabled = isSavingPreferences || !host.trim();
+  const placeholder = hasStoredKey
+    ? "Stored locally. Paste a new project key to replace it."
+    : "Paste PostHog project API key";
+
+  return `
+    <section class="settings-ai-card settings-telemetry-card">
+      <div class="settings-ai-head">
+        <div>
+          <p class="settings-panel-kicker">Product analytics</p>
+          <h4 class="settings-adjustment-title">PostHog telemetry</h4>
+          <p class="settings-adjustment-copy">Sends anonymous CrewDock usage events only. No repo paths, terminal content, commands, prompts, filenames, or API keys are captured.</p>
+        </div>
+        <span class="settings-ai-status ${statusTone}">${escapeHtml(statusLabel)}</span>
+      </div>
+      <label class="settings-telemetry-toggle">
+        <input
+          type="checkbox"
+          data-settings-telemetry-enabled
+          ${isEnabled ? "checked" : ""}
+        />
+        <span>Enable anonymous analytics for CrewDock</span>
+      </label>
+      <div class="settings-ai-controls">
+        <input
+          class="settings-ai-input"
+          type="text"
+          value="${escapeHtml(host)}"
+          data-settings-telemetry-host-input
+          placeholder="https://us.i.posthog.com"
+          autocomplete="off"
+          autocapitalize="off"
+          spellcheck="false"
+        />
+        <div class="settings-ai-actions">
+          <button
+            type="button"
+            class="settings-ai-button settings-ai-button-primary"
+            data-settings-telemetry-save
+            ${hostSaveDisabled ? "disabled" : ""}
+          >
+            ${isSavingPreferences ? "Saving..." : "Save telemetry"}
+          </button>
+        </div>
+      </div>
+      <div class="settings-ai-controls">
+        <input
+          class="settings-ai-input"
+          type="password"
+          value="${escapeHtml(draftKey)}"
+          data-settings-posthog-project-api-key-input
+          placeholder="${escapeHtml(placeholder)}"
+          autocomplete="off"
+          autocapitalize="off"
+          spellcheck="false"
+        />
+        <div class="settings-ai-actions">
+          <button
+            type="button"
+            class="settings-ai-button settings-ai-button-primary"
+            data-settings-posthog-save
+            ${saveKeyDisabled ? "disabled" : ""}
+          >
+            ${isSavingKey ? "Saving..." : "Save key"}
+          </button>
+          <button
+            type="button"
+            class="settings-ai-button"
+            data-settings-posthog-clear
+            ${clearKeyDisabled ? "disabled" : ""}
           >
             Remove
           </button>
@@ -13090,8 +15076,6 @@ function renderWorkspace(workspace) {
   const fileEditorVisible = isWorkspaceFileEditorVisible(workspace.id);
   return `
     <main class="workspace-screen ${maximizedPane ? "is-maximized" : ""} ${fileExplorerVisible ? "has-file-explorer" : ""} ${fileEditorVisible ? "has-file-editor" : ""}">
-      ${renderWorkspaceFileExplorerShell(workspace)}
-      ${renderWorkspaceFileEditorShell(workspace)}
       <section class="terminal-layout">
         ${
           maximizedPane
@@ -13099,6 +15083,8 @@ function renderWorkspace(workspace) {
             : renderPaneLayout(paneLayout, workspace, paneIndexById)
         }
       </section>
+      ${renderWorkspaceFileExplorerShell(workspace)}
+      ${renderWorkspaceFileEditorShell(workspace)}
     </main>
   `;
 }
@@ -13150,7 +15136,12 @@ function renderWorkspaceFileExplorer(workspace) {
           </button>
         </div>
       </header>
-      <div class="workspace-file-explorer-body" role="tree" aria-label="${escapeHtml(workspace.name)} files">
+      <div
+        class="workspace-file-explorer-body"
+        data-workspace-file-explorer-scroll
+        role="tree"
+        aria-label="${escapeHtml(workspace.name)} files"
+      >
         <div class="workspace-file-explorer-tree-shell">
           ${renderWorkspaceFileExplorerTree({
             rootSnapshot,
@@ -13266,7 +15257,14 @@ function renderWorkspaceFileExplorerEntries(entries, explorerState, selectedPath
             ${disclosure}
             <div class="workspace-file-explorer-entry is-${escapeHtml(kind)} ${gitDecoration ? `is-git-${escapeHtml(gitDecoration.tone)}` : ""}">
               <span class="workspace-file-explorer-entry-icon">
-                ${kind === "directory" ? renderFolderIcon() : renderFileIcon()}
+                ${
+                  kind === "directory"
+                    ? renderWorkspaceFileExplorerFolderTypeIcon(entry.name, {
+                        expanded: isExpanded,
+                        isRoot: depth === 0,
+                      })
+                    : renderWorkspaceFileExplorerFileTypeIcon(entry.name)
+                }
               </span>
               <span class="workspace-file-explorer-entry-label">${escapeHtml(entry.name)}</span>
               ${badge}
@@ -13983,12 +15981,22 @@ function renderWorkspaceFileEditorShell(workspace) {
   const markdownMode = getWorkspaceFileEditorMarkdownMode(editorState);
   const isMarkdownSplit = visible && markdownMode === "split";
   const isMarkdownPreview = visible && markdownMode === "preview";
+  const customWidth = clampWorkspaceFileEditorWidth(uiState.workspaceFileEditorWidth);
   return `
     <aside
-      class="workspace-file-editor-shell ${visible ? "is-visible" : ""} ${isMarkdownSplit ? "is-markdown-split" : ""} ${isMarkdownPreview ? "is-markdown-preview" : ""}"
+      class="workspace-file-editor-shell ${visible ? "is-visible" : ""} ${customWidth ? "is-user-sized" : ""} ${isMarkdownSplit ? "is-markdown-split" : ""} ${isMarkdownPreview ? "is-markdown-preview" : ""}"
       data-workspace-file-editor="${escapeHtml(workspace.id)}"
       aria-hidden="${visible ? "false" : "true"}"
+      ${customWidth ? `style="--workspace-file-editor-width: ${customWidth}px"` : ""}
     >
+      <div
+        class="workspace-file-editor-resizer"
+        data-workspace-file-editor-resizer
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize code editor"
+        title="Drag to resize editor"
+      ></div>
       ${renderWorkspaceFileEditor(workspace)}
     </aside>
   `;
@@ -14065,14 +16073,7 @@ function renderWorkspaceFileEditor(workspace) {
             showMarkdownWrite
               ? `
                   <div class="workspace-file-editor-pane is-write">
-                    <textarea
-                      class="workspace-file-editor-input"
-                      data-workspace-file-editor-input
-                      spellcheck="false"
-                      autocapitalize="off"
-                      autocorrect="off"
-                      ${snapshot?.readOnly ? "readonly" : ""}
-                    >${escapeHtml(editorState?.draft || "")}</textarea>
+                    ${renderWorkspaceCodeEditorHost(editorState, snapshot)}
                   </div>
                 `
               : ""
@@ -14081,7 +16082,11 @@ function renderWorkspaceFileEditor(workspace) {
             showMarkdownPreview
               ? `
                   <div class="workspace-file-editor-pane is-preview">
-                    <div class="workspace-file-editor-preview-shell" data-markdown-mode="${escapeHtml(markdownMode)}">
+                    <div
+                      class="workspace-file-editor-preview-shell"
+                      data-workspace-file-editor-preview
+                      data-markdown-mode="${escapeHtml(markdownMode)}"
+                    >
                       ${renderWorkspaceFileMarkdownPreview(workspace, editorState)}
                     </div>
                   </div>
@@ -14274,6 +16279,8 @@ function renderPaneShell(pane, paneIndex) {
 function renderContextMenu(contextMenu, workspace) {
   const canSplit = workspace.panes.length < 16;
   const canClose = workspace.panes.length > 1;
+  const fileManagerLabel = getFileManagerLabel();
+  const primaryModifier = getPrimaryModifierLabel();
 
   return `
     <div
@@ -14285,16 +16292,16 @@ function renderContextMenu(contextMenu, workspace) {
       <button class="terminal-context-item" data-action="context-copy-path">
         <span>Copy Path</span>
       </button>
-      <button class="terminal-context-item" data-action="context-show-in-finder">
-        <span>Show in Finder</span>
+      <button class="terminal-context-item" data-action="context-show-in-file-manager">
+        <span>Show in ${escapeHtml(fileManagerLabel)}</span>
       </button>
       <div class="terminal-context-divider"></div>
-      ${renderContextSplitAction("Split pane right", "context-split-pane", "right", "⌘D", canSplit)}
+      ${renderContextSplitAction("Split pane right", "context-split-pane", "right", `${primaryModifier}+D`, canSplit)}
       ${renderContextSplitAction("Split pane left", "context-split-pane", "left", "", canSplit)}
-      ${renderContextSplitAction("Split pane down", "context-split-pane", "down", "⇧⌘D", canSplit)}
+      ${renderContextSplitAction("Split pane down", "context-split-pane", "down", `${primaryModifier}+Shift+D`, canSplit)}
       ${renderContextSplitAction("Split pane up", "context-split-pane", "up", "", canSplit)}
-      ${renderContextSplitAction("Maximize pane", "context-maximize-pane", "", "⇧⌘↩", true)}
-      ${renderContextSplitAction("Close pane", "context-close-pane", "", "⌘W", canClose)}
+      ${renderContextSplitAction("Maximize pane", "context-maximize-pane", "", `${primaryModifier}+Shift+Enter`, true)}
+      ${renderContextSplitAction("Close pane", "context-close-pane", "", `${primaryModifier}+W`, canClose)}
     </div>
   `;
 }
@@ -14410,8 +16417,12 @@ async function handleContextMenuAction(target) {
   try {
     if (action === "context-copy-path") {
       await copyText(workspace.path);
-    } else if (action === "context-show-in-finder") {
-      await bridge.showInFinder(workspace.path);
+    } else if (action === "context-show-in-file-manager") {
+      if (typeof bridge.showInFileManager === "function") {
+        await bridge.showInFileManager(workspace.path);
+      } else if (typeof bridge.showInFinder === "function") {
+        await bridge.showInFinder(workspace.path);
+      }
     } else if (
       action === "context-split-pane"
       || action === "context-close-pane"
@@ -14503,6 +16514,37 @@ function mountWorkspaceTerminals(workspace, root = document) {
   }
 }
 
+function captureWorkspaceFileExplorerScrollState(shell) {
+  const scrollRegion = shell.querySelector("[data-workspace-file-explorer-scroll]");
+  if (!(scrollRegion instanceof HTMLElement)) {
+    return null;
+  }
+
+  return {
+    left: scrollRegion.scrollLeft,
+    top: scrollRegion.scrollTop,
+  };
+}
+
+function restoreWorkspaceFileExplorerScrollState(shell, scrollState) {
+  if (!scrollState) {
+    return;
+  }
+
+  const restore = () => {
+    const scrollRegion = shell.querySelector("[data-workspace-file-explorer-scroll]");
+    if (!(scrollRegion instanceof HTMLElement)) {
+      return;
+    }
+
+    scrollRegion.scrollLeft = scrollState.left;
+    scrollRegion.scrollTop = scrollState.top;
+  };
+
+  restore();
+  requestAnimationFrame(restore);
+}
+
 function syncWorkspaceFileExplorerSurface(workspace, root = document) {
   const screen = root.querySelector(`.workspace-screen[data-workspace-id="${workspace.id}"]`);
   if (!(screen instanceof HTMLElement)) {
@@ -14514,11 +16556,13 @@ function syncWorkspaceFileExplorerSurface(workspace, root = document) {
     return;
   }
 
+  const scrollState = captureWorkspaceFileExplorerScrollState(shell);
   const visible = isWorkspaceFileExplorerVisible(workspace.id);
   screen.classList.toggle("has-file-explorer", visible);
   shell.classList.toggle("is-visible", visible);
   shell.setAttribute("aria-hidden", visible ? "false" : "true");
   shell.innerHTML = renderWorkspaceFileExplorer(workspace);
+  restoreWorkspaceFileExplorerScrollState(shell, scrollState);
   if (visible) {
     ensureWorkspaceFileExplorerRootLoaded(workspace.id);
   }
@@ -14540,6 +16584,7 @@ function syncWorkspaceFileEditorSurface(workspace, root = document) {
   const isMarkdownSplit = visible && getWorkspaceFileEditorMarkdownMode(editorState) === "split";
   const isMarkdownPreview = visible && getWorkspaceFileEditorMarkdownMode(editorState) === "preview";
   const focusState = captureWorkspaceFileEditorFocusState(screen);
+  destroyWorkspaceCodeEditor(workspace.id);
   screen.classList.toggle("has-file-editor", visible);
   shell.classList.toggle("is-visible", visible);
   shell.classList.toggle("is-markdown-split", isMarkdownSplit);
@@ -14547,13 +16592,14 @@ function syncWorkspaceFileEditorSurface(workspace, root = document) {
   shell.setAttribute("aria-hidden", visible ? "false" : "true");
   shell.innerHTML = renderWorkspaceFileEditor(workspace);
   syncWorkspaceFileEditorMarkdownDiagrams(shell);
+  void syncWorkspaceCodeEditorSurface(workspace, shell, { focusState });
   if (editorState?.shouldFocus) {
-    editorState.shouldFocus = false;
     const input = shell.querySelector("[data-workspace-file-editor-input]");
     if (input instanceof HTMLTextAreaElement && !input.readOnly) {
       input.focus({ preventScroll: true });
       input.selectionStart = input.value.length;
       input.selectionEnd = input.value.length;
+      editorState.shouldFocus = false;
     }
   } else if (focusState) {
     restoreWorkspaceFileEditorFocusState(focusState, screen);
@@ -14676,6 +16722,7 @@ function clearWorkspaceBuffers(workspaceId) {
   discardCachedWorkspaceScreen(workspaceId, { dispose: false });
   workspacePaneIds.delete(workspaceId);
   uiState.workspaceFileExplorer.delete(workspaceId);
+  destroyWorkspaceCodeEditor(workspaceId);
   uiState.workspaceFileEditor.delete(workspaceId);
   cancelWorkspaceFileDraftPersistence(workspaceId);
 }
@@ -15592,21 +17639,23 @@ async function copyText(value) {
 }
 
 function basename(path) {
-  const parts = String(path).split("/").filter(Boolean);
+  const parts = String(path || "").split(/[\\/]+/).filter(Boolean);
   return parts[parts.length - 1] || path;
 }
 
 function compactWorkspacePath(path) {
-  const parts = String(path || "").split("/").filter(Boolean);
+  const rawPath = String(path || "");
+  const parts = rawPath.split(/[\\/]+/).filter(Boolean);
+  const separator = rawPath.includes("\\") ? "\\" : "/";
   if (parts.length === 0) {
-    return "/";
+    return separator;
   }
 
   if (parts.length === 1) {
     return parts[0];
   }
 
-  return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
+  return `${parts[parts.length - 2]}${separator}${parts[parts.length - 1]}`;
 }
 
 function escapeHtml(value) {

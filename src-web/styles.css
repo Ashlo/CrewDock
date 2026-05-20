@@ -92,6 +92,9 @@
   --pane-title-text: color-mix(in srgb, var(--text) 82%, transparent);
   --pane-title-muted: color-mix(in srgb, var(--surface-soft-text) 88%, var(--text) 12%);
   --pane-active-line: color-mix(in srgb, var(--text) 18%, transparent);
+  --pane-active-border: color-mix(in srgb, var(--accent) 48%, var(--text) 28%);
+  --pane-active-shine: color-mix(in srgb, var(--accent) 72%, white 28%);
+  --pane-active-shine-soft: color-mix(in srgb, var(--accent) 22%, transparent);
   --pane-active-wash: color-mix(in srgb, var(--text) 1.2%, transparent);
   --radius-xl: 28px;
   --radius-lg: 18px;
@@ -252,6 +255,53 @@ button {
   opacity: 0.8;
 }
 
+.workspace-strip-current {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--surface-soft-text);
+  font-size: 0.73rem;
+  overflow: hidden;
+}
+
+.workspace-strip-current strong,
+.workspace-strip-current span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workspace-strip-current strong {
+  flex: 0 0 auto;
+  max-width: 220px;
+  color: var(--tab-text-active);
+  font-size: 0.82rem;
+  font-weight: 650;
+  letter-spacing: -0.015em;
+}
+
+.workspace-strip-current span:last-child {
+  flex: 1 1 auto;
+}
+
+.workspace-strip-current-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 70%, transparent);
+  opacity: 0.64;
+}
+
+.workspace-strip-current-dot.is-live {
+  background: var(--accent);
+  opacity: 1;
+  box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 42%, transparent);
+}
+
 .workspace-tabs-shell {
   position: relative;
   min-width: 0;
@@ -379,6 +429,226 @@ button {
   height: 16px;
   margin-right: 4px;
   background: linear-gradient(180deg, transparent, var(--chrome-divider), transparent);
+}
+
+.workspace-time-block-shell {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.workspace-time-block-button {
+  min-height: 31px;
+  max-width: min(280px, 22vw);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 11px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--border) 68%, transparent);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, white 3%, transparent), transparent 54%),
+    color-mix(in srgb, var(--panel) 78%, var(--control-bg) 22%);
+  color: color-mix(in srgb, var(--text) 88%, var(--surface-soft-text));
+  box-shadow:
+    0 8px 18px rgba(0, 0, 0, 0.14),
+    inset 0 1px 0 color-mix(in srgb, white 5%, transparent);
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 620;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    box-shadow 160ms ease,
+    transform 160ms ease;
+}
+
+.workspace-time-block-button:hover,
+.workspace-time-block-shell.is-open .workspace-time-block-button {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--accent) 24%, var(--border-strong));
+  background:
+    linear-gradient(180deg, color-mix(in srgb, white 4%, transparent), transparent 52%),
+    color-mix(in srgb, var(--accent-soft) 34%, var(--panel) 66%);
+}
+
+.workspace-time-block-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 56%, transparent);
+  box-shadow: 0 0 0 rgba(0, 0, 0, 0);
+}
+
+.workspace-time-block-shell.is-running .workspace-time-block-dot {
+  background: var(--accent);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.workspace-time-block-shell.is-paused .workspace-time-block-dot {
+  background: var(--warning);
+}
+
+.workspace-time-block-shell.is-overtime .workspace-time-block-dot {
+  background: var(--danger);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--danger) 54%, transparent);
+}
+
+.workspace-time-block-task {
+  min-width: 0;
+  max-width: 108px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: color-mix(in srgb, var(--surface-soft-text) 82%, var(--text));
+}
+
+.workspace-time-block-button strong {
+  flex: 0 0 auto;
+  color: var(--text);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.workspace-time-block-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 18;
+  width: min(340px, calc(100vw - 32px));
+  padding: 12px;
+  border-radius: 18px;
+  border: 1px solid color-mix(in srgb, var(--border) 76%, transparent);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, white 3%, transparent), transparent 34%),
+    color-mix(in srgb, var(--panel) 96%, transparent);
+  box-shadow:
+    0 22px 42px rgba(0, 0, 0, 0.28),
+    inset 0 1px 0 color-mix(in srgb, white 5%, transparent);
+  backdrop-filter: blur(18px);
+}
+
+.workspace-time-block-form,
+.workspace-time-block-field {
+  display: grid;
+  gap: 10px;
+}
+
+.workspace-time-block-popover-head,
+.workspace-time-block-current {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.workspace-time-block-popover-head span,
+.workspace-time-block-current span,
+.workspace-time-block-field span,
+.workspace-time-block-custom span {
+  color: var(--surface-soft-text);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.workspace-time-block-popover-head strong,
+.workspace-time-block-current strong {
+  min-width: 0;
+  color: var(--text);
+  font-size: 0.92rem;
+  line-height: 1.2;
+  text-align: right;
+}
+
+.workspace-time-block-current {
+  padding: 10px 11px;
+  border-radius: 13px;
+  border: 1px solid color-mix(in srgb, var(--border) 64%, transparent);
+  background: color-mix(in srgb, var(--surface-pill-bg) 72%, transparent);
+}
+
+.workspace-time-block-current strong {
+  font-family: "SFMono-Regular", "SF Mono", ui-monospace, monospace;
+  font-size: 1rem;
+}
+
+.workspace-time-block-input,
+.workspace-time-block-custom input {
+  width: 100%;
+  min-width: 0;
+  height: 38px;
+  padding: 0 11px;
+  border-radius: 11px;
+  border: 1px solid color-mix(in srgb, var(--border) 68%, transparent);
+  background: color-mix(in srgb, var(--surface-input-bg) 74%, transparent);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+  outline: none;
+}
+
+.workspace-time-block-input:focus,
+.workspace-time-block-custom input:focus {
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--border));
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.workspace-time-block-presets {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(76px, 0.9fr);
+  gap: 7px;
+}
+
+.workspace-time-block-preset,
+.workspace-time-block-primary,
+.workspace-time-block-secondary {
+  min-height: 34px;
+  border-radius: 11px;
+  border: 1px solid color-mix(in srgb, var(--border) 68%, transparent);
+  background: color-mix(in srgb, var(--control-bg) 72%, transparent);
+  color: var(--surface-soft-text);
+  font: inherit;
+  font-size: 0.76rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.workspace-time-block-preset.is-active {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+  background: color-mix(in srgb, var(--accent-soft) 72%, transparent);
+}
+
+.workspace-time-block-custom {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.workspace-time-block-custom input {
+  height: 34px;
+  padding: 0 8px;
+  text-align: center;
+}
+
+.workspace-time-block-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.workspace-time-block-primary {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+  background: color-mix(in srgb, var(--accent-soft) 74%, var(--control-bg));
+}
+
+.workspace-time-block-secondary.is-danger {
+  color: color-mix(in srgb, var(--danger) 78%, white);
 }
 
 .workspace-strip-actions .workspace-open-shell {
@@ -993,6 +1263,10 @@ button {
 .workspace-tab-main:focus-visible,
 .workspace-tab-action:focus-visible,
 .workspace-tabs-scroll:focus-visible,
+.workspace-time-block-button:focus-visible,
+.workspace-time-block-preset:focus-visible,
+.workspace-time-block-primary:focus-visible,
+.workspace-time-block-secondary:focus-visible,
 .workspace-strip-button:focus-visible,
 .workspace-add:focus-visible,
 .workspace-open-button:focus-visible,
@@ -1003,10 +1277,405 @@ button {
 
 .workspace-stage {
   position: relative;
-  flex: 1;
+  flex: 1 1 auto;
   min-height: 0;
   padding: 1px 2px 2px;
   overflow: hidden;
+}
+
+.workspace-main-shell {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+.workspace-sidebar-region {
+  flex: 0 0 auto;
+  min-height: 0;
+  display: flex;
+  overflow: hidden;
+  border-right: 1px solid color-mix(in srgb, var(--chrome-divider) 82%, transparent);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--tab-text-active) 2.4%, transparent), transparent 34%),
+    color-mix(in srgb, var(--bg) 72%, var(--panel) 28%);
+}
+
+.workspace-sidebar {
+  width: 232px;
+  min-width: 232px;
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  transition:
+    width 180ms cubic-bezier(0.22, 1, 0.36, 1),
+    min-width 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.workspace-sidebar.is-collapsed {
+  width: 56px;
+  min-width: 56px;
+}
+
+.workspace-sidebar-header {
+  flex: 0 0 auto;
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px 7px 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--chrome-divider) 64%, transparent);
+}
+
+.workspace-sidebar-heading {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: color-mix(in srgb, var(--muted) 92%, var(--text) 8%);
+  font-size: 0.58rem;
+  font-weight: 780;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.workspace-sidebar-heading strong {
+  min-width: 19px;
+  height: 17px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--border) 48%, transparent);
+  background: color-mix(in srgb, var(--surface-pill-bg) 58%, transparent);
+  color: color-mix(in srgb, var(--text) 72%, var(--muted) 28%);
+  font-size: 0.57rem;
+  letter-spacing: -0.01em;
+}
+
+.workspace-sidebar-toggle,
+.workspace-sidebar-new {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid color-mix(in srgb, var(--border) 64%, transparent);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, white 3%, transparent), transparent 60%),
+    color-mix(in srgb, var(--control-bg) 74%, transparent);
+  color: color-mix(in srgb, var(--control-text-strong) 76%, var(--control-text) 24%);
+  transition:
+    border-color 150ms ease,
+    background 150ms ease,
+    color 150ms ease,
+    transform 150ms ease;
+}
+
+.workspace-sidebar-toggle {
+  flex: 0 0 auto;
+  width: 27px;
+  height: 27px;
+  border-radius: 999px;
+  opacity: 0.78;
+}
+
+.workspace-sidebar-toggle:hover,
+.workspace-sidebar-new:hover {
+  border-color: color-mix(in srgb, var(--accent) 22%, var(--border));
+  background:
+    linear-gradient(180deg, color-mix(in srgb, white 4%, transparent), transparent 56%),
+    color-mix(in srgb, var(--control-bg-hover) 88%, transparent);
+  color: var(--control-text-strong);
+  transform: translateY(-1px);
+}
+
+.workspace-sidebar-toggle svg,
+.workspace-sidebar-new svg {
+  width: 14px;
+  height: 14px;
+}
+
+.workspace-sidebar-tabs-shell {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  padding: 8px 6px 2px;
+  background: transparent;
+  border-radius: 0;
+}
+
+.workspace-sidebar-tabs-shell .workspace-tabs-viewport {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  border-radius: 0;
+}
+
+.workspace-sidebar-tabs-shell .workspace-tabs-viewport::before,
+.workspace-sidebar-tabs-shell .workspace-tabs-viewport::after {
+  display: none;
+}
+
+.workspace-sidebar-tabs {
+  height: 100%;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 0 2px 8px;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--text) 14%, transparent) transparent;
+}
+
+.workspace-sidebar-tabs::-webkit-scrollbar {
+  display: block;
+  width: 5px;
+}
+
+.workspace-sidebar-tabs::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 14%, transparent);
+}
+
+.workspace-sidebar-tabs-shell .workspace-tab-shell {
+  width: 100%;
+  max-width: none;
+  min-height: 32px;
+  border-radius: 9px;
+  opacity: 0.74;
+  border-color: transparent;
+  background: transparent;
+  box-shadow: none;
+}
+
+.workspace-sidebar-tabs-shell .workspace-tab-main {
+  min-height: 32px;
+  gap: 8px;
+  padding: 0 8px 0 10px;
+}
+
+.workspace-sidebar-tabs-shell .workspace-tab-shell.is-active {
+  border-color: color-mix(in srgb, var(--accent) 14%, transparent);
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--accent) 10%, transparent), transparent 68%),
+    color-mix(in srgb, var(--tab-bg-active) 38%, transparent);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, white 4%, transparent);
+  opacity: 1;
+}
+
+.workspace-sidebar-tabs-shell .workspace-tab-shell:hover:not(.is-active) {
+  border-color: transparent;
+  background: color-mix(in srgb, var(--tab-text-active) 4%, transparent);
+  opacity: 0.94;
+  transform: none;
+}
+
+.workspace-sidebar-tabs-shell .workspace-tab-status {
+  width: 5px;
+  height: 5px;
+  opacity: 0.58;
+  background: color-mix(in srgb, var(--muted) 68%, transparent);
+  box-shadow: none;
+}
+
+.workspace-sidebar-tabs-shell .workspace-tab-status.is-live {
+  background: color-mix(in srgb, var(--accent) 82%, white 18%);
+  opacity: 1;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 20%, transparent);
+}
+
+.workspace-sidebar-tabs-shell .workspace-tab-name {
+  text-align: left;
+  color: color-mix(in srgb, var(--tab-text) 84%, var(--muted) 16%);
+  font-size: 0.74rem;
+  font-weight: 560;
+  letter-spacing: -0.01em;
+}
+
+.workspace-sidebar-tabs-shell .workspace-tab-shell.is-active .workspace-tab-name {
+  color: color-mix(in srgb, var(--tab-text-active) 94%, var(--text) 6%);
+  font-weight: 660;
+}
+
+.workspace-sidebar-tabs-shell .workspace-tab-action {
+  width: 20px;
+  height: 20px;
+  margin-right: 2px;
+  border-radius: 6px;
+  opacity: 0;
+}
+
+.workspace-sidebar-tabs-shell .workspace-tab-shell.is-active .workspace-tab-action {
+  opacity: 0;
+}
+
+.workspace-sidebar-tabs-shell .workspace-tab-shell:hover .workspace-tab-action,
+.workspace-sidebar-tabs-shell .workspace-tab-shell:focus-within .workspace-tab-action,
+.workspace-sidebar-tabs-shell .workspace-tab-shell.is-renaming .workspace-tab-action {
+  opacity: 0.62;
+}
+
+.workspace-sidebar-tabs-shell .workspace-tab-action:hover {
+  opacity: 1 !important;
+}
+
+.workspace-sidebar-tabs-shell .workspace-tab-shell::after {
+  left: 0;
+  right: auto;
+  top: 7px;
+  bottom: 7px;
+  width: 2px;
+  height: auto;
+  transform: scaleY(0.44);
+  transform-origin: center;
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--accent) 34%, transparent),
+      color-mix(in srgb, var(--accent) 82%, white 18%),
+      color-mix(in srgb, var(--accent) 34%, transparent)
+    );
+}
+
+.workspace-sidebar-tabs-shell .workspace-tab-shell.is-active::after {
+  transform: scaleY(1);
+}
+
+.workspace-tab-initial {
+  display: none;
+}
+
+.workspace-sidebar-new {
+  flex: 0 0 auto;
+  min-height: 36px;
+  margin: 7px 8px 9px;
+  gap: 8px;
+  border-radius: 10px;
+  border-color: color-mix(in srgb, var(--border) 50%, transparent);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, white 2.5%, transparent), transparent 68%),
+    color-mix(in srgb, var(--control-bg) 52%, transparent);
+  color: color-mix(in srgb, var(--text) 78%, var(--muted) 22%);
+  font-size: 0.76rem;
+  font-weight: 620;
+  box-shadow: none;
+}
+
+.workspace-sidebar.is-collapsed .workspace-sidebar-header {
+  justify-content: center;
+  padding: 8px 0;
+}
+
+.workspace-sidebar.is-collapsed .workspace-sidebar-heading,
+.workspace-sidebar.is-collapsed .workspace-tab-name,
+.workspace-sidebar.is-collapsed .workspace-tab-action,
+.workspace-sidebar.is-collapsed .workspace-tab-attention,
+.workspace-sidebar.is-collapsed .workspace-tab-git,
+.workspace-sidebar.is-collapsed .workspace-tab-draft,
+.workspace-sidebar.is-collapsed .workspace-sidebar-new span {
+  display: none;
+}
+
+.workspace-sidebar.is-collapsed .workspace-sidebar-tabs-shell {
+  padding: 6px 8px 2px;
+}
+
+.workspace-sidebar.is-collapsed .workspace-sidebar-tabs {
+  align-items: center;
+  gap: 6px;
+  padding-right: 0;
+}
+
+.workspace-sidebar.is-collapsed .workspace-tab-shell {
+  width: 38px;
+  min-height: 38px;
+  flex: 0 0 auto;
+}
+
+.workspace-sidebar.is-collapsed .workspace-tab-main {
+  width: 36px;
+  min-height: 36px;
+  justify-content: center;
+  padding: 0;
+}
+
+.workspace-sidebar.is-collapsed .workspace-tab-status {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  width: 5px;
+  height: 5px;
+}
+
+.workspace-sidebar.is-collapsed .workspace-tab-initial {
+  width: 22px;
+  height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface-pill-bg) 90%, transparent);
+  color: var(--tab-text-active);
+  font-size: 0.7rem;
+  font-weight: 760;
+  letter-spacing: -0.02em;
+}
+
+.workspace-sidebar.is-collapsed .workspace-tab-shell::after {
+  left: 50%;
+  right: auto;
+  top: auto;
+  bottom: 1px;
+  width: 20px;
+  height: 2px;
+  transform: translateX(-50%) scaleX(0.64);
+}
+
+.workspace-sidebar.is-collapsed .workspace-tab-shell.is-active::after {
+  transform: translateX(-50%) scaleX(1);
+}
+
+.workspace-sidebar.is-collapsed .workspace-sidebar-new {
+  width: 38px;
+  height: 38px;
+  margin: 6px auto 8px;
+  padding: 0;
+  border-radius: 14px;
+}
+
+.workspace-sidebar-tabs-shell .workspace-tab-drop-slot {
+  width: 100% !important;
+  min-width: 0;
+}
+
+.workspace-sidebar-tabs-shell .workspace-tab-drop-indicator {
+  top: 0;
+  left: 6px;
+  right: 6px;
+  bottom: auto;
+  width: auto;
+  height: 14px;
+  transform: translateY(-50%) scaleX(0.88);
+}
+
+.workspace-sidebar-tabs-shell .workspace-tab-drop-indicator::before {
+  top: 50%;
+  bottom: auto;
+  left: 0;
+  right: 0;
+  width: auto;
+  height: 2px;
+  transform: translateY(-50%);
+}
+
+.workspace-sidebar-tabs-shell .workspace-tab-drop-indicator.is-active {
+  transform: translateY(-50%) scaleX(1);
 }
 
 .workspace-update-region {
@@ -3472,6 +4141,22 @@ button {
 .settings-ai-controls {
   display: grid;
   gap: 10px;
+}
+
+.settings-telemetry-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text);
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.settings-telemetry-toggle input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: var(--accent);
 }
 
 .settings-ai-input {
@@ -6953,7 +7638,7 @@ button {
   margin-right: 0;
   opacity: 1;
   pointer-events: auto;
-  border-right: 1px solid var(--chrome-divider);
+  border-left: 1px solid var(--chrome-divider);
 }
 
 .workspace-file-explorer-panel {
@@ -7211,7 +7896,7 @@ button {
 
 .workspace-file-explorer-entry.is-directory .workspace-file-explorer-entry-icon {
   color: var(--accent);
-  opacity: 0.8;
+  opacity: 1;
 }
 
 .workspace-file-explorer-entry.is-selected .workspace-file-explorer-entry-icon {
@@ -7222,6 +7907,14 @@ button {
 .workspace-file-explorer-entry-icon svg {
   width: 16px;
   height: 16px;
+}
+
+.workspace-file-explorer-theme-icon {
+  width: 16px;
+  height: 16px;
+  display: block;
+  object-fit: contain;
+  flex: 0 0 16px;
 }
 
 .workspace-file-explorer-entry-label {
@@ -7344,24 +8037,26 @@ button {
 }
 
 .workspace-file-editor-shell {
+  display: flex;
   flex: 0 0 0;
   width: 0;
   min-width: 0;
+  min-height: 0;
+  position: relative;
   opacity: 0;
   overflow: hidden;
   pointer-events: none;
   transition:
-    width 180ms ease,
-    flex-basis 180ms ease,
+    width 260ms cubic-bezier(0.16, 1, 0.3, 1),
+    flex-basis 260ms cubic-bezier(0.16, 1, 0.3, 1),
     opacity 140ms ease;
 }
 
 .workspace-file-editor-shell.is-visible {
-  width: clamp(320px, 32vw, 460px);
-  flex-basis: clamp(320px, 32vw, 460px);
+  width: clamp(360px, 34vw, 500px);
+  flex-basis: clamp(360px, 34vw, 500px);
   opacity: 1;
   pointer-events: auto;
-  border-right: 1px solid var(--chrome-divider);
 }
 
 .workspace-file-editor-shell.is-visible.is-markdown-preview {
@@ -7374,11 +8069,94 @@ button {
   flex-basis: clamp(520px, 46vw, 860px);
 }
 
+.workspace-file-editor-shell.is-visible.is-user-sized {
+  width: var(--workspace-file-editor-width);
+  flex-basis: var(--workspace-file-editor-width);
+}
+
+.workspace-file-editor-shell.is-visible.is-resizing {
+  transition: none;
+}
+
+.workspace-file-editor-resizer {
+  position: relative;
+  z-index: 2;
+  flex: 0 0 12px;
+  width: 12px;
+  min-height: 0;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.workspace-file-editor-resizer::before,
+.workspace-file-editor-resizer::after {
+  content: "";
+  position: absolute;
+  top: 14px;
+  bottom: 14px;
+  left: 5px;
+  width: 1px;
+  border-radius: 999px;
+  pointer-events: none;
+  transition:
+    opacity 180ms ease,
+    transform 180ms cubic-bezier(0.16, 1, 0.3, 1),
+    background 180ms ease;
+}
+
+.workspace-file-editor-resizer::before {
+  background: linear-gradient(
+    180deg,
+    transparent,
+    color-mix(in srgb, var(--chrome-divider) 82%, transparent) 14%,
+    color-mix(in srgb, var(--text) 12%, transparent) 50%,
+    color-mix(in srgb, var(--chrome-divider) 82%, transparent) 86%,
+    transparent
+  );
+}
+
+.workspace-file-editor-resizer::after {
+  width: 3px;
+  left: 4px;
+  opacity: 0;
+  background: linear-gradient(
+    180deg,
+    transparent,
+    color-mix(in srgb, var(--accent) 64%, white 16%),
+    transparent
+  );
+  box-shadow: 0 0 18px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.workspace-file-editor-resizer:hover::after,
+.workspace-file-editor-shell.is-resizing .workspace-file-editor-resizer::after {
+  opacity: 1;
+  transform: scaleX(1.12);
+}
+
+body.is-resizing-workspace-file-editor {
+  cursor: col-resize;
+  user-select: none;
+}
+
+body.is-resizing-workspace-file-editor * {
+  cursor: col-resize !important;
+}
+
 .workspace-file-editor-panel {
+  flex: 1 1 auto;
+  min-width: 0;
   height: 100%;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  background: color-mix(in srgb, var(--pane-surface) 82%, var(--bg));
+  border-left: 1px solid color-mix(in srgb, var(--chrome-divider) 90%, transparent);
+  background:
+    radial-gradient(circle at 16% 0%, color-mix(in srgb, var(--accent-soft) 36%, transparent), transparent 30%),
+    linear-gradient(180deg, color-mix(in srgb, var(--pane-surface) 92%, var(--bg)), color-mix(in srgb, var(--pane-surface) 76%, var(--bg)) 100%);
+  box-shadow:
+    inset 1px 0 0 color-mix(in srgb, var(--text) 4%, transparent),
+    -18px 0 44px -36px color-mix(in srgb, black 74%, transparent);
 }
 
 .workspace-file-editor-header {
@@ -7386,9 +8164,12 @@ button {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  min-height: 42px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--chrome-divider);
+  min-height: 48px;
+  padding: 10px 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--chrome-divider) 82%, transparent);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, white 3%, transparent), transparent),
+    color-mix(in srgb, var(--surface-pill-bg) 38%, transparent);
 }
 
 .workspace-file-editor-heading {
@@ -7399,17 +8180,18 @@ button {
 }
 
 .workspace-file-editor-heading strong {
-  font-size: 12px;
-  font-weight: 600;
+  font-size: 12.5px;
+  font-weight: 700;
   color: var(--text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  letter-spacing: -0.01em;
 }
 
 .workspace-file-editor-path {
-  font-size: 11px;
-  color: var(--muted);
+  font-size: 10.5px;
+  color: color-mix(in srgb, var(--muted) 88%, var(--text) 12%);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -7425,9 +8207,11 @@ button {
   display: inline-flex;
   align-items: center;
   padding: 2px;
-  border: 1px solid var(--chrome-divider);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--surface-pill-bg) 85%, transparent);
+  border: 1px solid color-mix(in srgb, var(--chrome-divider) 88%, transparent);
+  border-radius: 999px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, white 4%, transparent), transparent),
+    color-mix(in srgb, var(--surface-pill-bg) 78%, transparent);
 }
 
 .workspace-file-editor-mode-button {
@@ -7436,23 +8220,28 @@ button {
   background: transparent;
   color: var(--muted);
   min-height: 24px;
-  padding: 0 9px;
-  border-radius: 6px;
+  padding: 0 10px;
+  border-radius: 999px;
   font-size: 11px;
   font-weight: 600;
   cursor: pointer;
   transition:
     background 140ms ease,
-    color 140ms ease;
+    color 140ms ease,
+    transform 140ms ease;
 }
 
 .workspace-file-editor-mode-button:hover {
   color: var(--text);
+  transform: translateY(-1px);
 }
 
 .workspace-file-editor-mode-button.is-active {
-  background: color-mix(in srgb, var(--accent-soft) 58%, transparent);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, white 8%, transparent), transparent),
+    color-mix(in srgb, var(--accent-soft) 68%, transparent);
   color: var(--tab-text-active);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
 .workspace-file-editor-status {
@@ -7469,14 +8258,17 @@ button {
 .workspace-file-editor-close,
 .workspace-file-editor-inline-button {
   appearance: none;
-  border: 1px solid var(--chrome-divider);
-  background: color-mix(in srgb, var(--surface-pill-bg) 85%, transparent);
+  border: 1px solid color-mix(in srgb, var(--chrome-divider) 88%, transparent);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, white 4%, transparent), transparent),
+    color-mix(in srgb, var(--surface-pill-bg) 78%, transparent);
   color: var(--text);
   cursor: pointer;
   transition:
     border-color 140ms ease,
     background 140ms ease,
-    color 140ms ease;
+    color 140ms ease,
+    transform 140ms ease;
 }
 
 .workspace-file-editor-action:hover,
@@ -7484,6 +8276,7 @@ button {
 .workspace-file-editor-inline-button:hover {
   border-color: color-mix(in srgb, var(--accent) 34%, var(--chrome-divider));
   background: color-mix(in srgb, var(--accent-soft) 55%, var(--surface-pill-bg));
+  transform: translateY(-1px);
 }
 
 .workspace-file-editor-action:disabled,
@@ -7498,7 +8291,7 @@ button {
   min-width: 28px;
   height: 28px;
   padding: 0 10px;
-  border-radius: 6px;
+  border-radius: 9px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -7514,6 +8307,7 @@ button {
 
 .workspace-file-editor-action.is-save {
   min-width: 52px;
+  border-radius: 999px;
 }
 
 .workspace-file-editor-body {
@@ -7521,8 +8315,8 @@ button {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 12px;
+  gap: 12px;
+  padding: 14px;
 }
 
 .workspace-file-editor-main {
@@ -7535,10 +8329,11 @@ button {
 .workspace-file-editor-main.is-split {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 12px;
+  gap: 14px;
 }
 
 .workspace-file-editor-pane {
+  flex: 1 1 0;
   min-width: 0;
   min-height: 0;
   display: flex;
@@ -7630,7 +8425,7 @@ button {
   width: 100%;
   resize: none;
   border: 1px solid var(--chrome-divider);
-  border-radius: 10px;
+  border-radius: 14px;
   background: color-mix(in srgb, var(--pane-bg) 88%, black);
   color: var(--text);
   padding: 14px;
@@ -7641,16 +8436,79 @@ button {
   box-shadow: inset 0 0 0 0.5px color-mix(in srgb, var(--text) 3%, transparent);
 }
 
+.workspace-file-editor-code-host {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--chrome-divider) 88%, transparent);
+  border-radius: 14px;
+  background:
+    radial-gradient(circle at 14% 0%, color-mix(in srgb, var(--accent-soft) 34%, transparent), transparent 34%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.028), transparent 16%),
+    color-mix(in srgb, var(--pane-bg) 92%, black);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, white 5%, transparent),
+    inset 0 0 0 0.5px color-mix(in srgb, var(--text) 3%, transparent);
+}
+
+.workspace-file-editor-code-host:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 36%, var(--chrome-divider));
+  box-shadow:
+    inset 0 0 0 0.5px color-mix(in srgb, var(--accent) 20%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.workspace-file-editor-code-host .workspace-file-editor-input.is-fallback {
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.workspace-file-editor-code-host.is-ready .workspace-file-editor-input.is-fallback {
+  display: none;
+}
+
+.workspace-file-editor-code-host .cm-editor {
+  height: 100%;
+  background: transparent;
+}
+
+.workspace-file-editor-code-host .cm-scroller {
+  overflow: auto;
+}
+
+.workspace-file-editor-code-host .cm-content {
+  min-width: 100%;
+}
+
+.workspace-file-editor-code-host .cm-line {
+  font-variant-ligatures: none;
+}
+
+.workspace-file-editor-code-host .cm-foldGutter .cm-gutterElement {
+  padding-inline: 2px 8px;
+}
+
+.workspace-file-editor-code-host .cm-diagnostic {
+  color: inherit;
+}
+
 .workspace-file-editor-preview-shell {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  border: 1px solid var(--chrome-divider);
-  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--chrome-divider) 88%, transparent);
+  border-radius: 14px;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent 12%),
+    radial-gradient(circle at 22% 0%, color-mix(in srgb, var(--accent-soft) 28%, transparent), transparent 34%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.024), transparent 12%),
     color-mix(in srgb, var(--pane-bg) 92%, black);
-  box-shadow: inset 0 0 0 0.5px color-mix(in srgb, var(--text) 3%, transparent);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, white 5%, transparent),
+    inset 0 0 0 0.5px color-mix(in srgb, var(--text) 3%, transparent);
 }
 
 .workspace-file-editor-preview-shell[data-markdown-mode="preview"] {
@@ -8027,18 +8885,17 @@ button {
 .terminal-pane::before {
   content: "";
   position: absolute;
-  top: 3px;
-  left: 4px;
-  width: 10px;
-  height: 1px;
-  border-radius: 999px;
+  inset: 0;
+  border-radius: inherit;
   background: transparent;
+  box-shadow: inset 0 0 0 1px transparent;
   opacity: 0;
   pointer-events: none;
   z-index: 2;
   transition:
     opacity 160ms ease,
-    background 160ms ease;
+    background 160ms ease,
+    box-shadow 160ms ease;
 }
 
 .terminal-pane::after {
@@ -8070,12 +8927,20 @@ button {
 .terminal-pane[data-active="true"] {
   border-color: transparent;
   background: transparent;
-  box-shadow: none;
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--pane-active-border) 34%, transparent);
 }
 
 .terminal-pane[data-active="true"]::before {
   opacity: 1;
-  background: var(--pane-active-line);
+  background:
+    linear-gradient(90deg, transparent 0%, var(--pane-active-shine) 42%, var(--pane-active-shine) 58%, transparent 100%) top left / 100% 1px no-repeat,
+    linear-gradient(90deg, transparent 0%, var(--pane-active-shine-soft) 24%, var(--pane-active-shine) 50%, var(--pane-active-shine-soft) 76%, transparent 100%) bottom left / 100% 1px no-repeat,
+    linear-gradient(180deg, transparent 0%, var(--pane-active-shine-soft) 18%, var(--pane-active-shine) 50%, var(--pane-active-shine-soft) 82%, transparent 100%) top left / 1px 100% no-repeat,
+    linear-gradient(180deg, transparent 0%, var(--pane-active-shine-soft) 18%, var(--pane-active-shine) 50%, var(--pane-active-shine-soft) 82%, transparent 100%) top right / 1px 100% no-repeat;
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--pane-active-border) 72%, transparent),
+    inset 0 0 18px color-mix(in srgb, var(--pane-active-shine-soft) 56%, transparent);
 }
 
 .terminal-pane[data-dispatch-attention="true"]::after {
@@ -8280,6 +9145,15 @@ button {
 }
 
 @media (max-width: 980px) {
+  .workspace-sidebar {
+    width: 196px;
+    min-width: 196px;
+  }
+
+  .workspace-strip-current span:last-child {
+    display: none;
+  }
+
   .workspace-toolbar {
     gap: 10px;
   }
@@ -8459,6 +9333,93 @@ button {
 
   .workspace-strip-actions::before {
     height: 14px;
+  }
+
+  .workspace-sidebar {
+    width: 56px;
+    min-width: 56px;
+  }
+
+  .workspace-sidebar .workspace-sidebar-header {
+    justify-content: center;
+    padding: 8px 0;
+  }
+
+  .workspace-sidebar .workspace-sidebar-heading,
+  .workspace-sidebar .workspace-tab-name,
+  .workspace-sidebar .workspace-tab-action,
+  .workspace-sidebar .workspace-tab-attention,
+  .workspace-sidebar .workspace-tab-git,
+  .workspace-sidebar .workspace-tab-draft,
+  .workspace-sidebar .workspace-sidebar-new span {
+    display: none;
+  }
+
+  .workspace-sidebar .workspace-sidebar-tabs-shell {
+    padding: 6px 8px 2px;
+  }
+
+  .workspace-sidebar .workspace-sidebar-tabs {
+    align-items: center;
+    gap: 6px;
+    padding-right: 0;
+  }
+
+  .workspace-sidebar .workspace-tab-shell {
+    width: 38px;
+    min-height: 38px;
+    flex: 0 0 auto;
+  }
+
+  .workspace-sidebar .workspace-tab-main {
+    width: 36px;
+    min-height: 36px;
+    justify-content: center;
+    padding: 0;
+  }
+
+  .workspace-sidebar .workspace-tab-status {
+    position: absolute;
+    top: 8px;
+    left: 8px;
+    width: 5px;
+    height: 5px;
+  }
+
+  .workspace-sidebar .workspace-tab-initial {
+    width: 22px;
+    height: 22px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--surface-pill-bg) 90%, transparent);
+    color: var(--tab-text-active);
+    font-size: 0.7rem;
+    font-weight: 760;
+    letter-spacing: -0.02em;
+  }
+
+  .workspace-sidebar .workspace-tab-shell::after {
+    left: 50%;
+    right: auto;
+    top: auto;
+    bottom: 1px;
+    width: 20px;
+    height: 2px;
+    transform: translateX(-50%) scaleX(0.64);
+  }
+
+  .workspace-sidebar .workspace-tab-shell.is-active::after {
+    transform: translateX(-50%) scaleX(1);
+  }
+
+  .workspace-sidebar .workspace-sidebar-new {
+    width: 38px;
+    height: 38px;
+    margin: 6px auto 8px;
+    padding: 0;
+    border-radius: 14px;
   }
 
   .workspace-strip-button,

@@ -122,14 +122,17 @@ flowchart TD
 
 ### Download
 
-Download the latest macOS build from the
+Download the latest platform build from the
 [GitHub Releases page](https://github.com/Ashlo/CrewDock/releases).
 
 ### Prerequisites
 
 - Node.js and npm
 - Rust toolchain
-- macOS system dependencies required by Tauri/WebKit
+- Tauri desktop prerequisites for your local OS
+- On Windows, the packaged installer uses the WebView2 download bootstrapper if
+  the runtime is not already installed, so the target machine needs either
+  WebView2 or outbound network access during install
 
 ### Run locally
 
@@ -140,7 +143,12 @@ npm run dev
 ```
 
 `npm install` syncs the vendored `xterm.js` assets into `src-web/vendor`.
-`npm run dev` then launches the native Tauri app.
+`npm run dev` launches the native app on the current platform. Do not run it
+with `sudo`; CrewDock expects your normal user Cargo and Node environment.
+On macOS it falls back to the local wrapper app flow if the Tauri CLI is not
+installed yet.
+`npm run dev:mac` keeps the older macOS `.app` wrapper flow for local bundle
+smoke-testing.
 
 ## Using CrewDock
 

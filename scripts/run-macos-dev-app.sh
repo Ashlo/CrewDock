@@ -4,7 +4,8 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TAURI_DIR="$ROOT_DIR/src-tauri"
-TARGET_DIR="$TAURI_DIR/target/debug"
+CARGO_BUILD_DIR="${CARGO_TARGET_DIR:-$TAURI_DIR/target}"
+TARGET_DIR="$CARGO_BUILD_DIR/debug"
 APP_NAME="CrewDock Dev"
 VERSION="$(node -p "JSON.parse(require('fs').readFileSync('package.json', 'utf8')).version")"
 ICON_HASH="$(shasum "$TAURI_DIR/icons/icon.icns" | cut -c1-10)"
