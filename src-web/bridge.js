@@ -57,6 +57,8 @@ export function createBridge({
         }),
       setPostHogProjectApiKey: (posthogProjectApiKey) =>
         tauriApi.core.invoke("set_posthog_project_api_key", { posthogProjectApiKey }),
+      setTimeBlockingEnabled: (timeBlockingEnabled) =>
+        tauriApi.core.invoke("set_time_blocking_enabled", { timeBlockingEnabled }),
       setCodexCliPath: (codexCliPath) =>
         tauriApi.core.invoke("set_codex_cli_path", { codexCliPath }),
       refreshCodexCliCatalog: () =>
@@ -257,6 +259,7 @@ function createMockBridge({
       hasStoredPostHogProjectApiKey: false,
       isConfigured: false,
     },
+    timeBlockingEnabled: true,
     dismissedAppUpdateVersion: null,
     appUpdateLastCheckedAtMs: null,
     codexCli: {
@@ -1049,6 +1052,10 @@ function createMockBridge({
     setPostHogProjectApiKey: async (posthogProjectApiKey) => {
       settings.telemetry.hasStoredPostHogProjectApiKey = Boolean(String(posthogProjectApiKey || "").trim());
       settings.telemetry.isConfigured = settings.telemetry.enabled && settings.telemetry.hasStoredPostHogProjectApiKey;
+      return emitState();
+    },
+    setTimeBlockingEnabled: async (timeBlockingEnabled) => {
+      settings.timeBlockingEnabled = Boolean(timeBlockingEnabled);
       return emitState();
     },
     setCodexCliPath: async (codexCliPath) => {

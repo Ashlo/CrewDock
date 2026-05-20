@@ -5,6 +5,7 @@ export function renderWorkspaceStrip({
   workspaceRenameDraft,
   workspaceOpenControlHtml,
   workspaceGitControlHtml,
+  timeBlockControlHtml,
   getWorkspaceAttention,
   hasWorkspaceFileDraftIndicator,
   getWorkspaceFileDraftIndicatorTitle,
@@ -20,6 +21,7 @@ export function renderWorkspaceStrip({
       ${renderWindowSummary(windowSummary, workspaces.length, escapeHtml)}
       ${renderActiveWorkspaceCrumb(activeWorkspace, tabLabels, escapeHtml)}
       <div class="workspace-strip-actions">
+        ${timeBlockControlHtml || ""}
         ${workspaceOpenControlHtml || ""}
         ${workspaceGitControlHtml || ""}
         <button

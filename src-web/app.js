@@ -49,9 +49,19 @@ const WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX = 32;
 const WORKSPACE_TAB_EDGE_SCROLL_MAX_PX_PER_FRAME = 18;
 const WORKSPACE_TAB_CLICK_SUPPRESS_MS = 250;
 const WORKSPACE_SIDEBAR_COLLAPSED_STORAGE_KEY = "crewdock.workspaceSidebarCollapsed";
+const WORKSPACE_FILE_EDITOR_WIDTH_STORAGE_KEY = "crewdock.workspaceFileEditorWidth";
+const WORKSPACE_FILE_EDITOR_MIN_WIDTH = 340;
+const WORKSPACE_FILE_EDITOR_MAX_WIDTH = 1160;
+const WORKSPACE_FILE_EDITOR_MIN_STAGE_WIDTH = 420;
+const TIME_BLOCK_STATE_STORAGE_KEY = "crewdock.timeBlock.state";
+const TIME_BLOCK_DEFAULT_DURATION_MINUTES = 50;
+const TIME_BLOCK_MIN_DURATION_MINUTES = 1;
+const TIME_BLOCK_MAX_DURATION_MINUTES = 240;
+const TIME_BLOCK_PRESETS_MINUTES = Object.freeze([25, 50, 90]);
 const MARKDOWN_VIEW_MODES = new Set(["write", "preview", "split"]);
 const MARKDOWN_MERMAID_LANGUAGES = new Set(["mermaid"]);
 const MARKDOWN_MERMAID_RENDER_ID_PREFIX = "crewdock-mermaid";
+const CODEMIRROR_VENDOR_MODULE_URL = "./vendor/codemirror.bundle.mjs";
 const MARKDOWN_RAW_HTML_ALLOWED_TAGS = new Set([
   "a",
   "blockquote",
@@ -897,6 +907,8 @@ const bridge = createBridge({
 
 const uiState = createUiState();
 uiState.workspaceSidebarCollapsed = loadWorkspaceSidebarCollapsedPreference();
+uiState.workspaceFileEditorWidth = loadWorkspaceFileEditorWidthPreference();
+uiState.timeBlock = loadTimeBlockState();
 const runtimeStore = createRuntimeStore();
 const {
   paneTerminals,
@@ -916,6 +928,159 @@ function loadWorkspaceSidebarCollapsedPreference() {
   } catch {
     return false;
   }
+}
+
+function clampNumber(value, min, max) {
+  return Math.max(min, Math.min(max, Number(value || 0)));
+}
+
+function getWorkspaceFileEditorMaxWidth() {
+  const viewportWidth = Math.max(window.innerWidth || 0, 960);
+  return Math.max(
+    WORKSPACE_FILE_EDITOR_MIN_WIDTH,
+    Math.min(WORKSPACE_FILE_EDITOR_MAX_WIDTH, viewportWidth - WORKSPACE_FILE_EDITOR_MIN_STAGE_WIDTH),
+  );
+}
+
+function clampWorkspaceFileEditorWidth(value) {
+  const numeric = Math.round(Number(value || 0));
+  if (!numeric) {
+    return 0;
+  }
+  return Math.round(clampNumber(
+    numeric,
+    WORKSPACE_FILE_EDITOR_MIN_WIDTH,
+    getWorkspaceFileEditorMaxWidth(),
+  ));
+}
+
+function loadWorkspaceFileEditorWidthPreference() {
+  try {
+    return clampWorkspaceFileEditorWidth(
+      Number(window.localStorage?.getItem(WORKSPACE_FILE_EDITOR_WIDTH_STORAGE_KEY) || 0),
+    );
+  } catch {
+    return 0;
+  }
+}
+
+function persistWorkspaceFileEditorWidthPreference(width) {
+  try {
+    const nextWidth = clampWorkspaceFileEditorWidth(width);
+    if (nextWidth) {
+      window.localStorage?.setItem(WORKSPACE_FILE_EDITOR_WIDTH_STORAGE_KEY, String(nextWidth));
+    } else {
+      window.localStorage?.removeItem(WORKSPACE_FILE_EDITOR_WIDTH_STORAGE_KEY);
+    }
+  } catch {
+    // Local storage is a preference only; resizing should still work without it.
+  }
+}
+
+function syncWorkspaceFileEditorWidthDom(width = uiState.workspaceFileEditorWidth) {
+  const nextWidth = clampWorkspaceFileEditorWidth(width);
+  uiState.workspaceFileEditorWidth = nextWidth;
+  const shells = document.querySelectorAll("[data-workspace-file-editor]");
+  for (const shell of shells) {
+    if (!(shell instanceof HTMLElement)) {
+      continue;
+    }
+    shell.classList.toggle("is-user-sized", Boolean(nextWidth));
+    if (nextWidth) {
+      shell.style.setProperty("--workspace-file-editor-width", `${nextWidth}px`);
+    } else {
+      shell.style.removeProperty("--workspace-file-editor-width");
+    }
+  }
+}
+
+function clampTimeBlockDurationMinutes(value) {
+  const numeric = Math.round(Number(value || 0));
+  if (!Number.isFinite(numeric) || numeric <= 0) {
+    return TIME_BLOCK_DEFAULT_DURATION_MINUTES;
+  }
+
+  return Math.max(
+    TIME_BLOCK_MIN_DURATION_MINUTES,
+    Math.min(TIME_BLOCK_MAX_DURATION_MINUTES, numeric),
+  );
+}
+
+function createDefaultTimeBlockState() {
+  return {
+    popoverVisible: false,
+    taskDraft: "",
+    durationMinutes: TIME_BLOCK_DEFAULT_DURATION_MINUTES,
+    current: null,
+  };
+}
+
+function normalizeTimeBlockCurrent(value) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const durationMs = Math.max(60 * 1000, Number(value.durationMs || 0));
+  const startedAtMs = Math.max(0, Number(value.startedAtMs || 0));
+  const pausedElapsedMs = Math.max(0, Number(value.pausedElapsedMs || 0));
+  const status = value.status === "paused" ? "paused" : "running";
+  const task = String(value.task || "").trim() || "Focus block";
+
+  if (!durationMs || (!startedAtMs && status === "running")) {
+    return null;
+  }
+
+  return {
+    id: String(value.id || `time-block-${Date.now()}`),
+    task,
+    durationMs,
+    startedAtMs: status === "running" ? startedAtMs : 0,
+    pausedElapsedMs,
+    status,
+  };
+}
+
+function normalizeTimeBlockState(value) {
+  return {
+    ...createDefaultTimeBlockState(),
+    taskDraft: String(value?.taskDraft || "").slice(0, 120),
+    durationMinutes: clampTimeBlockDurationMinutes(value?.durationMinutes),
+    current: normalizeTimeBlockCurrent(value?.current),
+  };
+}
+
+function loadTimeBlockState() {
+  try {
+    const raw = window.localStorage?.getItem(TIME_BLOCK_STATE_STORAGE_KEY);
+    return normalizeTimeBlockState(raw ? JSON.parse(raw) : null);
+  } catch {
+    return createDefaultTimeBlockState();
+  }
+}
+
+function persistTimeBlockState() {
+  try {
+    window.localStorage?.setItem(
+      TIME_BLOCK_STATE_STORAGE_KEY,
+      JSON.stringify({
+        taskDraft: uiState.timeBlock.taskDraft,
+        durationMinutes: uiState.timeBlock.durationMinutes,
+        current: uiState.timeBlock.current,
+      }),
+    );
+  } catch {
+    // Time blocking is a local convenience feature; it should not block the workbench.
+  }
+}
+
+function isTimeBlockingEnabled(snapshot = uiState.snapshot) {
+  return snapshot?.settings?.timeBlockingEnabled !== false;
+}
+
+function getDraftTimeBlockingEnabled(snapshot = uiState.snapshot) {
+  return Boolean(
+    uiState.settingsDraft?.timeBlockingEnabled ?? isTimeBlockingEnabled(snapshot),
+  );
 }
 
 function persistWorkspaceSidebarCollapsedPreference(collapsed) {
@@ -1758,6 +1923,7 @@ function pruneWorkspaceFileEditorState(snapshot = uiState.snapshot) {
   const workspaceIds = new Set((snapshot?.workspaces || []).map((workspace) => workspace.id));
   for (const workspaceId of uiState.workspaceFileEditor.keys()) {
     if (!workspaceIds.has(workspaceId)) {
+      destroyWorkspaceCodeEditor(workspaceId);
       cancelWorkspaceFileDraftPersistence(workspaceId);
       uiState.workspaceFileEditor.delete(workspaceId);
     }
@@ -1765,6 +1931,7 @@ function pruneWorkspaceFileEditorState(snapshot = uiState.snapshot) {
 }
 
 function clearWorkspaceFileEditorState(workspaceId) {
+  destroyWorkspaceCodeEditor(workspaceId);
   const state = getWorkspaceFileEditorState(workspaceId, { create: false });
   if (!state) {
     return;
@@ -1960,6 +2127,374 @@ function workspaceFileEditorShowsMarkdownWrite(editorState) {
   return mode === "write" || mode === "split";
 }
 
+function loadCodeMirrorModule() {
+  if (!runtimeStore.codeMirrorModulePromise) {
+    runtimeStore.codeMirrorModulePromise = import(CODEMIRROR_VENDOR_MODULE_URL).catch((error) => {
+      runtimeStore.codeMirrorModulePromise = null;
+      throw error;
+    });
+  }
+
+  return runtimeStore.codeMirrorModulePromise;
+}
+
+function destroyWorkspaceCodeEditor(workspaceId) {
+  const editor = runtimeStore.workspaceCodeEditors.get(workspaceId);
+  if (editor?.view) {
+    editor.view.destroy();
+  }
+  runtimeStore.workspaceCodeEditors.delete(workspaceId);
+}
+
+function getWorkspaceCodeEditorFileMeta(relativePath) {
+  const fileName = basename(relativePath || "").toLowerCase();
+  const extension = fileName.includes(".") ? fileName.split(".").pop() : "";
+  return { fileName, extension };
+}
+
+function getWorkspaceCodeEditorLanguageExtension(codeMirror, relativePath) {
+  const { fileName, extension } = getWorkspaceCodeEditorFileMeta(relativePath);
+
+  if (fileName === "dockerfile" || fileName.endsWith(".dockerfile")) {
+    return codeMirror.StreamLanguage.define(codeMirror.dockerFile);
+  }
+
+  if (["js", "mjs", "cjs"].includes(extension)) {
+    return codeMirror.javascript();
+  }
+
+  if (extension === "jsx") {
+    return codeMirror.javascript({ jsx: true });
+  }
+
+  if (["ts", "mts", "cts"].includes(extension)) {
+    return codeMirror.javascript({ typescript: true });
+  }
+
+  if (extension === "tsx") {
+    return codeMirror.javascript({ jsx: true, typescript: true });
+  }
+
+  if (["py", "pyw"].includes(extension)) {
+    return codeMirror.python();
+  }
+
+  if (extension === "rs") {
+    return codeMirror.rust();
+  }
+
+  if (["html", "htm"].includes(extension)) {
+    return codeMirror.html();
+  }
+
+  if (["css", "scss", "sass", "less"].includes(extension)) {
+    return codeMirror.css();
+  }
+
+  if (["json", "jsonc", "json5"].includes(extension)) {
+    return codeMirror.json();
+  }
+
+  if (isMarkdownFilePath(relativePath)) {
+    return codeMirror.markdown();
+  }
+
+  if (["sql", "psql"].includes(extension)) {
+    return codeMirror.sql();
+  }
+
+  if (["yaml", "yml"].includes(extension)) {
+    return codeMirror.yaml();
+  }
+
+  if (["xml", "svg"].includes(extension)) {
+    return codeMirror.xml();
+  }
+
+  if (["toml"].includes(extension)) {
+    return codeMirror.StreamLanguage.define(codeMirror.toml);
+  }
+
+  if (["sh", "bash", "zsh", "fish", "env"].includes(extension)) {
+    return codeMirror.StreamLanguage.define(codeMirror.shell);
+  }
+
+  return [];
+}
+
+function createWorkspaceCodeEditorTheme(codeMirror) {
+  const tags = codeMirror.tags;
+  return [
+    codeMirror.EditorView.theme({
+      "&": {
+        height: "100%",
+        color: "var(--text)",
+        backgroundColor: "transparent",
+      },
+      "&.cm-focused": {
+        outline: "none",
+      },
+      ".cm-scroller": {
+        fontFamily: "\"SF Mono\", SFMono-Regular, ui-monospace, Menlo, Monaco, Consolas, monospace",
+        fontSize: "12.5px",
+        lineHeight: "1.62",
+      },
+      ".cm-content": {
+        minHeight: "100%",
+        padding: "14px 0 18px",
+        caretColor: "var(--accent)",
+      },
+      ".cm-line": {
+        padding: "0 14px",
+      },
+      ".cm-gutters": {
+        backgroundColor: "transparent",
+        color: "color-mix(in srgb, var(--muted) 74%, transparent)",
+        borderRight: "1px solid color-mix(in srgb, var(--chrome-divider) 74%, transparent)",
+      },
+      ".cm-gutterElement": {
+        padding: "0 9px 0 12px",
+      },
+      ".cm-activeLine": {
+        backgroundColor: "color-mix(in srgb, var(--accent-soft) 30%, transparent)",
+      },
+      ".cm-activeLineGutter": {
+        color: "color-mix(in srgb, var(--accent) 82%, white)",
+        backgroundColor: "color-mix(in srgb, var(--accent-soft) 34%, transparent)",
+      },
+      ".cm-selectionBackground, &.cm-focused .cm-selectionBackground": {
+        backgroundColor: "color-mix(in srgb, var(--accent) 28%, transparent)",
+      },
+      ".cm-cursor": {
+        borderLeftColor: "var(--accent)",
+      },
+      ".cm-matchingBracket": {
+        backgroundColor: "color-mix(in srgb, var(--accent-soft) 48%, transparent)",
+        color: "var(--tab-text-active)",
+      },
+      ".cm-searchMatch": {
+        backgroundColor: "color-mix(in srgb, var(--warning, #e5c07b) 36%, transparent)",
+      },
+      ".cm-panels": {
+        backgroundColor: "color-mix(in srgb, var(--panel-strong) 96%, black)",
+        color: "var(--text)",
+      },
+      ".cm-panels input": {
+        backgroundColor: "var(--pane-bg)",
+        color: "var(--text)",
+        border: "1px solid var(--chrome-divider)",
+      },
+      ".cm-tooltip": {
+        backgroundColor: "var(--panel-strong)",
+        color: "var(--text)",
+        border: "1px solid var(--chrome-divider)",
+      },
+    }, { dark: true }),
+    codeMirror.syntaxHighlighting(codeMirror.HighlightStyle.define([
+      { tag: tags.keyword, color: "#c678dd" },
+      { tag: [tags.name, tags.deleted, tags.character, tags.macroName], color: "#e06c75" },
+      { tag: [tags.propertyName, tags.variableName, tags.labelName], color: "#dfe5ec" },
+      { tag: [tags.function(tags.variableName), tags.definition(tags.function(tags.variableName))], color: "#61afef" },
+      { tag: [tags.color, tags.constant(tags.name), tags.standard(tags.name)], color: "#d19a66" },
+      { tag: [tags.definition(tags.name), tags.separator], color: "#e5c07b" },
+      { tag: [tags.typeName, tags.className, tags.number, tags.bool], color: "#e5c07b" },
+      { tag: [tags.string, tags.special(tags.string), tags.regexp], color: "#98c379" },
+      { tag: [tags.comment, tags.quote], color: "#7f8797", fontStyle: "italic" },
+      { tag: tags.meta, color: "#56b6c2" },
+      { tag: tags.link, color: "#61afef", textDecoration: "underline" },
+      { tag: tags.heading, color: "#d7dcff", fontWeight: "700" },
+      { tag: tags.emphasis, fontStyle: "italic" },
+      { tag: tags.strong, fontWeight: "700" },
+      { tag: tags.invalid, color: "#e06c75" },
+    ]), { fallback: true }),
+  ];
+}
+
+function clampCodeMirrorSelection(value, documentLength) {
+  return Math.max(0, Math.min(Number(value || 0), documentLength));
+}
+
+function createWorkspaceCodeEditorSelection(editorState, focusState) {
+  const documentLength = String(editorState?.draft || "").length;
+  if (focusState?.isCodeMirror) {
+    return {
+      anchor: clampCodeMirrorSelection(focusState.anchor, documentLength),
+      head: clampCodeMirrorSelection(focusState.head, documentLength),
+    };
+  }
+
+  if (editorState?.shouldFocus) {
+    return { anchor: documentLength };
+  }
+
+  return null;
+}
+
+function updateWorkspaceFileEditorDraft(workspaceId, nextDraft) {
+  const editorState = getWorkspaceFileEditorState(workspaceId, { create: false });
+  if (!editorState) {
+    return;
+  }
+
+  editorState.draft = String(nextDraft || "");
+  const shouldRefreshSurface = Boolean(
+    editorState.notice || (!editorState.conflict && editorState.saveError),
+  );
+  const shouldRefreshMarkdownPreview = workspaceFileEditorShowsMarkdownPreview(editorState);
+  editorState.notice = "";
+  if (!editorState.conflict) {
+    editorState.saveError = "";
+  }
+
+  const dirtyDidChange = syncWorkspaceFileEditorDirtyState(editorState);
+  if (shouldRefreshSurface) {
+    requestRender(RENDER_EXPLORER | (dirtyDidChange ? (RENDER_STRIP | RENDER_STATUS) : 0));
+  } else {
+    syncWorkspaceFileEditorLiveDom(workspaceId);
+    if (shouldRefreshMarkdownPreview) {
+      syncWorkspaceFileEditorMarkdownPreviewDom(workspaceId);
+    }
+    if (dirtyDidChange) {
+      if (!editorState.dirty) {
+        syncWorkspaceFileDraftSnapshotState(workspaceId, null);
+      }
+      requestRender(RENDER_STRIP | RENDER_STATUS);
+    }
+  }
+
+  scheduleWorkspaceFileDraftPersistence(workspaceId);
+}
+
+function renderWorkspaceCodeEditorHost(editorState, snapshot) {
+  return `
+    <div
+      class="workspace-file-editor-code-host"
+      data-workspace-code-editor-host
+      data-relative-path="${escapeHtml(editorState?.activePath || "")}"
+      data-readonly="${snapshot?.readOnly ? "true" : "false"}"
+    >
+      <textarea
+        class="workspace-file-editor-input is-fallback"
+        data-workspace-file-editor-input
+        spellcheck="false"
+        autocapitalize="off"
+        autocorrect="off"
+        ${snapshot?.readOnly ? "readonly" : ""}
+      >${escapeHtml(editorState?.draft || "")}</textarea>
+    </div>
+  `;
+}
+
+function syncWorkspaceFileEditorMarkdownPreviewDom(workspaceId) {
+  const workspace = getWorkspaceById(workspaceId);
+  const editorState = getWorkspaceFileEditorState(workspaceId, { create: false });
+  const shell = document.querySelector(`[data-workspace-file-editor="${workspaceId}"]`);
+  const previewShell = shell?.querySelector("[data-workspace-file-editor-preview]");
+  if (!workspace || !editorState || !(previewShell instanceof HTMLElement)) {
+    return;
+  }
+
+  previewShell.innerHTML = renderWorkspaceFileMarkdownPreview(workspace, editorState);
+  syncWorkspaceFileEditorMarkdownDiagrams(previewShell);
+}
+
+async function syncWorkspaceCodeEditorSurface(workspace, shell, { focusState = null } = {}) {
+  const host = shell.querySelector("[data-workspace-code-editor-host]");
+  const editorState = getWorkspaceFileEditorState(workspace?.id, { create: false });
+  if (!(host instanceof HTMLElement) || !workspace || !editorState?.activePath) {
+    destroyWorkspaceCodeEditor(workspace?.id || "");
+    return;
+  }
+
+  const requestToken = `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  host.dataset.codeMirrorRequest = requestToken;
+  const activePath = editorState.activePath;
+  const readOnly = Boolean(editorState.snapshot?.readOnly);
+  const shouldFocus = Boolean(editorState.shouldFocus);
+  const selection = createWorkspaceCodeEditorSelection(editorState, focusState);
+
+  try {
+    const codeMirror = await loadCodeMirrorModule();
+    const latestState = getWorkspaceFileEditorState(workspace.id, { create: false });
+    if (
+      host.dataset.codeMirrorRequest !== requestToken
+      || !document.body.contains(host)
+      || !latestState
+      || latestState.activePath !== activePath
+    ) {
+      return;
+    }
+
+    destroyWorkspaceCodeEditor(workspace.id);
+    host.innerHTML = "";
+    host.classList.add("is-ready");
+
+    const extensions = [
+      codeMirror.basicSetup,
+      createWorkspaceCodeEditorTheme(codeMirror),
+      getWorkspaceCodeEditorLanguageExtension(codeMirror, activePath),
+      codeMirror.EditorView.lineWrapping,
+      codeMirror.EditorState.readOnly.of(readOnly),
+      codeMirror.EditorView.editable.of(!readOnly),
+      codeMirror.keymap.of([
+        {
+          key: "Mod-s",
+          preventDefault: true,
+          run: () => {
+            void saveWorkspaceTextFile();
+            return true;
+          },
+        },
+        {
+          key: "Escape",
+          run: () => {
+            if (closeWorkspaceFileEditor(workspace.id)) {
+              requestRender(RENDER_EXPLORER | RENDER_TERMINALS | RENDER_STRIP | RENDER_STATUS);
+            }
+            return true;
+          },
+        },
+      ]),
+      codeMirror.EditorView.updateListener.of((update) => {
+        if (update.docChanged) {
+          updateWorkspaceFileEditorDraft(workspace.id, update.state.doc.toString());
+        }
+      }),
+    ];
+
+    const stateConfig = {
+      doc: latestState.draft || "",
+      extensions,
+    };
+    if (selection) {
+      stateConfig.selection = selection;
+    }
+
+    const view = new codeMirror.EditorView({
+      state: codeMirror.EditorState.create(stateConfig),
+      parent: host,
+    });
+    runtimeStore.workspaceCodeEditors.set(workspace.id, {
+      view,
+      host,
+      relativePath: activePath,
+    });
+
+    if (focusState?.isCodeMirror && Number.isFinite(focusState.scrollTop)) {
+      view.scrollDOM.scrollTop = focusState.scrollTop;
+      view.scrollDOM.scrollLeft = focusState.scrollLeft || 0;
+    }
+
+    if ((shouldFocus || focusState?.isCodeMirror) && !readOnly) {
+      view.focus();
+    }
+    latestState.shouldFocus = false;
+  } catch (error) {
+    host.classList.add("is-fallback");
+    console.warn("CodeMirror editor failed to load; using textarea fallback.", error);
+  }
+}
+
 function applyWorkspaceTextFileNewlineStyle(value, newlineStyle = "lf") {
   const normalized = normalizeWorkspaceTextContentForComparison(value);
   if (newlineStyle === "crLf") {
@@ -2123,6 +2658,24 @@ function confirmWorkspaceFileEditorDiscard(workspaceId, actionLabel = "continue"
 }
 
 function captureWorkspaceFileEditorFocusState(root = document) {
+  const codeHost = root.querySelector("[data-workspace-code-editor-host]");
+  if (codeHost instanceof HTMLElement && document.activeElement instanceof Element) {
+    const workspaceId = codeHost.closest("[data-workspace-file-editor]")?.dataset.workspaceFileEditor || "";
+    const editor = runtimeStore.workspaceCodeEditors.get(workspaceId);
+    if (editor?.view?.dom?.contains(document.activeElement)) {
+      const selection = editor.view.state.selection.main;
+      return {
+        isCodeMirror: true,
+        hasFocus: true,
+        workspaceId,
+        anchor: selection?.anchor || 0,
+        head: selection?.head || selection?.anchor || 0,
+        scrollTop: editor.view.scrollDOM?.scrollTop || 0,
+        scrollLeft: editor.view.scrollDOM?.scrollLeft || 0,
+      };
+    }
+  }
+
   const input = root.querySelector("[data-workspace-file-editor-input]");
   if (!(input instanceof HTMLTextAreaElement)) {
     return null;
@@ -2139,6 +2692,23 @@ function captureWorkspaceFileEditorFocusState(root = document) {
 
 function restoreWorkspaceFileEditorFocusState(focusState, root = document) {
   if (!focusState?.hasFocus) {
+    return;
+  }
+
+  if (focusState.isCodeMirror) {
+    const editor = runtimeStore.workspaceCodeEditors.get(focusState.workspaceId || "");
+    if (editor?.view) {
+      const documentLength = editor.view.state.doc.length;
+      editor.view.dispatch({
+        selection: {
+          anchor: clampCodeMirrorSelection(focusState.anchor, documentLength),
+          head: clampCodeMirrorSelection(focusState.head, documentLength),
+        },
+      });
+      editor.view.scrollDOM.scrollTop = focusState.scrollTop || 0;
+      editor.view.scrollDOM.scrollLeft = focusState.scrollLeft || 0;
+      editor.view.focus();
+    }
     return;
   }
 
@@ -3076,6 +3646,7 @@ function createSettingsDraft(snapshot = uiState.snapshot) {
     telemetryHost: telemetry.host,
     postHogProjectApiKey: "",
     hasStoredPostHogProjectApiKey: telemetry.hasStoredPostHogProjectApiKey,
+    timeBlockingEnabled: isTimeBlockingEnabled(snapshot),
     codexCli,
     codexCliSelectedPath: codexCli.configuredPath || "__auto__",
     codexCliCustomPath: codexCli.configuredPath || "",
@@ -3084,6 +3655,7 @@ function createSettingsDraft(snapshot = uiState.snapshot) {
     savingOpenAiApiKey: false,
     savingTelemetryPreferences: false,
     savingPostHogProjectApiKey: false,
+    savingTimeBlockingEnabled: false,
     applyingAppearance: false,
   };
 }
@@ -3615,6 +4187,37 @@ async function clearStoredPostHogProjectApiKey() {
   }
 }
 
+async function saveTimeBlockingEnabled(enabled) {
+  if (!bridge.setTimeBlockingEnabled || !uiState.settingsVisible) {
+    return;
+  }
+
+  if (!uiState.settingsDraft) {
+    syncSettingsDraftFromSnapshot();
+  }
+
+  const nextEnabled = Boolean(enabled);
+  uiState.settingsDraft.timeBlockingEnabled = nextEnabled;
+  uiState.settingsDraft.savingTimeBlockingEnabled = true;
+  render();
+
+  try {
+    uiState.snapshot = await bridge.setTimeBlockingEnabled(nextEnabled);
+    syncSettingsDraftFromSnapshot(uiState.snapshot);
+    if (!nextEnabled) {
+      uiState.timeBlock.popoverVisible = false;
+    }
+    syncTimeBlockTicker(uiState.snapshot);
+  } catch (error) {
+    reportSourceControlError(error);
+  } finally {
+    if (uiState.settingsDraft) {
+      uiState.settingsDraft.savingTimeBlockingEnabled = false;
+    }
+    render();
+  }
+}
+
 async function saveCodexCliPath(nextPath) {
   if (!bridge.setCodexCliPath || !uiState.settingsVisible) {
     return;
@@ -3837,6 +4440,14 @@ function bindSettingsSheetControls(root = document) {
     });
   }
 
+  const timeBlockingEnabledInput = root.querySelector("[data-settings-time-blocking-enabled]");
+  if (timeBlockingEnabledInput instanceof HTMLInputElement) {
+    timeBlockingEnabledInput.addEventListener("change", (event) => {
+      event.stopPropagation();
+      void saveTimeBlockingEnabled(timeBlockingEnabledInput.checked);
+    });
+  }
+
   const codexSelect = root.querySelector("[data-settings-codex-select]");
   if (codexSelect instanceof HTMLSelectElement) {
     codexSelect.addEventListener("change", (event) => {
@@ -4004,6 +4615,15 @@ function syncMountedTerminalAppearance(
 async function handleClick(event) {
   const clickedElement = event.target instanceof Element ? event.target : null;
   const target = clickedElement?.closest("[data-action]");
+  if (
+    uiState.timeBlock.popoverVisible
+    && clickedElement
+    && !clickedElement.closest("[data-time-block-shell]")
+  ) {
+    closeTimeBlockPopover();
+    requestRender(RENDER_STRIP);
+  }
+
   if (!target) {
     return;
   }
@@ -4073,6 +4693,36 @@ async function handleClick(event) {
 
   if (target.dataset.action === "open-workspace-preferred-target") {
     await openActiveWorkspaceInTarget();
+    return;
+  }
+
+  if (target.dataset.action === "toggle-time-block-popover") {
+    toggleTimeBlockPopover();
+    requestRender(RENDER_STRIP);
+    return;
+  }
+
+  if (target.dataset.action === "set-time-block-duration") {
+    setTimeBlockDurationMinutes(target.dataset.durationMinutes);
+    requestRender(RENDER_STRIP);
+    return;
+  }
+
+  if (target.dataset.action === "pause-time-block") {
+    pauseTimeBlock();
+    requestRender(RENDER_STRIP);
+    return;
+  }
+
+  if (target.dataset.action === "resume-time-block") {
+    resumeTimeBlock();
+    requestRender(RENDER_STRIP);
+    return;
+  }
+
+  if (target.dataset.action === "finish-time-block") {
+    finishTimeBlock();
+    requestRender(RENDER_STRIP);
     return;
   }
 
@@ -4667,6 +5317,9 @@ function handleMouseDown(event) {
 
 function handlePointerDown(event) {
   const target = event.target instanceof Element ? event.target : null;
+  if (maybeBeginWorkspaceFileEditorResize(event, target)) {
+    return;
+  }
   maybeBeginWorkspaceTabDrag(event, target);
   const paneId = target?.closest("[data-pane-id]")?.dataset?.paneId || null;
   if (paneId) {
@@ -4714,6 +5367,10 @@ function handlePointerDown(event) {
 }
 
 function handlePointerMove(event) {
+  if (updateWorkspaceFileEditorResize(event)) {
+    return;
+  }
+
   const drag = uiState.workspaceTabDrag;
   if (!drag || event.pointerId !== drag.pointerId) {
     return;
@@ -4733,6 +5390,10 @@ function handlePointerMove(event) {
 }
 
 async function handlePointerUp(event) {
+  if (completeWorkspaceFileEditorResize(event)) {
+    return;
+  }
+
   const drag = uiState.workspaceTabDrag;
   if (!drag || event.pointerId !== drag.pointerId) {
     return;
@@ -4748,12 +5409,127 @@ async function handlePointerUp(event) {
 }
 
 function handlePointerCancel(event) {
+  if (cancelWorkspaceFileEditorResize(event)) {
+    return;
+  }
+
   const drag = uiState.workspaceTabDrag;
   if (!drag || event.pointerId !== drag.pointerId) {
     return;
   }
 
   cancelWorkspaceTabDrag();
+}
+
+function maybeBeginWorkspaceFileEditorResize(event, target) {
+  const handle = target?.closest("[data-workspace-file-editor-resizer]");
+  if (
+    event.button !== 0
+    || !(handle instanceof HTMLElement)
+    || runtimeStore.workspaceFileEditorResizeDrag
+  ) {
+    return false;
+  }
+
+  const shell = handle.closest("[data-workspace-file-editor]");
+  if (!(shell instanceof HTMLElement)) {
+    return false;
+  }
+
+  const rect = shell.getBoundingClientRect();
+  const workspaceId = shell.dataset.workspaceFileEditor || "";
+  runtimeStore.workspaceFileEditorResizeDrag = {
+    pointerId: event.pointerId,
+    workspaceId,
+    startX: event.clientX,
+    startWidth: rect.width,
+    shell,
+    handle,
+  };
+
+  shell.classList.add("is-resizing");
+  document.body.classList.add("is-resizing-workspace-file-editor");
+  if (typeof handle.setPointerCapture === "function") {
+    try {
+      handle.setPointerCapture(event.pointerId);
+    } catch {
+      // Pointer capture can fail if the element rerenders mid-gesture.
+    }
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function updateWorkspaceFileEditorResize(event) {
+  const resize = runtimeStore.workspaceFileEditorResizeDrag;
+  if (!resize || event.pointerId !== resize.pointerId) {
+    return false;
+  }
+
+  const nextWidth = clampWorkspaceFileEditorWidth(resize.startWidth + resize.startX - event.clientX);
+  uiState.workspaceFileEditorWidth = nextWidth;
+  if (resize.shell instanceof HTMLElement) {
+    resize.shell.classList.add("is-user-sized");
+    resize.shell.style.setProperty("--workspace-file-editor-width", `${nextWidth}px`);
+  }
+  scheduleVisibleTerminalRefresh();
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function cleanupWorkspaceFileEditorResizeDrag({ persist = false } = {}) {
+  const resize = runtimeStore.workspaceFileEditorResizeDrag;
+  if (!resize) {
+    return false;
+  }
+
+  if (resize.shell instanceof HTMLElement) {
+    resize.shell.classList.remove("is-resizing");
+  }
+  if (resize.handle instanceof HTMLElement && typeof resize.handle.releasePointerCapture === "function") {
+    try {
+      if (resize.handle.hasPointerCapture(resize.pointerId)) {
+        resize.handle.releasePointerCapture(resize.pointerId);
+      }
+    } catch {
+      // Ignore stale pointer handles after rerenders.
+    }
+  }
+  document.body.classList.remove("is-resizing-workspace-file-editor");
+  runtimeStore.workspaceFileEditorResizeDrag = null;
+
+  uiState.workspaceFileEditorWidth = clampWorkspaceFileEditorWidth(uiState.workspaceFileEditorWidth);
+  syncWorkspaceFileEditorWidthDom(uiState.workspaceFileEditorWidth);
+  if (persist) {
+    persistWorkspaceFileEditorWidthPreference(uiState.workspaceFileEditorWidth);
+  }
+  scheduleVisibleTerminalRefresh();
+  return true;
+}
+
+function completeWorkspaceFileEditorResize(event) {
+  const resize = runtimeStore.workspaceFileEditorResizeDrag;
+  if (!resize || event.pointerId !== resize.pointerId) {
+    return false;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+  return cleanupWorkspaceFileEditorResizeDrag({ persist: true });
+}
+
+function cancelWorkspaceFileEditorResize(event) {
+  const resize = runtimeStore.workspaceFileEditorResizeDrag;
+  if (!resize || event.pointerId !== resize.pointerId) {
+    return false;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
+  return cleanupWorkspaceFileEditorResizeDrag({ persist: true });
 }
 
 function maybeBeginWorkspaceTabDrag(event, target) {
@@ -4981,6 +5757,7 @@ function renderWorkspaceStripRegion(
     workspaceGitControlHtml: snapshot.activeWorkspace
       ? renderWorkspaceGitControl(snapshot.activeWorkspace)
       : "",
+    timeBlockControlHtml: renderTimeBlockControl(snapshot),
     getWorkspaceAttention,
     hasWorkspaceFileDraftIndicator: workspaceHasFileDraftIndicator,
     getWorkspaceFileDraftIndicatorTitle,
@@ -4988,6 +5765,139 @@ function renderWorkspaceStripRegion(
     getGitTone,
     formatGitBadgeTitle,
   });
+}
+
+function renderTimeBlockControl(snapshot = uiState.snapshot) {
+  if (!isTimeBlockingEnabled(snapshot)) {
+    return "";
+  }
+
+  const display = getTimeBlockDisplay();
+  const isOpen = uiState.timeBlock.popoverVisible;
+  const hasBlock = Boolean(display);
+  const buttonLabel = display
+    ? display.isOvertime
+      ? `Overtime +${formatTimeBlockClock(display.clockMs)}`
+      : display.status === "paused"
+        ? `Paused ${formatTimeBlockClock(display.clockMs)}`
+        : formatTimeBlockClock(display.clockMs)
+    : "Time Block";
+  const taskLabel = display?.task || "Start a focus timer";
+  const tone = display
+    ? display.isOvertime
+      ? "is-overtime"
+      : display.status === "paused"
+        ? "is-paused"
+        : "is-running"
+    : "is-idle";
+
+  return `
+    <div class="workspace-time-block-shell ${isOpen ? "is-open" : ""} ${tone}" data-time-block-shell>
+      <button
+        class="workspace-time-block-button"
+        type="button"
+        data-action="toggle-time-block-popover"
+        data-tauri-drag-region="false"
+        title="${escapeHtml(hasBlock ? taskLabel : "Start a Time Block")}"
+        aria-label="${escapeHtml(hasBlock ? `Time Block: ${taskLabel}` : "Start a Time Block")}"
+        aria-expanded="${isOpen ? "true" : "false"}"
+      >
+        <span class="workspace-time-block-dot" aria-hidden="true"></span>
+        <span class="workspace-time-block-task">${escapeHtml(taskLabel)}</span>
+        <strong>${escapeHtml(buttonLabel)}</strong>
+      </button>
+      ${isOpen ? renderTimeBlockPopover(display) : ""}
+    </div>
+  `;
+}
+
+function renderTimeBlockPopover(display) {
+  const durationMinutes = clampTimeBlockDurationMinutes(uiState.timeBlock.durationMinutes);
+  const taskDraft = uiState.timeBlock.taskDraft;
+  return `
+    <div class="workspace-time-block-popover" role="dialog" aria-label="Time Block">
+      <form class="workspace-time-block-form" data-action="start-time-block">
+        <div class="workspace-time-block-popover-head">
+          <span>Time Blocking</span>
+          <strong>${display ? escapeHtml(display.task) : "Set the next block"}</strong>
+        </div>
+        ${
+          display
+            ? `
+              <div class="workspace-time-block-current">
+                <span>${escapeHtml(display.isOvertime ? "Overtime" : display.status === "paused" ? "Paused" : "Remaining")}</span>
+                <strong>${escapeHtml(`${display.isOvertime ? "+" : ""}${formatTimeBlockClock(display.clockMs)}`)}</strong>
+              </div>
+            `
+            : ""
+        }
+        <label class="workspace-time-block-field">
+          <span>Task</span>
+          <input
+            class="workspace-time-block-input"
+            type="text"
+            value="${escapeHtml(taskDraft)}"
+            data-time-block-task-input
+            placeholder="What are you blocking time for?"
+            autocomplete="off"
+            spellcheck="false"
+          />
+        </label>
+        <div class="workspace-time-block-presets" aria-label="Duration presets">
+          ${TIME_BLOCK_PRESETS_MINUTES.map((minutes) => `
+            <button
+              class="workspace-time-block-preset ${durationMinutes === minutes ? "is-active" : ""}"
+              type="button"
+              data-action="set-time-block-duration"
+              data-duration-minutes="${escapeHtml(String(minutes))}"
+            >
+              ${escapeHtml(`${minutes}m`)}
+            </button>
+          `).join("")}
+          <label class="workspace-time-block-custom">
+            <span>Custom</span>
+            <input
+              type="number"
+              min="${TIME_BLOCK_MIN_DURATION_MINUTES}"
+              max="${TIME_BLOCK_MAX_DURATION_MINUTES}"
+              value="${escapeHtml(String(durationMinutes))}"
+              data-time-block-duration-input
+              aria-label="Custom time block duration in minutes"
+            />
+          </label>
+        </div>
+        <div class="workspace-time-block-actions">
+          <button class="workspace-time-block-primary" type="submit">
+            ${display ? "Start new block" : "Start block"}
+          </button>
+          ${
+            display
+              ? display.status === "paused"
+                ? `
+                  <button class="workspace-time-block-secondary" type="button" data-action="resume-time-block">
+                    Resume
+                  </button>
+                `
+                : `
+                  <button class="workspace-time-block-secondary" type="button" data-action="pause-time-block">
+                    Pause
+                  </button>
+                `
+              : ""
+          }
+          ${
+            display
+              ? `
+                <button class="workspace-time-block-secondary is-danger" type="button" data-action="finish-time-block">
+                  Finish
+                </button>
+              `
+              : ""
+          }
+        </div>
+      </form>
+    </div>
+  `;
 }
 
 function renderWorkspaceSidebarRegion(
@@ -5513,6 +6423,9 @@ function handleWheel(event) {
 }
 
 function handleWindowResize() {
+  if (uiState.workspaceFileEditorWidth) {
+    syncWorkspaceFileEditorWidthDom(uiState.workspaceFileEditorWidth);
+  }
   fitAllTerminals();
   syncWorkspaceTabRail(
     uiState.snapshot?.activeWorkspaceId || null,
@@ -5604,6 +6517,16 @@ async function handleSubmit(event) {
     return;
   }
 
+  const timeBlockForm = event.target.closest('[data-action="start-time-block"]');
+  if (timeBlockForm) {
+    event.preventDefault();
+    if (isTimeBlockingEnabled()) {
+      startTimeBlock();
+      requestRender(RENDER_STRIP);
+    }
+    return;
+  }
+
   const form = event.target.closest('[data-action="run-launcher-command"]');
   if (!form) {
     return;
@@ -5620,33 +6543,7 @@ function handleInput(event) {
   const fileEditorInput = event.target.closest("[data-workspace-file-editor-input]");
   if (fileEditorInput) {
     const workspace = getActiveWorkspace();
-    const editorState = getWorkspaceFileEditorState(workspace?.id, { create: false });
-    if (editorState) {
-      editorState.draft = fileEditorInput.value;
-      const shouldRefreshSurface = Boolean(
-        editorState.notice || (!editorState.conflict && editorState.saveError),
-      );
-      const shouldRefreshMarkdownPreview = workspaceFileEditorShowsMarkdownPreview(editorState);
-      editorState.notice = "";
-      if (!editorState.conflict) {
-        editorState.saveError = "";
-      }
-      const dirtyDidChange = syncWorkspaceFileEditorDirtyState(editorState);
-      if (shouldRefreshSurface) {
-        requestRender(RENDER_EXPLORER | (dirtyDidChange ? (RENDER_STRIP | RENDER_STATUS) : 0));
-      } else if (shouldRefreshMarkdownPreview) {
-        requestRender(RENDER_EXPLORER | (dirtyDidChange ? (RENDER_STRIP | RENDER_STATUS) : 0));
-      } else {
-        syncWorkspaceFileEditorLiveDom(workspace?.id);
-        if (dirtyDidChange) {
-          if (!editorState.dirty) {
-            syncWorkspaceFileDraftSnapshotState(workspace?.id || "", null);
-          }
-          requestRender(RENDER_STRIP | RENDER_STATUS);
-        }
-      }
-      scheduleWorkspaceFileDraftPersistence(workspace?.id || "");
-    }
+    updateWorkspaceFileEditorDraft(workspace?.id || "", fileEditorInput.value);
     return;
   }
 
@@ -5702,6 +6599,20 @@ function handleInput(event) {
     return;
   }
 
+  const timeBlockTaskInput = event.target.closest("[data-time-block-task-input]");
+  if (timeBlockTaskInput) {
+    uiState.timeBlock.taskDraft = timeBlockTaskInput.value.slice(0, 120);
+    persistTimeBlockState();
+    return;
+  }
+
+  const timeBlockDurationInput = event.target.closest("[data-time-block-duration-input]");
+  if (timeBlockDurationInput) {
+    uiState.timeBlock.durationMinutes = clampTimeBlockDurationMinutes(timeBlockDurationInput.value);
+    persistTimeBlockState();
+    return;
+  }
+
   const renameInput = event.target.closest("[data-workspace-rename-input]");
   if (renameInput && uiState.workspaceRenameDraft) {
     uiState.workspaceRenameDraft = {
@@ -5726,6 +6637,12 @@ function handleInput(event) {
 }
 
 async function handleChange(event) {
+  const timeBlockingEnabledInput = event.target.closest("[data-settings-time-blocking-enabled]");
+  if (timeBlockingEnabledInput instanceof HTMLInputElement) {
+    await saveTimeBlockingEnabled(timeBlockingEnabledInput.checked);
+    return;
+  }
+
   const publishRemoteSelect = event.target.closest("[data-scm-publish-remote]");
   if (publishRemoteSelect) {
     uiState.sourceControl.publishModalSelectedRemote = publishRemoteSelect.value;
@@ -6493,6 +7410,151 @@ function toggleSystemHealthPanel(forceVisible = !uiState.systemHealthPanelVisibl
   uiState.contextMenu = null;
   cancelWorkspaceRename();
   syncSystemHealthLoop();
+}
+
+function closeTimeBlockPopover() {
+  if (!uiState.timeBlock.popoverVisible) {
+    return false;
+  }
+
+  uiState.timeBlock.popoverVisible = false;
+  return true;
+}
+
+function toggleTimeBlockPopover(forceVisible = !uiState.timeBlock.popoverVisible) {
+  if (!isTimeBlockingEnabled()) {
+    return false;
+  }
+
+  uiState.timeBlock.popoverVisible = Boolean(forceVisible);
+  if (uiState.timeBlock.popoverVisible) {
+    closeWorkspaceOpenMenu();
+    closeWorkspaceGitMenu();
+    hideSettingsSheet();
+    closeQuickSwitcher();
+    uiState.contextMenu = null;
+  }
+  return true;
+}
+
+function setTimeBlockDurationMinutes(value) {
+  uiState.timeBlock.durationMinutes = clampTimeBlockDurationMinutes(value);
+  persistTimeBlockState();
+}
+
+function getTimeBlockElapsedMs(current = uiState.timeBlock.current, now = Date.now()) {
+  if (!current) {
+    return 0;
+  }
+
+  const pausedElapsedMs = Math.max(0, Number(current.pausedElapsedMs || 0));
+  if (current.status === "paused") {
+    return pausedElapsedMs;
+  }
+
+  return pausedElapsedMs + Math.max(0, now - Number(current.startedAtMs || now));
+}
+
+function getTimeBlockDisplay(current = uiState.timeBlock.current, now = Date.now()) {
+  if (!current) {
+    return null;
+  }
+
+  const elapsedMs = getTimeBlockElapsedMs(current, now);
+  const durationMs = Math.max(60 * 1000, Number(current.durationMs || 0));
+  const remainingMs = durationMs - elapsedMs;
+  const isOvertime = remainingMs < 0;
+
+  return {
+    task: current.task || "Focus block",
+    status: current.status === "paused" ? "paused" : "running",
+    elapsedMs,
+    durationMs,
+    remainingMs,
+    isOvertime,
+    clockMs: Math.abs(remainingMs),
+  };
+}
+
+function formatTimeBlockClock(durationMs) {
+  const totalSeconds = Math.max(0, Math.floor(Number(durationMs || 0) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+
+  return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function startTimeBlock() {
+  const task = uiState.timeBlock.taskDraft.trim() || "Focus block";
+  const durationMinutes = clampTimeBlockDurationMinutes(uiState.timeBlock.durationMinutes);
+  const now = Date.now();
+
+  uiState.timeBlock.current = {
+    id: `time-block-${now}`,
+    task,
+    durationMs: durationMinutes * 60 * 1000,
+    startedAtMs: now,
+    pausedElapsedMs: 0,
+    status: "running",
+  };
+  uiState.timeBlock.taskDraft = task;
+  uiState.timeBlock.durationMinutes = durationMinutes;
+  uiState.timeBlock.popoverVisible = false;
+  persistTimeBlockState();
+  syncTimeBlockTicker();
+}
+
+function pauseTimeBlock() {
+  const current = uiState.timeBlock.current;
+  if (!current || current.status === "paused") {
+    return;
+  }
+
+  current.pausedElapsedMs = getTimeBlockElapsedMs(current);
+  current.startedAtMs = 0;
+  current.status = "paused";
+  persistTimeBlockState();
+  syncTimeBlockTicker();
+}
+
+function resumeTimeBlock() {
+  const current = uiState.timeBlock.current;
+  if (!current || current.status !== "paused") {
+    return;
+  }
+
+  current.startedAtMs = Date.now();
+  current.status = "running";
+  persistTimeBlockState();
+  syncTimeBlockTicker();
+}
+
+function finishTimeBlock() {
+  uiState.timeBlock.current = null;
+  uiState.timeBlock.popoverVisible = false;
+  persistTimeBlockState();
+  syncTimeBlockTicker();
+}
+
+function syncTimeBlockTicker(snapshot = uiState.snapshot) {
+  if (runtimeStore.timeBlockTickTimer) {
+    clearTimeout(runtimeStore.timeBlockTickTimer);
+    runtimeStore.timeBlockTickTimer = 0;
+  }
+
+  if (!isTimeBlockingEnabled(snapshot) || uiState.timeBlock.current?.status !== "running") {
+    return;
+  }
+
+  runtimeStore.timeBlockTickTimer = window.setTimeout(() => {
+    runtimeStore.timeBlockTickTimer = 0;
+    requestRender(RENDER_STRIP);
+  }, 1000);
 }
 
 function closeSourceControlRowMenu() {
@@ -8938,6 +10000,8 @@ function discardCachedWorkspaceScreen(workspaceId, { dispose = true } = {}) {
     return;
   }
 
+  destroyWorkspaceCodeEditor(workspaceId);
+
   if (dispose) {
     for (const paneId of collectPaneIdsFromElement(cached.element)) {
       disposeTerminal(paneId);
@@ -9059,6 +10123,10 @@ function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskInterse
   pruneCodexRestoreState(snapshot);
   prunePaneAttentionState(snapshot);
   ensureFrame();
+  if (!isTimeBlockingEnabled(snapshot)) {
+    closeTimeBlockPopover();
+  }
+  syncTimeBlockTicker(snapshot);
 
   const activeWorkspace = snapshot.activeWorkspace;
   const shouldShowLauncher = uiState.launcherVisible || !activeWorkspace;
@@ -11206,6 +12274,7 @@ function renderSettingsSheet(snapshot) {
                     preview: renderTerminalTextPreview(),
                   })}
                 </div>
+                ${renderSettingsTimeBlockCard(snapshot)}
                 ${hasAvailableCodexCli(snapshot) ? renderSettingsCodexCard(getDraftCodexCli(snapshot)) : ""}
                 ${renderSettingsAppUpdateCard(snapshot)}
                 ${renderSettingsTelemetryCard(snapshot)}
@@ -11487,6 +12556,45 @@ function renderTerminalTextPreview() {
       <div class="settings-preview-terminal-line is-muted">On branch main</div>
       <div class="settings-preview-terminal-line is-accent">modified: src-web/app.js</div>
     </div>
+  `;
+}
+
+function renderSettingsTimeBlockCard(snapshot) {
+  const isEnabled = getDraftTimeBlockingEnabled(snapshot);
+  const isSaving = Boolean(uiState.settingsDraft?.savingTimeBlockingEnabled);
+  const current = getTimeBlockDisplay();
+  const statusLabel = isSaving
+    ? "Saving"
+    : isEnabled
+      ? current
+        ? "Active"
+        : "Enabled"
+      : "Off";
+  const statusTone = isEnabled ? "is-active" : "";
+  const copy = isEnabled
+    ? "Shows a small top-bar timer for the current focus block. Timer state stays local to this machine."
+    : "Hide Time Blocking from the top bar when you want the chrome as quiet as possible.";
+
+  return `
+    <section class="settings-ai-card settings-time-block-card">
+      <div class="settings-ai-head">
+        <div>
+          <p class="settings-panel-kicker">Focus</p>
+          <h4 class="settings-adjustment-title">Time Blocking</h4>
+          <p class="settings-adjustment-copy">${escapeHtml(copy)}</p>
+        </div>
+        <span class="settings-ai-status ${statusTone}">${escapeHtml(statusLabel)}</span>
+      </div>
+      <label class="settings-telemetry-toggle">
+        <input
+          type="checkbox"
+          data-settings-time-blocking-enabled
+          ${isEnabled ? "checked" : ""}
+          ${isSaving ? "disabled" : ""}
+        />
+        <span>Show Time Blocking in the top bar</span>
+      </label>
+    </section>
   `;
 }
 
@@ -14028,7 +15136,12 @@ function renderWorkspaceFileExplorer(workspace) {
           </button>
         </div>
       </header>
-      <div class="workspace-file-explorer-body" role="tree" aria-label="${escapeHtml(workspace.name)} files">
+      <div
+        class="workspace-file-explorer-body"
+        data-workspace-file-explorer-scroll
+        role="tree"
+        aria-label="${escapeHtml(workspace.name)} files"
+      >
         <div class="workspace-file-explorer-tree-shell">
           ${renderWorkspaceFileExplorerTree({
             rootSnapshot,
@@ -14868,12 +15981,22 @@ function renderWorkspaceFileEditorShell(workspace) {
   const markdownMode = getWorkspaceFileEditorMarkdownMode(editorState);
   const isMarkdownSplit = visible && markdownMode === "split";
   const isMarkdownPreview = visible && markdownMode === "preview";
+  const customWidth = clampWorkspaceFileEditorWidth(uiState.workspaceFileEditorWidth);
   return `
     <aside
-      class="workspace-file-editor-shell ${visible ? "is-visible" : ""} ${isMarkdownSplit ? "is-markdown-split" : ""} ${isMarkdownPreview ? "is-markdown-preview" : ""}"
+      class="workspace-file-editor-shell ${visible ? "is-visible" : ""} ${customWidth ? "is-user-sized" : ""} ${isMarkdownSplit ? "is-markdown-split" : ""} ${isMarkdownPreview ? "is-markdown-preview" : ""}"
       data-workspace-file-editor="${escapeHtml(workspace.id)}"
       aria-hidden="${visible ? "false" : "true"}"
+      ${customWidth ? `style="--workspace-file-editor-width: ${customWidth}px"` : ""}
     >
+      <div
+        class="workspace-file-editor-resizer"
+        data-workspace-file-editor-resizer
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize code editor"
+        title="Drag to resize editor"
+      ></div>
       ${renderWorkspaceFileEditor(workspace)}
     </aside>
   `;
@@ -14950,14 +16073,7 @@ function renderWorkspaceFileEditor(workspace) {
             showMarkdownWrite
               ? `
                   <div class="workspace-file-editor-pane is-write">
-                    <textarea
-                      class="workspace-file-editor-input"
-                      data-workspace-file-editor-input
-                      spellcheck="false"
-                      autocapitalize="off"
-                      autocorrect="off"
-                      ${snapshot?.readOnly ? "readonly" : ""}
-                    >${escapeHtml(editorState?.draft || "")}</textarea>
+                    ${renderWorkspaceCodeEditorHost(editorState, snapshot)}
                   </div>
                 `
               : ""
@@ -14966,7 +16082,11 @@ function renderWorkspaceFileEditor(workspace) {
             showMarkdownPreview
               ? `
                   <div class="workspace-file-editor-pane is-preview">
-                    <div class="workspace-file-editor-preview-shell" data-markdown-mode="${escapeHtml(markdownMode)}">
+                    <div
+                      class="workspace-file-editor-preview-shell"
+                      data-workspace-file-editor-preview
+                      data-markdown-mode="${escapeHtml(markdownMode)}"
+                    >
                       ${renderWorkspaceFileMarkdownPreview(workspace, editorState)}
                     </div>
                   </div>
@@ -15394,6 +16514,37 @@ function mountWorkspaceTerminals(workspace, root = document) {
   }
 }
 
+function captureWorkspaceFileExplorerScrollState(shell) {
+  const scrollRegion = shell.querySelector("[data-workspace-file-explorer-scroll]");
+  if (!(scrollRegion instanceof HTMLElement)) {
+    return null;
+  }
+
+  return {
+    left: scrollRegion.scrollLeft,
+    top: scrollRegion.scrollTop,
+  };
+}
+
+function restoreWorkspaceFileExplorerScrollState(shell, scrollState) {
+  if (!scrollState) {
+    return;
+  }
+
+  const restore = () => {
+    const scrollRegion = shell.querySelector("[data-workspace-file-explorer-scroll]");
+    if (!(scrollRegion instanceof HTMLElement)) {
+      return;
+    }
+
+    scrollRegion.scrollLeft = scrollState.left;
+    scrollRegion.scrollTop = scrollState.top;
+  };
+
+  restore();
+  requestAnimationFrame(restore);
+}
+
 function syncWorkspaceFileExplorerSurface(workspace, root = document) {
   const screen = root.querySelector(`.workspace-screen[data-workspace-id="${workspace.id}"]`);
   if (!(screen instanceof HTMLElement)) {
@@ -15405,11 +16556,13 @@ function syncWorkspaceFileExplorerSurface(workspace, root = document) {
     return;
   }
 
+  const scrollState = captureWorkspaceFileExplorerScrollState(shell);
   const visible = isWorkspaceFileExplorerVisible(workspace.id);
   screen.classList.toggle("has-file-explorer", visible);
   shell.classList.toggle("is-visible", visible);
   shell.setAttribute("aria-hidden", visible ? "false" : "true");
   shell.innerHTML = renderWorkspaceFileExplorer(workspace);
+  restoreWorkspaceFileExplorerScrollState(shell, scrollState);
   if (visible) {
     ensureWorkspaceFileExplorerRootLoaded(workspace.id);
   }
@@ -15431,6 +16584,7 @@ function syncWorkspaceFileEditorSurface(workspace, root = document) {
   const isMarkdownSplit = visible && getWorkspaceFileEditorMarkdownMode(editorState) === "split";
   const isMarkdownPreview = visible && getWorkspaceFileEditorMarkdownMode(editorState) === "preview";
   const focusState = captureWorkspaceFileEditorFocusState(screen);
+  destroyWorkspaceCodeEditor(workspace.id);
   screen.classList.toggle("has-file-editor", visible);
   shell.classList.toggle("is-visible", visible);
   shell.classList.toggle("is-markdown-split", isMarkdownSplit);
@@ -15438,13 +16592,14 @@ function syncWorkspaceFileEditorSurface(workspace, root = document) {
   shell.setAttribute("aria-hidden", visible ? "false" : "true");
   shell.innerHTML = renderWorkspaceFileEditor(workspace);
   syncWorkspaceFileEditorMarkdownDiagrams(shell);
+  void syncWorkspaceCodeEditorSurface(workspace, shell, { focusState });
   if (editorState?.shouldFocus) {
-    editorState.shouldFocus = false;
     const input = shell.querySelector("[data-workspace-file-editor-input]");
     if (input instanceof HTMLTextAreaElement && !input.readOnly) {
       input.focus({ preventScroll: true });
       input.selectionStart = input.value.length;
       input.selectionEnd = input.value.length;
+      editorState.shouldFocus = false;
     }
   } else if (focusState) {
     restoreWorkspaceFileEditorFocusState(focusState, screen);
@@ -15567,6 +16722,7 @@ function clearWorkspaceBuffers(workspaceId) {
   discardCachedWorkspaceScreen(workspaceId, { dispose: false });
   workspacePaneIds.delete(workspaceId);
   uiState.workspaceFileExplorer.delete(workspaceId);
+  destroyWorkspaceCodeEditor(workspaceId);
   uiState.workspaceFileEditor.delete(workspaceId);
   cancelWorkspaceFileDraftPersistence(workspaceId);
 }

@@ -125,6 +125,8 @@ pub(crate) struct PersistedSettings {
     #[serde(default)]
     pub(crate) posthog_project_api_key: Option<String>,
     #[serde(default)]
+    pub(crate) time_blocking_enabled: Option<bool>,
+    #[serde(default)]
     pub(crate) dismissed_app_update_version: Option<String>,
     #[serde(default)]
     pub(crate) app_update_last_checked_at_ms: Option<u64>,
@@ -249,6 +251,7 @@ pub(crate) fn build_persisted_state(runtime: &RuntimeState) -> PersistedWorkspac
             telemetry_install_id: Some(runtime.settings.telemetry_install_id.clone()),
             telemetry_host: Some(runtime.settings.telemetry_host.clone()),
             posthog_project_api_key: runtime.settings.posthog_project_api_key.clone(),
+            time_blocking_enabled: Some(runtime.settings.time_blocking_enabled),
             dismissed_app_update_version: runtime.settings.dismissed_app_update_version.clone(),
             app_update_last_checked_at_ms: runtime.settings.app_update_last_checked_at_ms,
         },
@@ -500,6 +503,8 @@ pub(crate) fn load_persisted_from_disk(
         crate::telemetry::normalize_optional_posthog_project_api_key(
             persisted.settings.posthog_project_api_key,
         );
+    runtime.settings.time_blocking_enabled =
+        persisted.settings.time_blocking_enabled.unwrap_or(true);
     runtime.settings.dismissed_app_update_version = persisted
         .settings
         .dismissed_app_update_version

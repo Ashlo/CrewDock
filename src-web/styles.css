@@ -92,6 +92,9 @@
   --pane-title-text: color-mix(in srgb, var(--text) 82%, transparent);
   --pane-title-muted: color-mix(in srgb, var(--surface-soft-text) 88%, var(--text) 12%);
   --pane-active-line: color-mix(in srgb, var(--text) 18%, transparent);
+  --pane-active-border: color-mix(in srgb, var(--accent) 48%, var(--text) 28%);
+  --pane-active-shine: color-mix(in srgb, var(--accent) 72%, white 28%);
+  --pane-active-shine-soft: color-mix(in srgb, var(--accent) 22%, transparent);
   --pane-active-wash: color-mix(in srgb, var(--text) 1.2%, transparent);
   --radius-xl: 28px;
   --radius-lg: 18px;
@@ -426,6 +429,226 @@ button {
   height: 16px;
   margin-right: 4px;
   background: linear-gradient(180deg, transparent, var(--chrome-divider), transparent);
+}
+
+.workspace-time-block-shell {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.workspace-time-block-button {
+  min-height: 31px;
+  max-width: min(280px, 22vw);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 11px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--border) 68%, transparent);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, white 3%, transparent), transparent 54%),
+    color-mix(in srgb, var(--panel) 78%, var(--control-bg) 22%);
+  color: color-mix(in srgb, var(--text) 88%, var(--surface-soft-text));
+  box-shadow:
+    0 8px 18px rgba(0, 0, 0, 0.14),
+    inset 0 1px 0 color-mix(in srgb, white 5%, transparent);
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 620;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    box-shadow 160ms ease,
+    transform 160ms ease;
+}
+
+.workspace-time-block-button:hover,
+.workspace-time-block-shell.is-open .workspace-time-block-button {
+  transform: translateY(-1px);
+  border-color: color-mix(in srgb, var(--accent) 24%, var(--border-strong));
+  background:
+    linear-gradient(180deg, color-mix(in srgb, white 4%, transparent), transparent 52%),
+    color-mix(in srgb, var(--accent-soft) 34%, var(--panel) 66%);
+}
+
+.workspace-time-block-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 56%, transparent);
+  box-shadow: 0 0 0 rgba(0, 0, 0, 0);
+}
+
+.workspace-time-block-shell.is-running .workspace-time-block-dot {
+  background: var(--accent);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+
+.workspace-time-block-shell.is-paused .workspace-time-block-dot {
+  background: var(--warning);
+}
+
+.workspace-time-block-shell.is-overtime .workspace-time-block-dot {
+  background: var(--danger);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--danger) 54%, transparent);
+}
+
+.workspace-time-block-task {
+  min-width: 0;
+  max-width: 108px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: color-mix(in srgb, var(--surface-soft-text) 82%, var(--text));
+}
+
+.workspace-time-block-button strong {
+  flex: 0 0 auto;
+  color: var(--text);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.workspace-time-block-popover {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 18;
+  width: min(340px, calc(100vw - 32px));
+  padding: 12px;
+  border-radius: 18px;
+  border: 1px solid color-mix(in srgb, var(--border) 76%, transparent);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, white 3%, transparent), transparent 34%),
+    color-mix(in srgb, var(--panel) 96%, transparent);
+  box-shadow:
+    0 22px 42px rgba(0, 0, 0, 0.28),
+    inset 0 1px 0 color-mix(in srgb, white 5%, transparent);
+  backdrop-filter: blur(18px);
+}
+
+.workspace-time-block-form,
+.workspace-time-block-field {
+  display: grid;
+  gap: 10px;
+}
+
+.workspace-time-block-popover-head,
+.workspace-time-block-current {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.workspace-time-block-popover-head span,
+.workspace-time-block-current span,
+.workspace-time-block-field span,
+.workspace-time-block-custom span {
+  color: var(--surface-soft-text);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.workspace-time-block-popover-head strong,
+.workspace-time-block-current strong {
+  min-width: 0;
+  color: var(--text);
+  font-size: 0.92rem;
+  line-height: 1.2;
+  text-align: right;
+}
+
+.workspace-time-block-current {
+  padding: 10px 11px;
+  border-radius: 13px;
+  border: 1px solid color-mix(in srgb, var(--border) 64%, transparent);
+  background: color-mix(in srgb, var(--surface-pill-bg) 72%, transparent);
+}
+
+.workspace-time-block-current strong {
+  font-family: "SFMono-Regular", "SF Mono", ui-monospace, monospace;
+  font-size: 1rem;
+}
+
+.workspace-time-block-input,
+.workspace-time-block-custom input {
+  width: 100%;
+  min-width: 0;
+  height: 38px;
+  padding: 0 11px;
+  border-radius: 11px;
+  border: 1px solid color-mix(in srgb, var(--border) 68%, transparent);
+  background: color-mix(in srgb, var(--surface-input-bg) 74%, transparent);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+  outline: none;
+}
+
+.workspace-time-block-input:focus,
+.workspace-time-block-custom input:focus {
+  border-color: color-mix(in srgb, var(--accent) 32%, var(--border));
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.workspace-time-block-presets {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) minmax(76px, 0.9fr);
+  gap: 7px;
+}
+
+.workspace-time-block-preset,
+.workspace-time-block-primary,
+.workspace-time-block-secondary {
+  min-height: 34px;
+  border-radius: 11px;
+  border: 1px solid color-mix(in srgb, var(--border) 68%, transparent);
+  background: color-mix(in srgb, var(--control-bg) 72%, transparent);
+  color: var(--surface-soft-text);
+  font: inherit;
+  font-size: 0.76rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.workspace-time-block-preset.is-active {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+  background: color-mix(in srgb, var(--accent-soft) 72%, transparent);
+}
+
+.workspace-time-block-custom {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.workspace-time-block-custom input {
+  height: 34px;
+  padding: 0 8px;
+  text-align: center;
+}
+
+.workspace-time-block-actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+}
+
+.workspace-time-block-primary {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+  background: color-mix(in srgb, var(--accent-soft) 74%, var(--control-bg));
+}
+
+.workspace-time-block-secondary.is-danger {
+  color: color-mix(in srgb, var(--danger) 78%, white);
 }
 
 .workspace-strip-actions .workspace-open-shell {
@@ -1040,6 +1263,10 @@ button {
 .workspace-tab-main:focus-visible,
 .workspace-tab-action:focus-visible,
 .workspace-tabs-scroll:focus-visible,
+.workspace-time-block-button:focus-visible,
+.workspace-time-block-preset:focus-visible,
+.workspace-time-block-primary:focus-visible,
+.workspace-time-block-secondary:focus-visible,
 .workspace-strip-button:focus-visible,
 .workspace-add:focus-visible,
 .workspace-open-button:focus-visible,
@@ -7815,21 +8042,21 @@ button {
   width: 0;
   min-width: 0;
   min-height: 0;
+  position: relative;
   opacity: 0;
   overflow: hidden;
   pointer-events: none;
   transition:
-    width 180ms ease,
-    flex-basis 180ms ease,
+    width 260ms cubic-bezier(0.16, 1, 0.3, 1),
+    flex-basis 260ms cubic-bezier(0.16, 1, 0.3, 1),
     opacity 140ms ease;
 }
 
 .workspace-file-editor-shell.is-visible {
-  width: clamp(320px, 32vw, 460px);
-  flex-basis: clamp(320px, 32vw, 460px);
+  width: clamp(360px, 34vw, 500px);
+  flex-basis: clamp(360px, 34vw, 500px);
   opacity: 1;
   pointer-events: auto;
-  border-left: 1px solid var(--chrome-divider);
 }
 
 .workspace-file-editor-shell.is-visible.is-markdown-preview {
@@ -7842,6 +8069,80 @@ button {
   flex-basis: clamp(520px, 46vw, 860px);
 }
 
+.workspace-file-editor-shell.is-visible.is-user-sized {
+  width: var(--workspace-file-editor-width);
+  flex-basis: var(--workspace-file-editor-width);
+}
+
+.workspace-file-editor-shell.is-visible.is-resizing {
+  transition: none;
+}
+
+.workspace-file-editor-resizer {
+  position: relative;
+  z-index: 2;
+  flex: 0 0 12px;
+  width: 12px;
+  min-height: 0;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.workspace-file-editor-resizer::before,
+.workspace-file-editor-resizer::after {
+  content: "";
+  position: absolute;
+  top: 14px;
+  bottom: 14px;
+  left: 5px;
+  width: 1px;
+  border-radius: 999px;
+  pointer-events: none;
+  transition:
+    opacity 180ms ease,
+    transform 180ms cubic-bezier(0.16, 1, 0.3, 1),
+    background 180ms ease;
+}
+
+.workspace-file-editor-resizer::before {
+  background: linear-gradient(
+    180deg,
+    transparent,
+    color-mix(in srgb, var(--chrome-divider) 82%, transparent) 14%,
+    color-mix(in srgb, var(--text) 12%, transparent) 50%,
+    color-mix(in srgb, var(--chrome-divider) 82%, transparent) 86%,
+    transparent
+  );
+}
+
+.workspace-file-editor-resizer::after {
+  width: 3px;
+  left: 4px;
+  opacity: 0;
+  background: linear-gradient(
+    180deg,
+    transparent,
+    color-mix(in srgb, var(--accent) 64%, white 16%),
+    transparent
+  );
+  box-shadow: 0 0 18px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.workspace-file-editor-resizer:hover::after,
+.workspace-file-editor-shell.is-resizing .workspace-file-editor-resizer::after {
+  opacity: 1;
+  transform: scaleX(1.12);
+}
+
+body.is-resizing-workspace-file-editor {
+  cursor: col-resize;
+  user-select: none;
+}
+
+body.is-resizing-workspace-file-editor * {
+  cursor: col-resize !important;
+}
+
 .workspace-file-editor-panel {
   flex: 1 1 auto;
   min-width: 0;
@@ -7849,7 +8150,13 @@ button {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  background: color-mix(in srgb, var(--pane-surface) 82%, var(--bg));
+  border-left: 1px solid color-mix(in srgb, var(--chrome-divider) 90%, transparent);
+  background:
+    radial-gradient(circle at 16% 0%, color-mix(in srgb, var(--accent-soft) 36%, transparent), transparent 30%),
+    linear-gradient(180deg, color-mix(in srgb, var(--pane-surface) 92%, var(--bg)), color-mix(in srgb, var(--pane-surface) 76%, var(--bg)) 100%);
+  box-shadow:
+    inset 1px 0 0 color-mix(in srgb, var(--text) 4%, transparent),
+    -18px 0 44px -36px color-mix(in srgb, black 74%, transparent);
 }
 
 .workspace-file-editor-header {
@@ -7857,9 +8164,12 @@ button {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  min-height: 42px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--chrome-divider);
+  min-height: 48px;
+  padding: 10px 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--chrome-divider) 82%, transparent);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, white 3%, transparent), transparent),
+    color-mix(in srgb, var(--surface-pill-bg) 38%, transparent);
 }
 
 .workspace-file-editor-heading {
@@ -7870,17 +8180,18 @@ button {
 }
 
 .workspace-file-editor-heading strong {
-  font-size: 12px;
-  font-weight: 600;
+  font-size: 12.5px;
+  font-weight: 700;
   color: var(--text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  letter-spacing: -0.01em;
 }
 
 .workspace-file-editor-path {
-  font-size: 11px;
-  color: var(--muted);
+  font-size: 10.5px;
+  color: color-mix(in srgb, var(--muted) 88%, var(--text) 12%);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -7896,9 +8207,11 @@ button {
   display: inline-flex;
   align-items: center;
   padding: 2px;
-  border: 1px solid var(--chrome-divider);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--surface-pill-bg) 85%, transparent);
+  border: 1px solid color-mix(in srgb, var(--chrome-divider) 88%, transparent);
+  border-radius: 999px;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, white 4%, transparent), transparent),
+    color-mix(in srgb, var(--surface-pill-bg) 78%, transparent);
 }
 
 .workspace-file-editor-mode-button {
@@ -7907,23 +8220,28 @@ button {
   background: transparent;
   color: var(--muted);
   min-height: 24px;
-  padding: 0 9px;
-  border-radius: 6px;
+  padding: 0 10px;
+  border-radius: 999px;
   font-size: 11px;
   font-weight: 600;
   cursor: pointer;
   transition:
     background 140ms ease,
-    color 140ms ease;
+    color 140ms ease,
+    transform 140ms ease;
 }
 
 .workspace-file-editor-mode-button:hover {
   color: var(--text);
+  transform: translateY(-1px);
 }
 
 .workspace-file-editor-mode-button.is-active {
-  background: color-mix(in srgb, var(--accent-soft) 58%, transparent);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, white 8%, transparent), transparent),
+    color-mix(in srgb, var(--accent-soft) 68%, transparent);
   color: var(--tab-text-active);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 14%, transparent);
 }
 
 .workspace-file-editor-status {
@@ -7940,14 +8258,17 @@ button {
 .workspace-file-editor-close,
 .workspace-file-editor-inline-button {
   appearance: none;
-  border: 1px solid var(--chrome-divider);
-  background: color-mix(in srgb, var(--surface-pill-bg) 85%, transparent);
+  border: 1px solid color-mix(in srgb, var(--chrome-divider) 88%, transparent);
+  background:
+    linear-gradient(180deg, color-mix(in srgb, white 4%, transparent), transparent),
+    color-mix(in srgb, var(--surface-pill-bg) 78%, transparent);
   color: var(--text);
   cursor: pointer;
   transition:
     border-color 140ms ease,
     background 140ms ease,
-    color 140ms ease;
+    color 140ms ease,
+    transform 140ms ease;
 }
 
 .workspace-file-editor-action:hover,
@@ -7955,6 +8276,7 @@ button {
 .workspace-file-editor-inline-button:hover {
   border-color: color-mix(in srgb, var(--accent) 34%, var(--chrome-divider));
   background: color-mix(in srgb, var(--accent-soft) 55%, var(--surface-pill-bg));
+  transform: translateY(-1px);
 }
 
 .workspace-file-editor-action:disabled,
@@ -7969,7 +8291,7 @@ button {
   min-width: 28px;
   height: 28px;
   padding: 0 10px;
-  border-radius: 6px;
+  border-radius: 9px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -7985,6 +8307,7 @@ button {
 
 .workspace-file-editor-action.is-save {
   min-width: 52px;
+  border-radius: 999px;
 }
 
 .workspace-file-editor-body {
@@ -7992,8 +8315,8 @@ button {
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 10px;
-  padding: 12px;
+  gap: 12px;
+  padding: 14px;
 }
 
 .workspace-file-editor-main {
@@ -8006,7 +8329,7 @@ button {
 .workspace-file-editor-main.is-split {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 12px;
+  gap: 14px;
 }
 
 .workspace-file-editor-pane {
@@ -8102,7 +8425,7 @@ button {
   width: 100%;
   resize: none;
   border: 1px solid var(--chrome-divider);
-  border-radius: 10px;
+  border-radius: 14px;
   background: color-mix(in srgb, var(--pane-bg) 88%, black);
   color: var(--text);
   padding: 14px;
@@ -8113,16 +8436,79 @@ button {
   box-shadow: inset 0 0 0 0.5px color-mix(in srgb, var(--text) 3%, transparent);
 }
 
+.workspace-file-editor-code-host {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--chrome-divider) 88%, transparent);
+  border-radius: 14px;
+  background:
+    radial-gradient(circle at 14% 0%, color-mix(in srgb, var(--accent-soft) 34%, transparent), transparent 34%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.028), transparent 16%),
+    color-mix(in srgb, var(--pane-bg) 92%, black);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, white 5%, transparent),
+    inset 0 0 0 0.5px color-mix(in srgb, var(--text) 3%, transparent);
+}
+
+.workspace-file-editor-code-host:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 36%, var(--chrome-divider));
+  box-shadow:
+    inset 0 0 0 0.5px color-mix(in srgb, var(--accent) 20%, transparent),
+    0 0 0 1px color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.workspace-file-editor-code-host .workspace-file-editor-input.is-fallback {
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.workspace-file-editor-code-host.is-ready .workspace-file-editor-input.is-fallback {
+  display: none;
+}
+
+.workspace-file-editor-code-host .cm-editor {
+  height: 100%;
+  background: transparent;
+}
+
+.workspace-file-editor-code-host .cm-scroller {
+  overflow: auto;
+}
+
+.workspace-file-editor-code-host .cm-content {
+  min-width: 100%;
+}
+
+.workspace-file-editor-code-host .cm-line {
+  font-variant-ligatures: none;
+}
+
+.workspace-file-editor-code-host .cm-foldGutter .cm-gutterElement {
+  padding-inline: 2px 8px;
+}
+
+.workspace-file-editor-code-host .cm-diagnostic {
+  color: inherit;
+}
+
 .workspace-file-editor-preview-shell {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  border: 1px solid var(--chrome-divider);
-  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--chrome-divider) 88%, transparent);
+  border-radius: 14px;
   background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent 12%),
+    radial-gradient(circle at 22% 0%, color-mix(in srgb, var(--accent-soft) 28%, transparent), transparent 34%),
+    linear-gradient(180deg, rgba(255, 255, 255, 0.024), transparent 12%),
     color-mix(in srgb, var(--pane-bg) 92%, black);
-  box-shadow: inset 0 0 0 0.5px color-mix(in srgb, var(--text) 3%, transparent);
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, white 5%, transparent),
+    inset 0 0 0 0.5px color-mix(in srgb, var(--text) 3%, transparent);
 }
 
 .workspace-file-editor-preview-shell[data-markdown-mode="preview"] {
@@ -8499,18 +8885,17 @@ button {
 .terminal-pane::before {
   content: "";
   position: absolute;
-  top: 3px;
-  left: 4px;
-  width: 10px;
-  height: 1px;
-  border-radius: 999px;
+  inset: 0;
+  border-radius: inherit;
   background: transparent;
+  box-shadow: inset 0 0 0 1px transparent;
   opacity: 0;
   pointer-events: none;
   z-index: 2;
   transition:
     opacity 160ms ease,
-    background 160ms ease;
+    background 160ms ease,
+    box-shadow 160ms ease;
 }
 
 .terminal-pane::after {
@@ -8542,12 +8927,20 @@ button {
 .terminal-pane[data-active="true"] {
   border-color: transparent;
   background: transparent;
-  box-shadow: none;
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--pane-active-border) 34%, transparent);
 }
 
 .terminal-pane[data-active="true"]::before {
   opacity: 1;
-  background: var(--pane-active-line);
+  background:
+    linear-gradient(90deg, transparent 0%, var(--pane-active-shine) 42%, var(--pane-active-shine) 58%, transparent 100%) top left / 100% 1px no-repeat,
+    linear-gradient(90deg, transparent 0%, var(--pane-active-shine-soft) 24%, var(--pane-active-shine) 50%, var(--pane-active-shine-soft) 76%, transparent 100%) bottom left / 100% 1px no-repeat,
+    linear-gradient(180deg, transparent 0%, var(--pane-active-shine-soft) 18%, var(--pane-active-shine) 50%, var(--pane-active-shine-soft) 82%, transparent 100%) top left / 1px 100% no-repeat,
+    linear-gradient(180deg, transparent 0%, var(--pane-active-shine-soft) 18%, var(--pane-active-shine) 50%, var(--pane-active-shine-soft) 82%, transparent 100%) top right / 1px 100% no-repeat;
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--pane-active-border) 72%, transparent),
+    inset 0 0 18px color-mix(in srgb, var(--pane-active-shine-soft) 56%, transparent);
 }
 
 .terminal-pane[data-dispatch-attention="true"]::after {

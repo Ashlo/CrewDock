@@ -195,6 +195,7 @@ struct SettingsRecord {
     telemetry_install_id: String,
     telemetry_host: String,
     posthog_project_api_key: Option<String>,
+    time_blocking_enabled: bool,
     dismissed_app_update_version: Option<String>,
     app_update_last_checked_at_ms: Option<u64>,
 }
@@ -211,6 +212,7 @@ impl Default for SettingsRecord {
             telemetry_install_id: telemetry::generate_install_id(),
             telemetry_host: telemetry::default_posthog_host(),
             posthog_project_api_key: None,
+            time_blocking_enabled: true,
             dismissed_app_update_version: None,
             app_update_last_checked_at_ms: None,
         }
@@ -287,6 +289,7 @@ impl RuntimeState {
                 has_environment_openai_api_key: has_openai_api_key_in_environment(),
                 codex_cli: self.codex_cli.clone(),
                 telemetry: telemetry::build_settings_snapshot(self),
+                time_blocking_enabled: self.settings.time_blocking_enabled,
                 dismissed_app_update_version: self.settings.dismissed_app_update_version.clone(),
                 app_update_last_checked_at_ms: self.settings.app_update_last_checked_at_ms,
             },
@@ -426,6 +429,7 @@ struct SettingsSnapshot {
     has_environment_openai_api_key: bool,
     codex_cli: CodexCliSnapshot,
     telemetry: telemetry::TelemetrySettingsSnapshot,
+    time_blocking_enabled: bool,
     dismissed_app_update_version: Option<String>,
     app_update_last_checked_at_ms: Option<u64>,
 }
@@ -4406,6 +4410,25 @@ fn set_terminal_font_size(
 }
 
 #[tauri::command]
+fn set_time_blocking_enabled(
+    time_blocking_enabled: bool,
+    state: State<'_, AppState>,
+    _app: AppHandle,
+) -> Result<AppSnapshot, String> {
+    let snapshot = {
+        let mut runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+
+        runtime.settings.time_blocking_enabled = time_blocking_enabled;
+        runtime.persist_to_disk()?;
+        runtime.build_snapshot()
+    };
+    Ok(snapshot)
+}
+
+#[tauri::command]
 fn set_openai_api_key(
     openai_api_key: Option<String>,
     state: State<'_, AppState>,
@@ -6733,6 +6756,7 @@ pub fn run() {
             set_openai_api_key,
             set_telemetry_preferences,
             set_posthog_project_api_key,
+            set_time_blocking_enabled,
             set_codex_cli_path,
             refresh_codex_cli_catalog,
             load_workspace_codex_sessions,
