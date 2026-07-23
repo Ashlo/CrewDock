@@ -79,7 +79,7 @@ export function renderWorkspaceSidebar({
           title="${collapsed ? "Expand sidebar" : "Collapse sidebar"}"
           aria-expanded="${collapsed ? "false" : "true"}"
         >
-          ${renderSidebarToggleIcon(collapsed)}
+          ${renderSidebarToggleIcon()}
         </button>
       </div>
       <div
@@ -124,6 +124,49 @@ export function renderWorkspaceSidebar({
         <span>New workspace</span>
       </button>
     </nav>
+  `;
+}
+
+export function renderWorkspaceCompanion() {
+  return `
+    <div class="workspace-companion" aria-hidden="true">
+      <svg viewBox="0 0 96 68" role="presentation">
+        <ellipse class="workspace-companion-shadow" cx="48" cy="62" rx="26" ry="3"></ellipse>
+        <g class="workspace-companion-tail">
+          <path d="M67 47c15-9 21 1 14 10-5 7-16 4-20-1 8 1 13-2 12-5-1-3-4-3-8-1z"></path>
+          <path class="workspace-companion-tail-tip" d="M78 48c7 2 7 8 1 11-3 1-7 0-10-2 7 0 11-3 9-9z"></path>
+        </g>
+        <g class="workspace-companion-body">
+          <path class="workspace-companion-leg is-left" d="M39 52h8v10h-9c-2 0-3-2-2-4z"></path>
+          <path class="workspace-companion-leg is-right" d="M51 52h8l3 6c1 2 0 4-2 4h-9z"></path>
+          <path class="workspace-companion-jacket" d="M34 36c3-6 8-9 14-9s11 3 14 9l3 21H31z"></path>
+          <path class="workspace-companion-collar" d="m36 33 12 9 12-9-4-4-8 7-8-7z"></path>
+          <path class="workspace-companion-neckerchief" d="m45 38 3 4 3-4 2 12-5 5-5-5z"></path>
+          <g class="workspace-companion-arm is-left">
+            <path d="M36 38c-5 1-9 5-10 10-1 3 4 5 6 2l7-8z"></path>
+            <circle cx="27" cy="50" r="3"></circle>
+          </g>
+          <g class="workspace-companion-arm is-right">
+            <path d="M60 38c5 1 9 5 10 10 1 3-4 5-6 2l-7-8z"></path>
+            <circle cx="69" cy="50" r="3"></circle>
+          </g>
+          <g class="workspace-companion-head">
+            <path class="workspace-companion-ear" d="M34 17 37 5l11 10z"></path>
+            <path class="workspace-companion-ear" d="m62 17-3-12-11 10z"></path>
+            <circle class="workspace-companion-face" cx="48" cy="23" r="17"></circle>
+            <path class="workspace-companion-cap" d="M33 12c4-7 25-7 30 0l-3 5c-8-3-16-3-24 0z"></path>
+            <path class="workspace-companion-cap-band" d="M35 14c8-3 18-3 26 0l-1 4c-8-3-16-3-24 0z"></path>
+            <path class="workspace-companion-cap-brim" d="M32 17c10-3 22-3 32 0-8 4-24 4-32 0z"></path>
+            <path class="workspace-companion-mask" d="M34 20c4-6 10-7 14-3-2 8-8 11-14 8z"></path>
+            <path class="workspace-companion-mask" d="M62 20c-4-6-10-7-14-3 2 8 8 11 14 8z"></path>
+            <ellipse class="workspace-companion-muzzle" cx="48" cy="29" rx="8" ry="6"></ellipse>
+            <circle class="workspace-companion-eye" cx="41" cy="21" r="1.6"></circle>
+            <circle class="workspace-companion-eye" cx="55" cy="21" r="1.6"></circle>
+            <path class="workspace-companion-smile" d="M44 30c2 3 6 3 8 0"></path>
+          </g>
+        </g>
+      </svg>
+    </div>
   `;
 }
 
@@ -281,6 +324,7 @@ function renderWorkspaceTab({
         data-tauri-drag-region="false"
         data-action="switch-workspace"
         data-workspace-id="${escapeHtml(workspace.id)}"
+        aria-current="${workspace.id === activeWorkspaceId ? "page" : "false"}"
         title="${escapeHtml(tabTitle)}"
       >
         <span class="workspace-tab-status ${liveClass}" aria-hidden="true"></span>
@@ -416,8 +460,8 @@ function renderChevronIcon(direction) {
   `;
 }
 
-function renderSidebarToggleIcon(collapsed) {
-  return renderChevronIcon(collapsed ? "right" : "left");
+function renderSidebarToggleIcon() {
+  return renderChevronIcon("right");
 }
 
 function renderTabRenameIcon() {

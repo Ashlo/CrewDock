@@ -18,6 +18,7 @@ import { renderActivityRail } from "./activity-rail.js";
 import { createRuntimeStore, createUiState } from "./store.js";
 import {
   buildWorkspaceTabLabels,
+  renderWorkspaceCompanion,
   renderWorkspaceSidebar,
   renderWorkspaceStrip,
 } from "./workspace-strip.js";
@@ -446,6 +447,91 @@ const THEME_REGISTRY = Object.freeze({
       brightMagenta: "#c678dd",
       brightCyan: "#56b6c2",
       brightWhite: "#dfe5ec",
+    },
+  },
+  "atom-dark": {
+    id: "atom-dark",
+    label: "Atom Dark",
+    description: "Classic Atom graphite with crisp blue focus.",
+    preview: ["#528bff", "#98c379", "#e5c07b", "#e06c75", "#abb2bf"],
+    appVars: {
+      "--bg": "#17191d",
+      "--bg-soft": "rgba(23, 25, 29, 0.95)",
+      "--panel": "rgba(29, 32, 38, 0.96)",
+      "--panel-strong": "rgba(37, 40, 48, 0.98)",
+      "--border": "rgba(157, 165, 180, 0.12)",
+      "--border-strong": "rgba(157, 165, 180, 0.2)",
+      "--text": "#d7dae0",
+      "--muted": "#828791",
+      "--accent": "#528bff",
+      "--accent-soft": "rgba(82, 139, 255, 0.16)",
+      "--danger": "#e06c75",
+      "--body-top-glow": "rgba(82, 139, 255, 0.14)",
+      "--body-bottom-glow": "rgba(86, 182, 194, 0.08)",
+      "--grid-line": "rgba(255, 255, 255, 0.022)",
+      "--strip-start": "rgba(37, 41, 50, 0.97)",
+      "--strip-end": "rgba(25, 28, 34, 0.94)",
+      "--strip-border": "rgba(157, 165, 180, 0.1)",
+      "--tab-bg": "rgba(25, 28, 34, 0.78)",
+      "--tab-bg-hover": "rgba(34, 38, 46, 0.92)",
+      "--tab-bg-active": "rgba(43, 47, 57, 0.98)",
+      "--tab-border": "rgba(157, 165, 180, 0.08)",
+      "--tab-border-hover": "rgba(157, 165, 180, 0.16)",
+      "--tab-border-active": "rgba(82, 139, 255, 0.28)",
+      "--tab-text": "rgba(215, 218, 224, 0.8)",
+      "--tab-text-active": "#f2f4f8",
+      "--tab-close": "rgba(194, 199, 208, 0.64)",
+      "--tab-close-hover-bg": "rgba(82, 139, 255, 0.12)",
+      "--control-bg": "rgba(25, 28, 34, 0.8)",
+      "--control-bg-hover": "rgba(34, 38, 46, 0.92)",
+      "--control-border": "rgba(157, 165, 180, 0.1)",
+      "--control-border-strong": "rgba(82, 139, 255, 0.24)",
+      "--control-text": "rgba(215, 218, 224, 0.78)",
+      "--control-text-strong": "#f2f4f8",
+      "--launcher-shell-bg": "rgba(20, 22, 27, 0.82)",
+      "--launcher-input-bg": "rgba(16, 18, 22, 0.96)",
+      "--launcher-card-bg": "rgba(17, 19, 23, 0.92)",
+      "--launcher-prefix": "#98c379",
+      "--launcher-output": "rgba(215, 218, 224, 0.74)",
+      "--launcher-output-muted": "rgba(215, 218, 224, 0.54)",
+      "--overlay-bg": "rgba(7, 8, 11, 0.64)",
+      "--modal-bg": "rgba(25, 28, 34, 0.97)",
+      "--surface-card-bg": "rgba(20, 23, 28, 0.76)",
+      "--surface-card-border": "rgba(157, 165, 180, 0.1)",
+      "--surface-input-bg": "rgba(15, 17, 21, 0.96)",
+      "--surface-pill-bg": "rgba(255, 255, 255, 0.05)",
+      "--surface-pill-active-bg": "rgba(82, 139, 255, 0.14)",
+      "--surface-pill-active-border": "rgba(82, 139, 255, 0.26)",
+      "--surface-soft-text": "rgba(215, 218, 224, 0.62)",
+      "--pane-seam": "rgba(157, 165, 180, 0.12)",
+      "--pane-bg": "#282c34",
+      "--pane-top-gloss": "rgba(255, 255, 255, 0.025)",
+      "--context-bg": "rgba(24, 27, 33, 0.98)",
+      "--context-divider": "rgba(255, 255, 255, 0.1)",
+      "--context-item-hover": "rgba(82, 139, 255, 0.1)",
+    },
+    terminalTheme: {
+      background: "#282c34",
+      foreground: "#abb2bf",
+      cursor: "#528bff",
+      cursorAccent: "#282c34",
+      selectionBackground: "rgba(82, 139, 255, 0.32)",
+      black: "#21252b",
+      red: "#e06c75",
+      green: "#98c379",
+      yellow: "#e5c07b",
+      blue: "#528bff",
+      magenta: "#c678dd",
+      cyan: "#56b6c2",
+      white: "#abb2bf",
+      brightBlack: "#5c6370",
+      brightRed: "#e06c75",
+      brightGreen: "#98c379",
+      brightYellow: "#e5c07b",
+      brightBlue: "#61afef",
+      brightMagenta: "#c678dd",
+      brightCyan: "#56b6c2",
+      brightWhite: "#d7dae0",
     },
   },
   "tokyo-night": {
@@ -4761,7 +4847,17 @@ async function handleClick(event) {
   if (target.dataset.action === "toggle-workspace-sidebar") {
     uiState.workspaceSidebarCollapsed = !uiState.workspaceSidebarCollapsed;
     persistWorkspaceSidebarCollapsedPreference(uiState.workspaceSidebarCollapsed);
-    requestRender(RENDER_STRIP | RENDER_TERMINALS);
+    const sidebar = app.querySelector("[data-workspace-sidebar]");
+    if (sidebar instanceof HTMLElement) {
+      const collapsed = uiState.workspaceSidebarCollapsed;
+      sidebar.classList.toggle("is-collapsed", collapsed);
+      const toggle = sidebar.querySelector('[data-action="toggle-workspace-sidebar"]');
+      if (toggle instanceof HTMLButtonElement) {
+        toggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+        toggle.setAttribute("aria-label", collapsed ? "Expand workspace sidebar" : "Collapse workspace sidebar");
+        toggle.title = collapsed ? "Expand sidebar" : "Collapse sidebar";
+      }
+    }
     return;
   }
 
@@ -5908,7 +6004,7 @@ function renderWorkspaceSidebarRegion(
     return;
   }
 
-  sidebarRegion.innerHTML = renderWorkspaceSidebar({
+  const markup = renderWorkspaceSidebar({
     workspaces: snapshot.workspaces,
     activeWorkspaceId: snapshot.activeWorkspaceId,
     workspaceRenameDraft: uiState.workspaceRenameDraft,
@@ -5920,6 +6016,10 @@ function renderWorkspaceSidebarRegion(
     getGitTone,
     formatGitBadgeTitle,
   });
+  if (sidebarRegion.__crewdockSidebarMarkup !== markup) {
+    sidebarRegion.innerHTML = markup;
+    sidebarRegion.__crewdockSidebarMarkup = markup;
+  }
   syncWorkspaceTabRail(snapshot.activeWorkspaceId, snapshot.workspaces.length);
   if (
     uiState.workspaceRenameDraft
@@ -9958,6 +10058,7 @@ function ensureFrame() {
       <div class="workspace-main-shell">
         <aside class="workspace-sidebar-region" data-region="sidebar"></aside>
         <section class="workspace-stage" data-region="stage"></section>
+        ${renderWorkspaceCompanion()}
       </div>
       <footer class="workspace-statusbar-region" data-region="status"></footer>
       <div class="workspace-activity-layer" data-region="activity"></div>

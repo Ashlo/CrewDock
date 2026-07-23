@@ -99,7 +99,7 @@ npm run build:mac
 - Verify notarization on the finished artifact:
 
 ```sh
-spctl -a -vv -t open src-tauri/target/release/bundle/dmg/CrewDock_<version>_<arch>.dmg
+spctl -a -vv -t open --context context:primary-signature src-tauri/target/release/bundle/dmg/CrewDock_<version>_<arch>.dmg
 ```
 
 - Generate a SHA-256 checksum:

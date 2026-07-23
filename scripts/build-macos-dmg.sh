@@ -30,7 +30,7 @@ detect_signing_identity() {
     | head -n 1
 }
 
-SIGNING_IDENTITY="${APPLE_SIGNING_IDENTITY:-$(detect_signing_identity)}"
+SIGNING_IDENTITY="${APPLE_SIGNING_IDENTITY:-$(detect_signing_identity || true)}"
 
 if [[ -z "$SIGNING_IDENTITY" ]]; then
   echo "error: no Developer ID Application signing identity found." >&2
@@ -106,6 +106,9 @@ ln -s /Applications "$STAGE_DIR/Applications"
 
 rm -f "$DMG_PATH"
 hdiutil create -volname "$APP_NAME" -srcfolder "$STAGE_DIR" -ov -format UDZO "$DMG_PATH" >/dev/null
+
+codesign --force --timestamp --sign "$SIGNING_IDENTITY" "$DMG_PATH"
+codesign --verify --verbose=2 "$DMG_PATH"
 
 if [[ "$NOTARIZE" == "1" ]]; then
   xcrun notarytool submit "$DMG_PATH" --keychain-profile "$NOTARY_PROFILE" --wait

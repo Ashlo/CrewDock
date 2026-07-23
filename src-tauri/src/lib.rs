@@ -868,6 +868,7 @@ enum PaneStatus {
 #[serde(rename_all = "kebab-case")]
 enum ThemeId {
     OneDark,
+    AtomDark,
     TokyoNight,
     GruvboxMaterialDark,
     Dracula,
@@ -979,6 +980,7 @@ impl ThemeId {
     fn as_str(self) -> &'static str {
         match self {
             Self::OneDark => "one-dark",
+            Self::AtomDark => "atom-dark",
             Self::TokyoNight => "tokyo-night",
             Self::GruvboxMaterialDark => "gruvbox-material-dark",
             Self::Dracula => "dracula",
@@ -990,6 +992,7 @@ impl ThemeId {
     fn parse(raw: &str) -> Option<Self> {
         match raw {
             "one-dark" => Some(Self::OneDark),
+            "atom-dark" => Some(Self::AtomDark),
             "tokyo-night" => Some(Self::TokyoNight),
             "gruvbox-material-dark" => Some(Self::GruvboxMaterialDark),
             "dracula" => Some(Self::Dracula),
@@ -7434,6 +7437,7 @@ mod tests {
     #[test]
     fn theme_parser_accepts_only_supported_theme_ids() {
         assert_eq!(ThemeId::parse("one-dark"), Some(ThemeId::OneDark));
+        assert_eq!(ThemeId::parse("atom-dark"), Some(ThemeId::AtomDark));
         assert_eq!(ThemeId::parse("tokyo-night"), Some(ThemeId::TokyoNight));
         assert_eq!(
             ThemeId::parse("gruvbox-material-dark"),
