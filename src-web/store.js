@@ -1,3 +1,23 @@
+export function reconcileSourceControlTask(task, previousTask = null) {
+  if (!task || !previousTask) {
+    return task || previousTask || null;
+  }
+
+  if (task.id !== previousTask.id) {
+    return Number(task.startedAt || 0) < Number(previousTask.startedAt || 0)
+      ? previousTask
+      : task;
+  }
+
+  if (Number(task.revision || 0) < Number(previousTask.revision || 0)) {
+    return previousTask;
+  }
+
+  return previousTask.status !== "running" && task.status === "running"
+    ? previousTask
+    : task;
+}
+
 export function createUiState() {
   return {
     snapshot: null,
@@ -56,6 +76,7 @@ export function createUiState() {
       createBranchName: "",
       createBranchStartPoint: "",
       pendingCreateBranch: null,
+      pendingCommit: null,
       commitMessage: "",
       generatingCommitMessage: false,
       branchSearch: "",
@@ -92,6 +113,15 @@ export function createUiState() {
     workspaceOpenTargetsError: "",
     workspaceLastOpenTargetId: "",
     workspaceFileEditorWidth: 0,
+    browser: {
+      visible: false,
+      placement: "panel",
+      paneId: "",
+      input: "",
+      url: "",
+      loading: false,
+      error: "",
+    },
     timeBlock: {
       popoverVisible: false,
       taskDraft: "",
@@ -105,6 +135,8 @@ export function createUiState() {
     workspaceFileExplorer: new Map(),
     workspaceFileEditor: new Map(),
     workspaceSidebarCollapsed: false,
+    workspaceCompanionId: "sailor-tanuki",
+    workspaceCompanionState: "sleeping",
     workspaceRenameDraft: null,
     workspaceRenameShouldFocus: false,
     workspaceRenameSaving: false,
@@ -151,6 +183,9 @@ export function createRuntimeStore() {
     workspaceCodeEditors: new Map(),
     codeMirrorModulePromise: null,
     timeBlockTickTimer: 0,
+    workspaceCompanionTimer: 0,
+    browserBoundsFrame: 0,
+    browserBoundsSignature: "",
     appUpdateCheckInFlight: null,
     pendingRenderMask: 0,
     pendingRenderFrame: 0,

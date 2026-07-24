@@ -78,15 +78,16 @@ pub(crate) fn normalize_optional_posthog_project_api_key(value: Option<String>) 
 }
 
 pub(crate) fn normalize_telemetry_install_id(value: Option<String>) -> String {
-    value.and_then(|raw| {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    })
-    .unwrap_or_else(generate_install_id)
+    value
+        .and_then(|raw| {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+        .unwrap_or_else(generate_install_id)
 }
 
 pub(crate) fn build_settings_snapshot(runtime: &RuntimeState) -> TelemetrySettingsSnapshot {
@@ -129,7 +130,9 @@ pub(crate) fn queue_event(
 
 fn dispatch_config(runtime: &RuntimeState, event: &str) -> Option<TelemetryDispatchConfig> {
     if !runtime.settings.telemetry_enabled {
-        telemetry_debug(&format!("skipping event '{event}' because telemetry is disabled"));
+        telemetry_debug(&format!(
+            "skipping event '{event}' because telemetry is disabled"
+        ));
         return None;
     }
 
@@ -160,10 +163,22 @@ fn queue_event_with_config(
     mut properties: Map<String, Value>,
 ) {
     properties.insert("$lib".to_string(), Value::String("crewdock".to_string()));
-    properties.insert("$lib_version".to_string(), Value::String(APP_VERSION.to_string()));
-    properties.insert("app_version".to_string(), Value::String(APP_VERSION.to_string()));
-    properties.insert("os".to_string(), Value::String(std::env::consts::OS.to_string()));
-    properties.insert("arch".to_string(), Value::String(std::env::consts::ARCH.to_string()));
+    properties.insert(
+        "$lib_version".to_string(),
+        Value::String(APP_VERSION.to_string()),
+    );
+    properties.insert(
+        "app_version".to_string(),
+        Value::String(APP_VERSION.to_string()),
+    );
+    properties.insert(
+        "os".to_string(),
+        Value::String(std::env::consts::OS.to_string()),
+    );
+    properties.insert(
+        "arch".to_string(),
+        Value::String(std::env::consts::ARCH.to_string()),
+    );
     properties.insert(
         "distinct_id".to_string(),
         Value::String(config.install_id.clone()),

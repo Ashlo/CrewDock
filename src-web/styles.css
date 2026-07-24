@@ -1284,6 +1284,8 @@ button {
 }
 
 .workspace-main-shell {
+  --workspace-companion-home-left: 254px;
+  --workspace-companion-run: calc(100vw - 368px);
   position: relative;
   flex: 1 1 auto;
   min-width: 0;
@@ -1582,9 +1584,8 @@ button {
 }
 
 .workspace-companion {
-  --workspace-companion-run: calc(100vw - 368px);
   position: absolute;
-  left: 254px;
+  left: var(--workspace-companion-home-left);
   bottom: 1px;
   z-index: 3;
   width: 96px;
@@ -1594,7 +1595,10 @@ button {
   pointer-events: none;
   transform-origin: 50% 100%;
   will-change: transform;
-  animation: workspace-companion-roam 42s linear infinite;
+}
+
+.workspace-companion-region {
+  display: contents;
 }
 
 .workspace-companion svg {
@@ -1603,13 +1607,145 @@ button {
   overflow: visible;
 }
 
-.workspace-main-shell:has(.workspace-sidebar.is-collapsed) .workspace-companion {
+.workspace-main-shell:has(.workspace-sidebar.is-collapsed) {
+  --workspace-companion-home-left: 70px;
   --workspace-companion-run: calc(100vw - 184px);
-  left: 70px;
 }
 
-.workspace-main-shell:not(:has(.workspace-screen)) .workspace-companion {
+.workspace-main-shell:not(:has(.workspace-screen)) .workspace-companion,
+.workspace-main-shell:not(:has(.workspace-screen)) .workspace-companion-home,
+.workspace-main-shell:not(:has(.workspace-screen)) .workspace-companion-bowl,
+.workspace-main-shell:not(:has(.workspace-screen)) .workspace-companion-sleep-mark {
   display: none;
+}
+
+.workspace-companion.is-walking {
+  animation: workspace-companion-roam 26s linear infinite;
+}
+
+.workspace-companion.is-sleeping {
+  bottom: 0;
+  animation: workspace-companion-sleep 3.4s ease-in-out infinite alternate;
+}
+
+.workspace-companion.is-sleeping .workspace-companion-body,
+.workspace-companion.is-sleeping .workspace-companion-tail,
+.workspace-companion.is-sleeping .workspace-companion-arm,
+.workspace-companion.is-sleeping .workspace-companion-leg {
+  animation-play-state: paused;
+}
+
+.workspace-companion.is-sleeping .workspace-companion-eye {
+  transform-box: fill-box;
+  transform-origin: center;
+  transform: scaleY(0.16);
+}
+
+.workspace-companion.is-eating {
+  left: calc(var(--workspace-companion-home-left) + 82px);
+  bottom: 0;
+}
+
+.workspace-companion.is-eating .workspace-companion-body {
+  animation: workspace-companion-eat-body 680ms ease-in-out infinite alternate;
+}
+
+.workspace-companion.is-eating .workspace-companion-head {
+  transform-box: fill-box;
+  transform-origin: 42% 82%;
+  animation: workspace-companion-eat-head 680ms ease-in-out infinite alternate;
+}
+
+.workspace-companion.is-eating .workspace-companion-arm,
+.workspace-companion.is-eating .workspace-companion-leg {
+  animation-play-state: paused;
+}
+
+.workspace-companion-home {
+  position: absolute;
+  left: calc(var(--workspace-companion-home-left) - 3px);
+  bottom: 0;
+  z-index: 2;
+  width: 112px;
+  height: 58px;
+  opacity: 0.86;
+  pointer-events: none;
+}
+
+.workspace-companion-home svg,
+.workspace-companion-bowl svg {
+  width: 100%;
+  height: 100%;
+}
+
+.workspace-companion-bed-shadow,
+.workspace-companion-bowl-shadow {
+  fill: color-mix(in srgb, var(--text) 10%, transparent);
+}
+
+.workspace-companion-bed-frame {
+  fill: color-mix(in srgb, #765843 72%, var(--panel));
+  stroke: color-mix(in srgb, var(--border) 58%, #765843);
+  stroke-width: 1;
+}
+
+.workspace-companion-bed-cushion {
+  fill: color-mix(in srgb, #b56b55 54%, var(--panel));
+}
+
+.workspace-companion-bed-pillow {
+  fill: #ddd3c3;
+}
+
+.workspace-companion-bed-blanket {
+  fill: color-mix(in srgb, var(--accent) 34%, #465363);
+}
+
+.workspace-companion-bowl {
+  position: absolute;
+  left: calc(var(--workspace-companion-home-left) + 164px);
+  bottom: 1px;
+  z-index: 4;
+  width: 42px;
+  height: 28px;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(4px);
+  transition:
+    opacity 220ms ease,
+    transform 220ms ease;
+}
+
+.workspace-companion-region[data-companion-state="eating"] .workspace-companion-bowl {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.workspace-companion-bowl-rim {
+  fill: color-mix(in srgb, var(--accent) 26%, #465363);
+  stroke: color-mix(in srgb, var(--border) 74%, transparent);
+  stroke-width: 1;
+}
+
+.workspace-companion-bowl-food {
+  fill: #987257;
+}
+
+.workspace-companion-sleep-mark {
+  position: absolute;
+  left: calc(var(--workspace-companion-home-left) + 82px);
+  bottom: 48px;
+  z-index: 4;
+  color: color-mix(in srgb, var(--muted) 72%, var(--text));
+  font-family: var(--font-mono);
+  font-size: 0.64rem;
+  letter-spacing: 0.12em;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.workspace-companion-region[data-companion-state="sleeping"] .workspace-companion-sleep-mark {
+  animation: workspace-companion-dream 2.8s ease-in-out infinite;
 }
 
 .workspace-companion-shadow {
@@ -1633,7 +1769,8 @@ button {
 
 .workspace-companion-tail-tip,
 .workspace-companion-mask,
-.workspace-companion-eye {
+.workspace-companion-eye,
+.workspace-companion-nose {
   fill: #3f3a35;
 }
 
@@ -1699,6 +1836,109 @@ button {
   stroke-linejoin: round;
 }
 
+.workspace-companion.is-kissa-cat .workspace-companion-tail,
+.workspace-companion.is-kissa-cat .workspace-companion-face,
+.workspace-companion.is-kissa-cat .workspace-companion-arm,
+.workspace-companion.is-kissa-cat .workspace-companion-leg {
+  fill: #858b91;
+}
+
+.workspace-companion-cat-ear {
+  fill: #757b81;
+  stroke: #34383b;
+  stroke-width: 1.2;
+  stroke-linejoin: round;
+}
+
+.workspace-companion.is-kissa-cat .workspace-companion-muzzle {
+  fill: #d2c8b9;
+}
+
+.workspace-companion-cat-shirt {
+  fill: #c7bda9;
+}
+
+.workspace-companion-cat-apron {
+  fill: #654c3e;
+  stroke: #3f352e;
+  stroke-width: 0.9;
+  stroke-linejoin: round;
+}
+
+.workspace-companion-cat-pocket {
+  fill: #806451;
+  stroke: #b49472;
+  stroke-width: 0.8;
+}
+
+.workspace-companion-whisker {
+  fill: none;
+  stroke: #d2c8b9;
+  stroke-width: 1;
+  stroke-linecap: round;
+}
+
+.workspace-companion.is-moon-fox .workspace-companion-tail,
+.workspace-companion.is-moon-fox .workspace-companion-face,
+.workspace-companion.is-moon-fox .workspace-companion-arm,
+.workspace-companion.is-moon-fox .workspace-companion-leg {
+  fill: #bd7148;
+}
+
+.workspace-companion-fox-tail-tip,
+.workspace-companion-fox-cheek,
+.workspace-companion-fox-muzzle {
+  fill: #e4ceb0;
+}
+
+.workspace-companion-fox-ear {
+  fill: #bd7148;
+  stroke: #4b352d;
+  stroke-width: 1.2;
+  stroke-linejoin: round;
+}
+
+.workspace-companion-fox-coat {
+  fill: #384255;
+  stroke: #27303f;
+  stroke-width: 0.9;
+}
+
+.workspace-companion-fox-scarf,
+.workspace-companion-fox-scarf-tail {
+  fill: color-mix(in srgb, var(--accent) 42%, #53647f);
+}
+
+.workspace-companion.is-shih-tzu .workspace-companion-tail,
+.workspace-companion.is-shih-tzu .workspace-companion-face,
+.workspace-companion.is-shih-tzu .workspace-companion-arm,
+.workspace-companion.is-shih-tzu .workspace-companion-leg {
+  fill: #d7cdbd;
+}
+
+.workspace-companion-dog-tail,
+.workspace-companion-dog-coat {
+  fill: #e4dacb;
+  stroke: #8f8172;
+  stroke-width: 0.8;
+  stroke-linejoin: round;
+}
+
+.workspace-companion-dog-ear,
+.workspace-companion-dog-patch {
+  fill: #807267;
+}
+
+.workspace-companion-dog-tuft,
+.workspace-companion-dog-muzzle {
+  fill: #eee5d8;
+}
+
+.workspace-companion-dog-bandana,
+.workspace-companion-dog-bandana-tail {
+  fill: #a7594d;
+}
+
 .workspace-companion-smile {
   fill: none;
   stroke: #3f3a35;
@@ -1722,6 +1962,27 @@ button {
   50% { transform: translate3d(var(--workspace-companion-run), 0, 0) scaleX(-1); }
   98% { transform: translate3d(0, 0, 0) scaleX(-1); }
   100% { transform: translate3d(0, 0, 0) scaleX(1); }
+}
+
+@keyframes workspace-companion-sleep {
+  from { transform: translate3d(3px, 10px, 0) rotate(7deg) scale(0.8); }
+  to { transform: translate3d(4px, 11px, 0) rotate(8deg) scale(0.79); }
+}
+
+@keyframes workspace-companion-eat-body {
+  from { transform: translateY(1px) rotate(-1deg); }
+  to { transform: translateY(3px) rotate(1deg); }
+}
+
+@keyframes workspace-companion-eat-head {
+  from { transform: rotate(4deg) translateY(1px); }
+  to { transform: rotate(17deg) translateY(4px); }
+}
+
+@keyframes workspace-companion-dream {
+  0%, 100% { opacity: 0; transform: translate3d(0, 4px, 0); }
+  38%, 68% { opacity: 0.72; }
+  72% { transform: translate3d(8px, -5px, 0); }
 }
 
 @keyframes workspace-companion-shadow {
@@ -1860,8 +2121,14 @@ button {
   }
 
   .workspace-companion,
-  .workspace-companion * {
+  .workspace-companion *,
+  .workspace-companion-sleep-mark,
+  .workspace-browser-action.is-loading svg {
     animation: none !important;
+  }
+
+  .workspace-companion-bowl {
+    transition-duration: 0.01ms !important;
   }
 }
 
@@ -4320,6 +4587,117 @@ button {
   background: rgba(255, 255, 255, 0.02);
 }
 
+.settings-companion-picker {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(118px, 1fr));
+  gap: 4px;
+}
+
+.settings-companion-option {
+  position: relative;
+  min-width: 0;
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  padding: 7px 6px 10px;
+  border: 0;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--surface-soft-text);
+  text-align: center;
+  transition:
+    background 150ms ease,
+    color 150ms ease;
+}
+
+.settings-companion-option::after {
+  content: "";
+  position: absolute;
+  right: 18px;
+  bottom: 3px;
+  left: 18px;
+  height: 2px;
+  border-radius: 999px;
+  background: var(--accent);
+  opacity: 0;
+  transform: scaleX(0.45);
+  transition:
+    opacity 150ms ease,
+    transform 180ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.settings-companion-option:hover {
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+  color: var(--text);
+}
+
+.settings-companion-option.is-active {
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  color: var(--text);
+}
+
+.settings-companion-option.is-active::after {
+  opacity: 0.72;
+  transform: scaleX(1);
+}
+
+.settings-companion-option strong {
+  overflow: hidden;
+  max-width: 100%;
+  color: inherit;
+  font-size: 0.74rem;
+  font-weight: 680;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-companion-option > span:last-child {
+  min-height: 2.4em;
+  color: var(--surface-soft-text);
+  font-size: 0.64rem;
+  line-height: 1.2;
+}
+
+.settings-companion-preview {
+  height: 58px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.settings-companion-preview .workspace-companion {
+  position: static;
+  width: 78px;
+  height: 55px;
+  opacity: 1;
+  animation: none;
+  transform: none;
+}
+
+.settings-companion-option:not(.is-active) .workspace-companion * {
+  animation-play-state: paused;
+}
+
+.settings-companion-off {
+  position: relative;
+  width: 42px;
+  height: 42px;
+  border: 1px solid color-mix(in srgb, var(--text) 14%, transparent);
+  border-radius: 50%;
+}
+
+.settings-companion-off::after {
+  content: "";
+  position: absolute;
+  top: 19px;
+  left: 8px;
+  width: 25px;
+  height: 2px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 34%, transparent);
+  transform: rotate(-38deg);
+}
+
 .settings-ai-head {
   display: flex;
   align-items: flex-start;
@@ -5460,7 +5838,7 @@ button {
   border-left: 1px solid color-mix(in srgb, var(--overlay-panel-border) 90%, transparent);
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.018), transparent 18%),
-    color-mix(in srgb, var(--overlay-panel-bg) 96%, black 4%);
+    var(--pane-bg);
   box-shadow:
     -18px 0 42px rgba(0, 0, 0, 0.24),
     inset 0 1px 0 rgba(255, 255, 255, 0.025);
@@ -5595,10 +5973,11 @@ button {
 
 .workspace-git-panel-body {
   display: grid;
-  align-content: start;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  align-content: stretch;
   gap: 10px;
-  padding: 10px 10px 12px;
-  overflow: auto;
+  padding: 10px 12px 12px;
+  overflow: hidden;
   scrollbar-width: thin;
   scrollbar-color: var(--scrollbar-thumb) transparent;
 }
@@ -5606,8 +5985,14 @@ button {
 .workspace-scm-shell {
   min-height: 0;
   display: grid;
-  align-content: start;
+  align-content: stretch;
   gap: 10px;
+}
+
+.workspace-scm-content {
+  min-height: 0;
+  display: grid;
+  overflow: hidden;
 }
 
 .workspace-scm-toolbar {
@@ -5760,20 +6145,24 @@ button {
 
 .workspace-scm-main {
   min-height: 0;
+  height: 100%;
+  overflow: hidden;
 }
 
 .workspace-scm-main-changes,
 .workspace-scm-main-graph {
   display: grid;
-  grid-template-columns: 1fr;
-  gap: 10px;
+  grid-template-columns: minmax(300px, 0.94fr) minmax(0, 1.06fr);
+  gap: 16px;
   min-height: 0;
 }
 
 .workspace-scm-main-branches {
   display: grid;
-  gap: 10px;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 14px;
   min-height: 0;
+  overflow: hidden;
   padding: 0;
   border: 0;
   background: none;
@@ -5797,14 +6186,21 @@ button {
 }
 
 .workspace-scm-column-list {
-  overflow: auto;
-  padding-right: 4px;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 12px;
+  overflow: hidden;
+  padding-right: 0;
+}
+
+.workspace-scm-column-list-graph {
+  grid-template-rows: minmax(0, 1fr) auto;
 }
 
 .workspace-scm-column-detail {
   position: relative;
-  padding-top: 10px;
-  border-top: 1px solid rgba(255, 255, 255, 0.045);
+  overflow: auto;
+  padding: 0 0 0 4px;
+  border-top: 0;
 }
 
 .workspace-scm-commit {
@@ -6217,12 +6613,12 @@ button {
 .workspace-scm-commit-body {
   margin: 0;
   overflow: auto;
-  border-radius: 9px;
+  border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.055);
-  background: rgba(0, 0, 0, 0.16);
+  background: rgba(0, 0, 0, 0.2);
   color: color-mix(in srgb, var(--text) 88%, white 12%);
   font-family: "SF Mono", "Menlo", monospace;
-  font-size: 0.55rem;
+  font-size: 0.61rem;
   line-height: 1.58;
   white-space: pre-wrap;
   word-break: break-word;
@@ -6232,7 +6628,7 @@ button {
 .workspace-scm-task-output {
   padding: 10px 11px;
   min-height: 220px;
-  max-height: 320px;
+  max-height: none;
 }
 
 .workspace-scm-commit-body {
@@ -6394,8 +6790,8 @@ button {
 }
 
 .workspace-git-panel-header {
-  gap: 16px;
-  padding: 18px 18px 14px;
+  gap: 12px;
+  padding: 12px 14px 10px;
 }
 
 .workspace-git-panel-title-row {
@@ -6403,17 +6799,17 @@ button {
 }
 
 .workspace-git-panel h2 {
-  font-size: 1.08rem;
+  font-size: 0.92rem;
 }
 
 .workspace-git-panel-state {
-  min-height: 22px;
-  padding: 0 8px;
-  font-size: 0.62rem;
+  min-height: 20px;
+  padding: 0 7px;
+  font-size: 0.58rem;
 }
 
 .workspace-git-panel-copy {
-  font-size: 0.66rem;
+  font-size: 0.6rem;
 }
 
 .workspace-git-panel-actions {
@@ -6421,34 +6817,14 @@ button {
 }
 
 .workspace-git-panel-button {
-  width: 30px;
-  height: 30px;
-}
-
-.workspace-git-panel-body {
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
-  gap: 14px;
-  padding: 14px 16px 16px;
-  overflow: hidden;
-}
-
-.workspace-scm-shell {
-  min-height: 0;
-  align-content: stretch;
-  gap: 14px;
-}
-
-.workspace-scm-content {
-  min-height: 0;
-  overflow: hidden;
-  display: grid;
+  width: 28px;
+  height: 28px;
 }
 
 .workspace-scm-toolbar {
   display: grid;
-  gap: 14px;
-  padding: 0 0 12px;
+  gap: 8px;
+  padding: 0 0 8px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 }
 
@@ -6463,7 +6839,7 @@ button {
 .workspace-scm-toolbar-hero {
   min-width: 0;
   display: grid;
-  gap: 8px;
+  gap: 5px;
 }
 
 .workspace-scm-toolbar-label {
@@ -6483,11 +6859,11 @@ button {
 
 .workspace-scm-toolbar-branch-chip,
 .workspace-scm-toolbar-state {
-  min-height: 28px;
+  min-height: 24px;
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 0 11px;
+  padding: 0 9px;
   border-radius: 999px;
   border: 1px solid rgba(255, 255, 255, 0.07);
   background: rgba(255, 255, 255, 0.03);
@@ -6520,17 +6896,27 @@ button {
 .workspace-scm-toolbar-stats {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
+  gap: 0;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
 }
 
 .workspace-scm-toolbar-stat {
   min-width: 0;
   display: grid;
-  gap: 4px;
-  padding: 11px 12px;
-  border-radius: 14px;
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  background: rgba(0, 0, 0, 0.12);
+  gap: 2px;
+  padding: 0 10px;
+  border-right: 1px solid rgba(255, 255, 255, 0.05);
+  background: transparent;
+}
+
+.workspace-scm-toolbar-stat:first-child {
+  padding-left: 0;
+}
+
+.workspace-scm-toolbar-stat:last-child {
+  padding-right: 0;
+  border-right: 0;
 }
 
 .workspace-scm-toolbar-stat-label {
@@ -6545,18 +6931,9 @@ button {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 0.8rem;
+  font-size: 0.72rem;
   font-weight: 600;
   color: var(--text);
-}
-
-.workspace-scm-toolbar-stat-copy {
-  max-width: 100%;
-  color: var(--surface-soft-text);
-  font-size: 0.58rem;
-  line-height: 1.4;
-  white-space: normal;
-  overflow-wrap: anywhere;
 }
 
 .workspace-scm-toolbar-actions {
@@ -6579,7 +6956,7 @@ button {
 }
 
 .workspace-scm-tabs {
-  padding: 0 0 10px;
+  padding: 0 0 7px;
 }
 
 .workspace-scm-tab {
@@ -6589,46 +6966,10 @@ button {
   font-size: 0.64rem;
 }
 
-.workspace-scm-main {
-  min-height: 0;
-  height: 100%;
-  overflow: hidden;
-}
-
-.workspace-scm-main-changes,
-.workspace-scm-main-graph {
-  grid-template-columns: minmax(300px, 0.94fr) minmax(0, 1.06fr);
-  gap: 16px;
-}
-
-.workspace-scm-main-branches {
-  grid-template-rows: auto minmax(0, 1fr);
-  gap: 14px;
-  overflow: hidden;
-}
-
-.workspace-scm-column-list {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  gap: 12px;
-  overflow: hidden;
-  padding-right: 0;
-}
-
-.workspace-scm-column-list-graph {
-  grid-template-rows: minmax(0, 1fr) auto;
-}
-
-.workspace-scm-column-detail {
-  overflow: auto;
-  padding: 0 0 0 4px;
-  border-top: 0;
-}
-
 .workspace-scm-commit {
-  gap: 10px;
-  padding: 14px;
-  border-radius: 16px;
+  gap: 8px;
+  padding: 10px;
+  border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.06);
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 38%),
@@ -6650,9 +6991,9 @@ button {
 }
 
 .workspace-scm-commit-input {
-  min-height: 90px;
-  padding: 11px 12px;
-  border-radius: 12px;
+  min-height: 64px;
+  padding: 9px 10px;
+  border-radius: 10px;
   font-size: 0.67rem;
 }
 
@@ -6683,9 +7024,9 @@ button {
 }
 
 .workspace-scm-section {
-  gap: 8px;
-  padding: 12px;
-  border-radius: 14px;
+  gap: 6px;
+  padding: 10px;
+  border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.045);
   background: rgba(255, 255, 255, 0.02);
 }
@@ -6707,9 +7048,9 @@ button {
 .workspace-scm-file-row,
 .workspace-scm-branch-row,
 .workspace-scm-graph-row {
-  gap: 12px;
-  padding: 10px 10px;
-  border-radius: 12px;
+  gap: 10px;
+  padding: 7px 8px;
+  border-radius: 10px;
 }
 
 .workspace-scm-graph-row {
@@ -6758,6 +7099,11 @@ button {
 .workspace-scm-row-primary:hover {
   border-color: rgba(255, 255, 255, 0.14);
   background: rgba(255, 255, 255, 0.06);
+}
+
+.workspace-scm-row-primary:disabled {
+  opacity: 0.42;
+  cursor: default;
 }
 
 .workspace-scm-row-menu-shell {
@@ -6828,8 +7174,8 @@ button {
 
 .workspace-scm-detail-shell,
 .workspace-scm-branches-head {
-  padding: 14px;
-  border-radius: 16px;
+  padding: 10px;
+  border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.06);
   background:
     linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 42%),
@@ -6868,20 +7214,6 @@ button {
   border-radius: 8px;
 }
 
-.workspace-scm-diff,
-.workspace-scm-task-output,
-.workspace-scm-commit-body {
-  border-radius: 12px;
-  font-size: 0.61rem;
-  background: rgba(0, 0, 0, 0.2);
-}
-
-.workspace-scm-diff,
-.workspace-scm-task-output {
-  min-height: 280px;
-  max-height: none;
-}
-
 .workspace-scm-branch-summary strong {
   font-size: 0.86rem;
 }
@@ -6906,8 +7238,8 @@ button {
 
 .workspace-scm-task-tray {
   display: grid;
-  gap: 10px;
-  padding-top: 12px;
+  gap: 8px;
+  padding-top: 8px;
   border-top: 1px solid rgba(255, 255, 255, 0.05);
 }
 
@@ -6916,9 +7248,9 @@ button {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: flex-start;
-  gap: 12px;
-  padding: 12px 14px;
-  border-radius: 14px;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 12px;
   border: 1px solid rgba(255, 255, 255, 0.06);
   background: rgba(255, 255, 255, 0.025);
   color: var(--text);
@@ -7006,7 +7338,7 @@ button {
 
 .workspace-scm-task-tray-body {
   display: grid;
-  gap: 10px;
+  gap: 8px;
 }
 
 .workspace-scm-task-recovery {
@@ -7039,8 +7371,8 @@ button {
 }
 
 .workspace-scm-task-tray-output {
-  min-height: 110px;
-  max-height: 220px;
+  min-height: 90px;
+  max-height: 160px;
 }
 
 .workspace-scm-task-tray.is-failed .workspace-scm-task-tray-toggle {
@@ -8252,6 +8584,210 @@ button {
   background: color-mix(in srgb, var(--surface-pill-bg) 72%, transparent);
 }
 
+.workspace-browser-shell {
+  position: relative;
+  display: flex;
+  flex: 0 0 0;
+  width: 0;
+  min-width: 0;
+  min-height: 0;
+  opacity: 0;
+  overflow: hidden;
+  pointer-events: none;
+  transition:
+    width 220ms cubic-bezier(0.16, 1, 0.3, 1),
+    flex-basis 220ms cubic-bezier(0.16, 1, 0.3, 1),
+    opacity 140ms ease;
+}
+
+.workspace-browser-shell.is-visible {
+  width: clamp(480px, 48vw, 900px);
+  flex-basis: clamp(480px, 48vw, 900px);
+  opacity: 1;
+  pointer-events: auto;
+  border-left: 1px solid var(--chrome-divider);
+}
+
+.terminal-pane-browser {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  background: var(--bg);
+}
+
+.terminal-pane.has-browser .terminal-host,
+.terminal-pane.has-browser .terminal-pane-overlay {
+  visibility: hidden;
+}
+
+.workspace-browser-panel {
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.workspace-browser-toolbar {
+  flex: 0 0 42px;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--chrome-divider);
+  background: color-mix(in srgb, var(--panel) 82%, var(--bg));
+}
+
+.workspace-browser-navigation {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+}
+
+.workspace-browser-action {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--muted);
+}
+
+.workspace-browser-action:hover:not(:disabled) {
+  background: var(--strip-control-surface-hover);
+  color: var(--text);
+}
+
+.workspace-browser-action:disabled {
+  opacity: 0.34;
+  cursor: default;
+}
+
+.workspace-browser-action svg {
+  width: 15px;
+  height: 15px;
+}
+
+.workspace-browser-action.is-back svg {
+  transform: rotate(180deg);
+}
+
+.workspace-browser-action.is-loading svg {
+  animation: workspace-browser-spin 900ms linear infinite;
+}
+
+.workspace-browser-address-form {
+  min-width: 0;
+  flex: 1;
+  height: 29px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--panel-strong) 72%, transparent);
+  transition:
+    border-color 140ms ease,
+    background 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.workspace-browser-address-form:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 64%, var(--border));
+  background: var(--panel-strong);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 11%, transparent);
+}
+
+.workspace-browser-address-icon {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  color: color-mix(in srgb, var(--muted) 82%, var(--accent));
+}
+
+.workspace-browser-address-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+.workspace-browser-address {
+  min-width: 0;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.workspace-browser-address::placeholder {
+  color: color-mix(in srgb, var(--muted) 72%, transparent);
+}
+
+.workspace-browser-viewport {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.workspace-browser-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 7px;
+  padding: 28px;
+  color: var(--muted);
+  text-align: center;
+}
+
+.workspace-browser-empty strong {
+  color: var(--text);
+  font-size: 0.86rem;
+}
+
+.workspace-browser-empty span:last-child {
+  max-width: 34ch;
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+
+.workspace-browser-empty.is-error strong {
+  color: var(--danger);
+}
+
+.workspace-browser-empty-icon {
+  width: 28px;
+  height: 28px;
+  margin-bottom: 3px;
+  color: color-mix(in srgb, var(--accent) 72%, var(--muted));
+}
+
+.workspace-browser-empty-icon svg {
+  width: 100%;
+  height: 100%;
+}
+
+@keyframes workspace-browser-spin {
+  to { transform: rotate(360deg); }
+}
+
 .workspace-file-editor-shell {
   display: flex;
   flex: 0 0 0;
@@ -9399,7 +9935,7 @@ body.is-resizing-workspace-file-editor * {
   }
 
   .workspace-git-panel {
-    width: min(820px, 100%);
+    width: min(var(--scm-sidebar-width), 100%);
   }
 
   .workspace-activity-rail {
@@ -9449,6 +9985,8 @@ body.is-resizing-workspace-file-editor * {
   .workspace-scm-main-changes,
   .workspace-scm-main-graph {
     grid-template-columns: 1fr;
+    height: auto;
+    overflow: visible;
   }
 
   .workspace-git-panel-body {
@@ -9470,7 +10008,7 @@ body.is-resizing-workspace-file-editor * {
   }
 
   .workspace-scm-toolbar-stats {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .workspace-scm-branch-groups {
@@ -9568,6 +10106,9 @@ body.is-resizing-workspace-file-editor * {
   .workspace-sidebar .workspace-tab-git,
   .workspace-sidebar .workspace-tab-draft,
   .workspace-companion,
+  .workspace-companion-home,
+  .workspace-companion-bowl,
+  .workspace-companion-sleep-mark,
   .workspace-sidebar .workspace-sidebar-new span {
     display: none;
   }
@@ -9774,6 +10315,21 @@ body.is-resizing-workspace-file-editor * {
 
   .workspace-scm-toolbar-stats {
     grid-template-columns: 1fr;
+  }
+
+  .workspace-scm-toolbar-stat {
+    padding: 6px 0;
+    border-right: 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  }
+
+  .workspace-scm-toolbar-stat:first-child {
+    padding-top: 0;
+  }
+
+  .workspace-scm-toolbar-stat:last-child {
+    padding-bottom: 0;
+    border-bottom: 0;
   }
 
   .workspace-scm-task-tray-meta {

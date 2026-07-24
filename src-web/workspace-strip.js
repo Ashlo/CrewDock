@@ -127,46 +127,238 @@ export function renderWorkspaceSidebar({
   `;
 }
 
-export function renderWorkspaceCompanion() {
+export const WORKSPACE_COMPANIONS = Object.freeze([
+  {
+    id: "sailor-tanuki",
+    label: "Sailor Tanuki",
+    copy: "The original CrewDock deckhand.",
+  },
+  {
+    id: "kissa-cat",
+    label: "Kissa Cat",
+    copy: "A quiet café cat in a work apron.",
+  },
+  {
+    id: "moon-fox",
+    label: "Moon Fox",
+    copy: "A night fox with a soft indigo scarf.",
+  },
+  {
+    id: "shih-tzu",
+    label: "Shih Tzu",
+    copy: "A fluffy little dock dog with a bandana.",
+  },
+  {
+    id: "off",
+    label: "Off",
+    copy: "Keep the terminal stage completely still.",
+  },
+]);
+
+export function normalizeWorkspaceCompanionId(value) {
+  return WORKSPACE_COMPANIONS.some((companion) => companion.id === value)
+    ? value
+    : "sailor-tanuki";
+}
+
+export function getNextWorkspaceCompanionState(currentState, randomValue = Math.random()) {
+  const value = Math.max(0, Math.min(0.999, Number(randomValue) || 0));
+  if (currentState === "walking") {
+    return value < 0.65 ? "sleeping" : "eating";
+  }
+  if (currentState === "eating") {
+    return value < 0.6 ? "sleeping" : "walking";
+  }
+  return value < 0.45 ? "eating" : "walking";
+}
+
+export function renderWorkspaceCompanionScene(companionId = "sailor-tanuki") {
+  const normalizedId = normalizeWorkspaceCompanionId(companionId);
+  if (normalizedId === "off") {
+    return "";
+  }
+
   return `
-    <div class="workspace-companion" aria-hidden="true">
-      <svg viewBox="0 0 96 68" role="presentation">
-        <ellipse class="workspace-companion-shadow" cx="48" cy="62" rx="26" ry="3"></ellipse>
-        <g class="workspace-companion-tail">
-          <path d="M67 47c15-9 21 1 14 10-5 7-16 4-20-1 8 1 13-2 12-5-1-3-4-3-8-1z"></path>
-          <path class="workspace-companion-tail-tip" d="M78 48c7 2 7 8 1 11-3 1-7 0-10-2 7 0 11-3 9-9z"></path>
-        </g>
-        <g class="workspace-companion-body">
-          <path class="workspace-companion-leg is-left" d="M39 52h8v10h-9c-2 0-3-2-2-4z"></path>
-          <path class="workspace-companion-leg is-right" d="M51 52h8l3 6c1 2 0 4-2 4h-9z"></path>
-          <path class="workspace-companion-jacket" d="M34 36c3-6 8-9 14-9s11 3 14 9l3 21H31z"></path>
-          <path class="workspace-companion-collar" d="m36 33 12 9 12-9-4-4-8 7-8-7z"></path>
-          <path class="workspace-companion-neckerchief" d="m45 38 3 4 3-4 2 12-5 5-5-5z"></path>
-          <g class="workspace-companion-arm is-left">
-            <path d="M36 38c-5 1-9 5-10 10-1 3 4 5 6 2l7-8z"></path>
-            <circle cx="27" cy="50" r="3"></circle>
-          </g>
-          <g class="workspace-companion-arm is-right">
-            <path d="M60 38c5 1 9 5 10 10 1 3-4 5-6 2l-7-8z"></path>
-            <circle cx="69" cy="50" r="3"></circle>
-          </g>
-          <g class="workspace-companion-head">
-            <path class="workspace-companion-ear" d="M34 17 37 5l11 10z"></path>
-            <path class="workspace-companion-ear" d="m62 17-3-12-11 10z"></path>
-            <circle class="workspace-companion-face" cx="48" cy="23" r="17"></circle>
-            <path class="workspace-companion-cap" d="M33 12c4-7 25-7 30 0l-3 5c-8-3-16-3-24 0z"></path>
-            <path class="workspace-companion-cap-band" d="M35 14c8-3 18-3 26 0l-1 4c-8-3-16-3-24 0z"></path>
-            <path class="workspace-companion-cap-brim" d="M32 17c10-3 22-3 32 0-8 4-24 4-32 0z"></path>
-            <path class="workspace-companion-mask" d="M34 20c4-6 10-7 14-3-2 8-8 11-14 8z"></path>
-            <path class="workspace-companion-mask" d="M62 20c-4-6-10-7-14-3 2 8 8 11 14 8z"></path>
-            <ellipse class="workspace-companion-muzzle" cx="48" cy="29" rx="8" ry="6"></ellipse>
-            <circle class="workspace-companion-eye" cx="41" cy="21" r="1.6"></circle>
-            <circle class="workspace-companion-eye" cx="55" cy="21" r="1.6"></circle>
-            <path class="workspace-companion-smile" d="M44 30c2 3 6 3 8 0"></path>
-          </g>
-        </g>
+    <div class="workspace-companion-home" aria-hidden="true">
+      <svg viewBox="0 0 112 58" role="presentation">
+        <ellipse class="workspace-companion-bed-shadow" cx="56" cy="53" rx="46" ry="3"></ellipse>
+        <path class="workspace-companion-bed-frame" d="M9 38c0-7 6-12 13-12h70c7 0 12 5 12 12v13H9z"></path>
+        <path class="workspace-companion-bed-cushion" d="M14 35c4-8 12-11 22-10h51c7 0 12 4 13 10z"></path>
+        <path class="workspace-companion-bed-pillow" d="M18 29c2-8 15-10 24-3l-2 10H17z"></path>
+        <path class="workspace-companion-bed-blanket" d="M42 28h45c8 0 13 5 13 12H39z"></path>
       </svg>
     </div>
+    <div class="workspace-companion-bowl" aria-hidden="true">
+      <svg viewBox="0 0 42 28" role="presentation">
+        <ellipse class="workspace-companion-bowl-shadow" cx="21" cy="25" rx="17" ry="2"></ellipse>
+        <path class="workspace-companion-bowl-rim" d="M4 8h34l-4 14H8z"></path>
+        <ellipse class="workspace-companion-bowl-food" cx="21" cy="8" rx="15" ry="5"></ellipse>
+      </svg>
+    </div>
+    <span class="workspace-companion-sleep-mark" aria-hidden="true">z z</span>
+    ${renderWorkspaceCompanion(normalizedId)}
+  `;
+}
+
+export function renderWorkspaceCompanion(companionId = "sailor-tanuki") {
+  const normalizedId = normalizeWorkspaceCompanionId(companionId);
+  if (normalizedId === "off") {
+    return "";
+  }
+
+  const svg = normalizedId === "kissa-cat"
+    ? renderKissaCat()
+    : normalizedId === "moon-fox"
+      ? renderMoonFox()
+      : normalizedId === "shih-tzu"
+        ? renderShihTzu()
+        : renderSailorTanuki();
+
+  return `
+    <div
+      class="workspace-companion is-${normalizedId}"
+      data-workspace-companion-id="${normalizedId}"
+      aria-hidden="true"
+    >
+      ${svg}
+    </div>
+  `;
+}
+
+function renderSailorTanuki() {
+  return `
+    <svg viewBox="0 0 96 68" role="presentation">
+      <ellipse class="workspace-companion-shadow" cx="48" cy="62" rx="26" ry="3"></ellipse>
+      <g class="workspace-companion-tail">
+        <path d="M31 47c-15-9-21 1-14 10 5 7 16 4 20-1-8 1-13-2-12-5 1-3 4-3 8-1z"></path>
+        <path class="workspace-companion-tail-tip" d="M20 48c-7 2-7 8-1 11 3 1 7 0 10-2-7 0-11-3-9-9z"></path>
+      </g>
+      <g class="workspace-companion-body">
+        ${renderCompanionLegs()}
+        <path class="workspace-companion-jacket" d="M34 36c3-6 8-9 14-9s11 3 14 9l3 21H31z"></path>
+        <path class="workspace-companion-collar" d="m36 33 12 9 12-9-4-4-8 7-8-7z"></path>
+        <path class="workspace-companion-neckerchief" d="m45 38 3 4 3-4 2 12-5 5-5-5z"></path>
+        ${renderCompanionArms()}
+        <g class="workspace-companion-head">
+          <path class="workspace-companion-ear" d="M34 17 37 5l11 10z"></path>
+          <path class="workspace-companion-ear" d="m62 17-3-12-11 10z"></path>
+          <circle class="workspace-companion-face" cx="49" cy="23" r="17"></circle>
+          <path class="workspace-companion-cap" d="M34 12c4-7 25-7 30 0l-3 5c-8-3-16-3-24 0z"></path>
+          <path class="workspace-companion-cap-band" d="M36 14c8-3 18-3 26 0l-1 4c-8-3-16-3-24 0z"></path>
+          <path class="workspace-companion-cap-brim" d="M33 17c10-3 22-3 32 0-8 4-24 4-32 0z"></path>
+          <path class="workspace-companion-mask" d="M47 17c5-5 12-2 15 4-1 5-5 8-10 7-5-1-8-6-5-11z"></path>
+          <ellipse class="workspace-companion-muzzle" cx="62" cy="28" rx="9" ry="6"></ellipse>
+          ${renderCompanionProfileFace()}
+        </g>
+      </g>
+    </svg>
+  `;
+}
+
+function renderKissaCat() {
+  return `
+    <svg viewBox="0 0 96 68" role="presentation">
+      <ellipse class="workspace-companion-shadow" cx="48" cy="62" rx="25" ry="3"></ellipse>
+      <g class="workspace-companion-tail">
+        <path class="workspace-companion-cat-tail" d="M34 52c-16 8-22-2-16-9 4-5 10-3 9 2-1 3-4 3-6 2 2 5 9 6 15 1z"></path>
+      </g>
+      <g class="workspace-companion-body">
+        ${renderCompanionLegs()}
+        <path class="workspace-companion-cat-shirt" d="M35 36c3-6 8-9 14-9s11 3 14 9l2 21H32z"></path>
+        <path class="workspace-companion-cat-apron" d="M39 35h19l4 22H35z"></path>
+        <path class="workspace-companion-cat-pocket" d="M42 47h13v7H42z"></path>
+        ${renderCompanionArms()}
+        <g class="workspace-companion-head">
+          <path class="workspace-companion-cat-ear" d="m34 17 2-14 12 11z"></path>
+          <path class="workspace-companion-cat-ear" d="m62 17-3-14-11 11z"></path>
+          <circle class="workspace-companion-face" cx="49" cy="23" r="17"></circle>
+          <ellipse class="workspace-companion-muzzle" cx="62" cy="28" rx="9" ry="6"></ellipse>
+          ${renderCompanionProfileFace()}
+          <path class="workspace-companion-whisker" d="m63 27 11-2m-11 5 12 1"></path>
+        </g>
+      </g>
+    </svg>
+  `;
+}
+
+function renderMoonFox() {
+  return `
+    <svg viewBox="0 0 96 68" role="presentation">
+      <ellipse class="workspace-companion-shadow" cx="48" cy="62" rx="27" ry="3"></ellipse>
+      <g class="workspace-companion-tail">
+        <path class="workspace-companion-fox-tail" d="M36 51C20 37 5 43 11 55c5 10 18 7 28 1-9 1-15-2-16-6 4 1 8 3 13 1z"></path>
+        <path class="workspace-companion-fox-tail-tip" d="M12 53c4 8 13 7 21 4-7 0-11-3-12-7-3 0-6 1-9 3z"></path>
+      </g>
+      <g class="workspace-companion-body">
+        ${renderCompanionLegs()}
+        <path class="workspace-companion-fox-coat" d="M35 36c3-6 8-9 14-9s11 3 14 9l2 21H32z"></path>
+        <path class="workspace-companion-fox-scarf" d="M35 32c8 5 18 5 27 0l-2 7c-8 3-15 3-23 0z"></path>
+        <path class="workspace-companion-fox-scarf-tail" d="m39 37 8 3-6 15-5-3z"></path>
+        ${renderCompanionArms()}
+        <g class="workspace-companion-head">
+          <path class="workspace-companion-fox-ear" d="m33 18 5-16 11 13z"></path>
+          <path class="workspace-companion-fox-ear" d="m60 16-1-14-10 13z"></path>
+          <circle class="workspace-companion-face" cx="49" cy="23" r="17"></circle>
+          <path class="workspace-companion-fox-cheek" d="M38 30c7 5 17 5 23-1l-3 8c-8 5-16 3-20-7z"></path>
+          <path class="workspace-companion-fox-muzzle" d="M55 24c8-3 15 0 18 4-4 6-12 7-18 3z"></path>
+          ${renderCompanionProfileFace()}
+        </g>
+      </g>
+    </svg>
+  `;
+}
+
+function renderShihTzu() {
+  return `
+    <svg viewBox="0 0 96 68" role="presentation">
+      <ellipse class="workspace-companion-shadow" cx="48" cy="62" rx="27" ry="3"></ellipse>
+      <g class="workspace-companion-tail">
+        <path class="workspace-companion-dog-tail" d="M36 51c-13 2-20-5-16-12 3-5 10-4 11 1 1 4-3 6-6 4 2 5 7 7 13 5z"></path>
+      </g>
+      <g class="workspace-companion-body">
+        ${renderCompanionLegs()}
+        <path class="workspace-companion-dog-coat" d="M33 37c3-8 9-11 16-10 8 0 14 4 16 12l1 18H31z"></path>
+        <path class="workspace-companion-dog-bandana" d="M36 32c8 5 18 5 26 0l-2 8c-8 3-15 3-22 0z"></path>
+        <path class="workspace-companion-dog-bandana-tail" d="m42 38 7 3-5 13-5-3z"></path>
+        ${renderCompanionArms()}
+        <g class="workspace-companion-head">
+          <path class="workspace-companion-dog-ear" d="M34 14c-5 5-5 17 2 22l9-17z"></path>
+          <circle class="workspace-companion-face" cx="49" cy="23" r="17"></circle>
+          <path class="workspace-companion-dog-patch" d="M45 8c8-4 17 2 18 10-3-3-8-4-13-1z"></path>
+          <path class="workspace-companion-dog-tuft" d="M38 10c3-8 7-9 10-3 3-7 8-5 8 2-5-2-12-1-18 1z"></path>
+          <ellipse class="workspace-companion-dog-muzzle" cx="62" cy="28" rx="10" ry="7"></ellipse>
+          ${renderCompanionProfileFace()}
+        </g>
+      </g>
+    </svg>
+  `;
+}
+
+function renderCompanionLegs() {
+  return `
+    <path class="workspace-companion-leg is-left" d="M39 52h8v10h-9c-2 0-3-2-2-4z"></path>
+    <path class="workspace-companion-leg is-right" d="M51 52h8l3 6c1 2 0 4-2 4h-9z"></path>
+  `;
+}
+
+function renderCompanionArms() {
+  return `
+    <g class="workspace-companion-arm is-left">
+      <path d="M36 38c-5 1-9 5-10 10-1 3 4 5 6 2l7-8z"></path>
+      <circle cx="27" cy="50" r="3"></circle>
+    </g>
+    <g class="workspace-companion-arm is-right">
+      <path d="M60 38c5 1 9 5 10 10 1 3-4 5-6 2l-7-8z"></path>
+      <circle cx="69" cy="50" r="3"></circle>
+    </g>
+  `;
+}
+
+function renderCompanionProfileFace() {
+  return `
+    <circle class="workspace-companion-eye" cx="55" cy="20" r="1.7"></circle>
+    <circle class="workspace-companion-nose" cx="69" cy="27" r="2.4"></circle>
+    <path class="workspace-companion-smile" d="M61 31c3 2 6 1 8-1"></path>
   `;
 }
 

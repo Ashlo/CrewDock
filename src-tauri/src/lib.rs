@@ -13,11 +13,11 @@ use std::{
     env,
     ffi::{OsStr, OsString},
     fs,
-    io::{BufRead, BufReader, Write},
+    io::{self, BufRead, BufReader, Write},
     path::{Path, PathBuf},
-    process::Command as ProcessCommand,
+    process::{Command as ProcessCommand, Output, Stdio},
     sync::{Arc, Mutex},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
@@ -26,7 +26,10 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sysinfo::{CpuRefreshKind, DiskRefreshKind, Disks, MemoryRefreshKind, RefreshKind, System};
-use tauri::{AppHandle, Manager, State};
+use tauri::{
+    webview::{PageLoadEvent, WebviewBuilder},
+    AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Url, WebviewUrl,
+};
 
 const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const MAX_LAUNCHER_COMPLETION_MATCHES: usize = 24;
@@ -63,6 +66,10 @@ const FILE_EXPLORER_HIDDEN_NAMES: [&str; 14] = [
 const GITHUB_RELEASES_API_LATEST_URL: &str =
     "https://api.github.com/repos/Ashlo/CrewDock/releases/latest";
 const APP_UPDATE_CHECK_TIMEOUT_SECS: u64 = 8;
+const CODEX_CLI_PROBE_TIMEOUT_MS: u64 = 1_500;
+const STATE_EVENT: &str = "crewdock://state-changed";
+const BROWSER_WEBVIEW_LABEL: &str = "crewdock-browser";
+const BROWSER_NAVIGATION_EVENT: &str = "crewdock://browser-navigation";
 const LOGIN_SHELL_PATH_START_MARKER: &[u8] = b"__CREWDOCK_PATH_START__";
 const LOGIN_SHELL_PATH_END_MARKER: &[u8] = b"__CREWDOCK_PATH_END__";
 
@@ -1225,12 +1232,17 @@ fn read_login_shell_path(shell: &str) -> Option<OsString> {
         return None;
     }
 
-    let output = ProcessCommand::new(shell)
+    let mut command = ProcessCommand::new(shell);
+    command
         .arg("-l")
         .arg("-c")
-        .arg("printf '__CREWDOCK_PATH_START__%s__CREWDOCK_PATH_END__' \"$PATH\"")
-        .output()
-        .ok()?;
+        .arg("printf '__CREWDOCK_PATH_START__%s__CREWDOCK_PATH_END__' \"$PATH\"");
+    let output = run_command_output_with_timeout(
+        &mut command,
+        Duration::from_millis(CODEX_CLI_PROBE_TIMEOUT_MS),
+    )
+    .ok()
+    .flatten()?;
 
     if !output.status.success() {
         return None;
@@ -1439,10 +1451,14 @@ fn probe_codex_cli_candidate(
         return Err(format!("Codex CLI was not found at {}.", path.display()));
     }
 
-    let output = ProcessCommand::new(path)
-        .arg("--version")
-        .output()
-        .map_err(|error| format!("Failed to run {}: {error}", path.display()))?;
+    let mut command = ProcessCommand::new(path);
+    command.arg("--version");
+    let output = run_command_output_with_timeout(
+        &mut command,
+        Duration::from_millis(CODEX_CLI_PROBE_TIMEOUT_MS),
+    )
+    .map_err(|error| format!("Failed to run {}: {error}", path.display()))?
+    .ok_or_else(|| format!("Timed out while checking {}.", path.display()))?;
     let combined_output = format!(
         "{}\n{}",
         String::from_utf8_lossy(&output.stdout),
@@ -1476,6 +1492,28 @@ fn probe_codex_cli_candidate(
     })
 }
 
+fn run_command_output_with_timeout(
+    command: &mut ProcessCommand,
+    timeout: Duration,
+) -> io::Result<Option<Output>> {
+    let mut child = command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let started_at = Instant::now();
+    loop {
+        if child.try_wait()?.is_some() {
+            return child.wait_with_output().map(Some);
+        }
+        if started_at.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(None);
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn parse_codex_cli_version(output: &str) -> Option<String> {
     output.lines().find_map(|line| {
         let mut parts = line.split_whitespace();
@@ -1486,6 +1524,28 @@ fn parse_codex_cli_version(output: &str) -> Option<String> {
         }
         None
     })
+}
+
+fn refresh_codex_cli_in_background(shared: Arc<Mutex<RuntimeState>>, app: AppHandle) {
+    std::thread::spawn(move || {
+        let (shell, configured_path) = match shared.lock() {
+            Ok(runtime) => (
+                runtime.shell.clone(),
+                runtime.settings.codex_cli_path.clone(),
+            ),
+            Err(_) => return,
+        };
+        sync_process_path_with_login_shell(&shell);
+        let codex_cli = detect_codex_cli_snapshot(configured_path.as_deref());
+        let snapshot = match shared.lock() {
+            Ok(mut runtime) if runtime.settings.codex_cli_path == configured_path => {
+                runtime.codex_cli = codex_cli;
+                runtime.build_snapshot()
+            }
+            _ => return,
+        };
+        let _ = app.emit(STATE_EVENT, snapshot);
+    });
 }
 
 fn infer_codex_cli_source(path: &Path) -> CodexCliSource {
@@ -3489,6 +3549,133 @@ fn open_external_url(url: String) -> Result<(), String> {
 
     #[allow(unreachable_code)]
     Err("opening external URLs is not supported on this platform".to_string())
+}
+
+fn parse_browser_url(value: &str) -> Result<Url, String> {
+    let value = value.trim();
+    let candidate = if value.contains("://") {
+        value.to_string()
+    } else if value.starts_with("localhost") || value.starts_with("127.0.0.1") {
+        format!("http://{value}")
+    } else {
+        format!("https://{value}")
+    };
+    let url = Url::parse(&candidate).map_err(|_| "enter a valid web address".to_string())?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err("only http and https URLs are supported".to_string());
+    }
+    Ok(url)
+}
+
+fn validate_browser_bounds(
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<(LogicalPosition<f64>, LogicalSize<f64>), String> {
+    if ![x, y, width, height].iter().all(|value| value.is_finite())
+        || x < 0.0
+        || y < 0.0
+        || width < 100.0
+        || height < 100.0
+    {
+        return Err("invalid browser bounds".to_string());
+    }
+    Ok((LogicalPosition::new(x, y), LogicalSize::new(width, height)))
+}
+
+#[tauri::command]
+fn open_browser_webview(
+    app: AppHandle,
+    url: String,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> Result<(), String> {
+    let url = parse_browser_url(&url)?;
+    let (position, size) = validate_browser_bounds(x, y, width, height)?;
+
+    if let Some(webview) = app.get_webview(BROWSER_WEBVIEW_LABEL) {
+        webview
+            .set_position(position)
+            .and_then(|_| webview.set_size(size))
+            .and_then(|_| webview.show())
+            .and_then(|_| webview.navigate(url))
+            .map_err(|error| format!("failed to open browser: {error}"))?;
+        return Ok(());
+    }
+
+    let main_window = app
+        .get_window("main")
+        .ok_or_else(|| "main window is unavailable".to_string())?;
+    let event_app = app.clone();
+    let builder = WebviewBuilder::new(BROWSER_WEBVIEW_LABEL, WebviewUrl::External(url))
+        .on_navigation(|url| matches!(url.scheme(), "http" | "https"))
+        .on_page_load(move |_webview, payload| {
+            let _ = event_app.emit_to(
+                "main",
+                BROWSER_NAVIGATION_EVENT,
+                json!({
+                    "url": payload.url().as_str(),
+                    "loading": matches!(payload.event(), PageLoadEvent::Started),
+                }),
+            );
+        });
+
+    main_window
+        .add_child(builder, position, size)
+        .map_err(|error| format!("failed to create browser: {error}"))?;
+    Ok(())
+}
+
+#[tauri::command]
+fn sync_browser_webview_bounds(
+    app: AppHandle,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    visible: bool,
+) -> Result<(), String> {
+    let Some(webview) = app.get_webview(BROWSER_WEBVIEW_LABEL) else {
+        return Ok(());
+    };
+    if !visible {
+        return webview
+            .hide()
+            .map_err(|error| format!("failed to hide browser: {error}"));
+    }
+
+    let (position, size) = validate_browser_bounds(x, y, width, height)?;
+    webview
+        .set_position(position)
+        .and_then(|_| webview.set_size(size))
+        .and_then(|_| webview.show())
+        .map_err(|error| format!("failed to resize browser: {error}"))
+}
+
+#[tauri::command]
+fn browser_history(app: AppHandle, direction: String) -> Result<(), String> {
+    let webview = app
+        .get_webview(BROWSER_WEBVIEW_LABEL)
+        .ok_or_else(|| "browser is not open".to_string())?;
+    let script = match direction.as_str() {
+        "back" => "window.history.back()",
+        "forward" => "window.history.forward()",
+        _ => return Err("invalid browser history direction".to_string()),
+    };
+    webview
+        .eval(script)
+        .map_err(|error| format!("failed to navigate browser history: {error}"))
+}
+
+#[tauri::command]
+fn reload_browser_webview(app: AppHandle) -> Result<(), String> {
+    app.get_webview(BROWSER_WEBVIEW_LABEL)
+        .ok_or_else(|| "browser is not open".to_string())?
+        .reload()
+        .map_err(|error| format!("failed to reload browser: {error}"))
 }
 
 fn open_path_in_file_manager(path: &Path) -> Result<(), String> {
@@ -6698,8 +6885,6 @@ pub fn run() {
                     eprintln!("{error}");
                 }
 
-                runtime.refresh_codex_cli();
-
                 let pane_jobs = runtime
                     .active_workspace_id
                     .clone()
@@ -6727,13 +6912,14 @@ pub fn run() {
                             "hasActiveWorkspace": has_active_workspace,
                         })),
                     );
-                    spawn_pane_jobs(shared, app.handle().clone(), shell, pane_jobs);
+                    spawn_pane_jobs(shared.clone(), app.handle().clone(), shell, pane_jobs);
                 }
                 Err(error) => {
                     telemetry::debug_log(&format!("setup restore failed: {error}"));
                     eprintln!("{error}");
                 }
             }
+            refresh_codex_cli_in_background(shared, app.handle().clone());
 
             Ok(())
         })
@@ -6742,6 +6928,10 @@ pub fn run() {
             check_for_app_update,
             dismiss_app_update,
             open_external_url,
+            open_browser_webview,
+            sync_browser_webview_bounds,
+            browser_history,
+            reload_browser_webview,
             load_system_health_snapshot,
             reset_to_launcher,
             create_workspace,
@@ -6815,7 +7005,7 @@ mod tests {
         process::Command,
         sync::{Arc, Mutex},
         thread,
-        time::{Duration, SystemTime, UNIX_EPOCH},
+        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
     };
 
     #[cfg(unix)]
@@ -6829,13 +7019,13 @@ mod tests {
         external_workspace_target_spec, extract_login_shell_path, extract_navigation_target,
         layout_for_pane_count, layout_presets, load_workspace_codex_sessions_snapshot,
         load_workspace_file_explorer_directory_snapshot, load_workspace_text_file_snapshot,
-        merge_path_values, normalize_workspace_path, parse_battery_snapshot,
+        merge_path_values, normalize_workspace_path, parse_battery_snapshot, parse_browser_url,
         parse_codex_cli_version, parse_git_status_porcelain, persistence::ActivityEventKind,
         prepare_workspace_launch, read_codex_session_summary, resolve_navigation_path,
-        save_workspace_text_file_snapshot, try_bind_pending_codex_start,
-        upsert_workspace_codex_restore_binding, validate_git_cli_arg, BatteryState,
-        CodexCliCandidateSnapshot, CodexCliSelectionMode, CodexCliSnapshot, CodexCliSource,
-        CodexCliStatus, ExternalWorkspaceTargetKind, GitFileKind, GitState,
+        run_command_output_with_timeout, save_workspace_text_file_snapshot,
+        try_bind_pending_codex_start, upsert_workspace_codex_restore_binding, validate_git_cli_arg,
+        BatteryState, CodexCliCandidateSnapshot, CodexCliSelectionMode, CodexCliSnapshot,
+        CodexCliSource, CodexCliStatus, ExternalWorkspaceTargetKind, GitFileKind, GitState,
         PendingCodexStartRecord, RuntimeState, ThemeId, WorkspaceFileDraftRecord,
         WorkspaceFileExplorerEntryKind, WorkspaceTextFileNewlineStyle, WorkspaceTodoRecord,
         DEFAULT_INTERFACE_TEXT_SCALE, DEFAULT_TERMINAL_FONT_SIZE,
@@ -6856,6 +7046,33 @@ mod tests {
             runtime.settings.terminal_font_size,
             DEFAULT_TERMINAL_FONT_SIZE
         );
+    }
+
+    #[test]
+    fn browser_urls_default_to_https_and_reject_unsafe_schemes() {
+        assert_eq!(
+            parse_browser_url("example.com").unwrap().as_str(),
+            "https://example.com/"
+        );
+        assert_eq!(
+            parse_browser_url("localhost:3000").unwrap().as_str(),
+            "http://localhost:3000/"
+        );
+        assert!(parse_browser_url("javascript:alert(1)").is_err());
+        assert!(parse_browser_url("file:///tmp/secret").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_timeout_stops_a_hung_process() {
+        let mut command = Command::new("/bin/sleep");
+        command.arg("5");
+        let started_at = Instant::now();
+        let output = run_command_output_with_timeout(&mut command, Duration::from_millis(50))
+            .expect("sleep command should start");
+
+        assert!(output.is_none());
+        assert!(started_at.elapsed() < Duration::from_secs(1));
     }
 
     #[test]

@@ -15,12 +15,20 @@ import {
   syncLauncherParticles,
 } from "./launcher-particles.js";
 import { renderActivityRail } from "./activity-rail.js";
-import { createRuntimeStore, createUiState } from "./store.js";
+import {
+  createRuntimeStore,
+  createUiState,
+  reconcileSourceControlTask,
+} from "./store.js";
 import {
   buildWorkspaceTabLabels,
+  getNextWorkspaceCompanionState,
+  normalizeWorkspaceCompanionId,
   renderWorkspaceCompanion,
+  renderWorkspaceCompanionScene,
   renderWorkspaceSidebar,
   renderWorkspaceStrip,
+  WORKSPACE_COMPANIONS,
 } from "./workspace-strip.js";
 
 const MAX_PENDING_TERMINAL_BYTES = 4 * 1024 * 1024;
@@ -50,6 +58,7 @@ const WORKSPACE_TAB_EDGE_SCROLL_ZONE_PX = 32;
 const WORKSPACE_TAB_EDGE_SCROLL_MAX_PX_PER_FRAME = 18;
 const WORKSPACE_TAB_CLICK_SUPPRESS_MS = 250;
 const WORKSPACE_SIDEBAR_COLLAPSED_STORAGE_KEY = "crewdock.workspaceSidebarCollapsed";
+const WORKSPACE_COMPANION_STORAGE_KEY = "crewdock.workspaceCompanion";
 const WORKSPACE_FILE_EDITOR_WIDTH_STORAGE_KEY = "crewdock.workspaceFileEditorWidth";
 const WORKSPACE_FILE_EDITOR_MIN_WIDTH = 340;
 const WORKSPACE_FILE_EDITOR_MAX_WIDTH = 1160;
@@ -59,6 +68,11 @@ const TIME_BLOCK_DEFAULT_DURATION_MINUTES = 50;
 const TIME_BLOCK_MIN_DURATION_MINUTES = 1;
 const TIME_BLOCK_MAX_DURATION_MINUTES = 240;
 const TIME_BLOCK_PRESETS_MINUTES = Object.freeze([25, 50, 90]);
+const WORKSPACE_COMPANION_STATE_DURATION_MS = Object.freeze({
+  sleeping: Object.freeze([12_000, 24_000]),
+  eating: Object.freeze([6_000, 11_000]),
+  walking: Object.freeze([26_000, 26_000]),
+});
 const MARKDOWN_VIEW_MODES = new Set(["write", "preview", "split"]);
 const MARKDOWN_MERMAID_LANGUAGES = new Set(["mermaid"]);
 const MARKDOWN_MERMAID_RENDER_ID_PREFIX = "crewdock-mermaid";
@@ -316,6 +330,7 @@ const RENDER_MODAL = 1 << 4;
 const RENDER_CONTEXT = 1 << 5;
 const RENDER_TERMINALS = 1 << 6;
 const RENDER_EXPLORER = 1 << 7;
+const RENDER_BROWSER = 1 << 8;
 const RENDER_ALL = RENDER_STRIP
   | RENDER_STAGE
   | RENDER_STATUS
@@ -323,13 +338,15 @@ const RENDER_ALL = RENDER_STRIP
   | RENDER_MODAL
   | RENDER_CONTEXT
   | RENDER_TERMINALS
-  | RENDER_EXPLORER;
+  | RENDER_EXPLORER
+  | RENDER_BROWSER;
 const RENDER_PANEL_SURFACES = RENDER_STATUS | RENDER_ACTIVITY | RENDER_MODAL | RENDER_CONTEXT;
 const RENDER_ACTIVITY_SURFACES = RENDER_STRIP | RENDER_STATUS | RENDER_ACTIVITY;
 const RENDER_TODO_SURFACES = RENDER_STATUS | RENDER_MODAL;
 const RENDER_SOURCE_CONTROL_SURFACES = RENDER_STRIP | RENDER_STATUS | RENDER_MODAL;
 const RENDER_CODEX_SURFACES = RENDER_STATUS | RENDER_MODAL;
 const RENDER_FILE_EXPLORER_SURFACES = RENDER_STATUS | RENDER_EXPLORER;
+const RENDER_BROWSER_SURFACES = RENDER_STATUS | RENDER_BROWSER | RENDER_TERMINALS;
 let markdownMermaidRenderNonce = 0;
 const WORKSPACE_OPEN_TARGET_META = Object.freeze({
   cursor: { label: "Cursor", kind: "editor", shortLabel: "C" },
@@ -993,6 +1010,7 @@ const bridge = createBridge({
 
 const uiState = createUiState();
 uiState.workspaceSidebarCollapsed = loadWorkspaceSidebarCollapsedPreference();
+uiState.workspaceCompanionId = loadWorkspaceCompanionPreference();
 uiState.workspaceFileEditorWidth = loadWorkspaceFileEditorWidthPreference();
 uiState.timeBlock = loadTimeBlockState();
 const runtimeStore = createRuntimeStore();
@@ -1014,6 +1032,32 @@ function loadWorkspaceSidebarCollapsedPreference() {
   } catch {
     return false;
   }
+}
+
+function loadWorkspaceCompanionPreference() {
+  try {
+    return normalizeWorkspaceCompanionId(
+      window.localStorage?.getItem(WORKSPACE_COMPANION_STORAGE_KEY),
+    );
+  } catch {
+    return "sailor-tanuki";
+  }
+}
+
+function setWorkspaceCompanionPreference(companionId) {
+  uiState.workspaceCompanionId = normalizeWorkspaceCompanionId(companionId);
+  uiState.workspaceCompanionState = "sleeping";
+  try {
+    window.localStorage?.setItem(
+      WORKSPACE_COMPANION_STORAGE_KEY,
+      uiState.workspaceCompanionId,
+    );
+  } catch {
+    // The selection still applies for this session when storage is unavailable.
+  }
+  clearWorkspaceCompanionTimer();
+  syncWorkspaceCompanion();
+  syncWorkspaceCompanionRoutine();
 }
 
 function clampNumber(value, min, max) {
@@ -1248,6 +1292,19 @@ async function init() {
     });
   }
 
+  if (bridge.listenBrowserNavigation) {
+    await bridge.listenBrowserNavigation((payload) => {
+      const nextUrl = String(payload?.url || "").trim();
+      if (nextUrl && nextUrl !== "about:blank") {
+        uiState.browser.url = nextUrl;
+        uiState.browser.input = nextUrl;
+      }
+      uiState.browser.loading = Boolean(payload?.loading);
+      uiState.browser.error = "";
+      requestRender(RENDER_BROWSER);
+    });
+  }
+
   if (bridge.listenDragDrop) {
     await bridge.listenDragDrop((payload) => {
       void handleNativeDragDrop(payload).catch((error) => console.error(error));
@@ -1362,6 +1419,138 @@ async function openExternalUrl(url) {
   }
 
   window.open(normalizedUrl, "_blank", "noopener,noreferrer");
+}
+
+function normalizeBrowserUrl(value) {
+  const input = String(value || "").trim();
+  if (!input) {
+    throw new Error("Enter a web address.");
+  }
+  const localAddress = /^(localhost|127(?:\.\d+){3}|0\.0\.0\.0|\[::1\])(?::\d+)?(?:[/?#]|$)/i;
+  const candidate = /^[a-z][a-z\d+.-]*:\/\//i.test(input)
+    ? input
+    : `${localAddress.test(input) ? "http" : "https"}://${input}`;
+  const url = new URL(candidate);
+  if (!["http:", "https:"].includes(url.protocol) || !url.hostname) {
+    throw new Error("Only HTTP and HTTPS addresses are supported.");
+  }
+  return url.href;
+}
+
+function getBrowserViewportBounds() {
+  const viewport = document.querySelector('[data-browser-viewport="active"]');
+  if (!(viewport instanceof HTMLElement) || viewport.getClientRects().length === 0) {
+    return null;
+  }
+  const rect = viewport.getBoundingClientRect();
+  if (rect.width < 100 || rect.height < 100) {
+    return null;
+  }
+  return {
+    x: Math.round(rect.x),
+    y: Math.round(rect.y),
+    width: Math.round(rect.width),
+    height: Math.round(rect.height),
+  };
+}
+
+function isBrowserWebviewVisible() {
+  const workspace = getActiveWorkspace();
+  const browserPaneAvailable = uiState.browser.placement !== "pane"
+    || workspace?.panes?.some((pane) => pane.id === uiState.browser.paneId);
+  return Boolean(
+    uiState.browser.visible
+    && uiState.browser.url
+    && workspace
+    && browserPaneAvailable
+    && !uiState.launcherVisible
+    && !uiState.quickSwitcherVisible
+    && !uiState.settingsVisible
+    && !uiState.pendingWorkspaceDraft
+    && !uiState.codexModalVisible
+    && !uiState.todoPanelVisible
+    && !uiState.gitPanelVisible
+    && !uiState.activityRailVisible
+    && !uiState.systemHealthPanelVisible
+    && !uiState.workspaceOpenMenuVisible
+    && !uiState.workspaceGitMenuVisible
+  );
+}
+
+function scheduleBrowserWebviewSync() {
+  if (runtimeStore.browserBoundsFrame) {
+    cancelAnimationFrame(runtimeStore.browserBoundsFrame);
+  }
+  runtimeStore.browserBoundsFrame = requestAnimationFrame(() => {
+    runtimeStore.browserBoundsFrame = 0;
+    const visible = isBrowserWebviewVisible();
+    const bounds = visible ? getBrowserViewportBounds() : null;
+    const payload = bounds || { x: 0, y: 0, width: 100, height: 100 };
+    const signature = `${visible}:${payload.x}:${payload.y}:${payload.width}:${payload.height}`;
+    if (runtimeStore.browserBoundsSignature === signature) {
+      return;
+    }
+    runtimeStore.browserBoundsSignature = signature;
+    void bridge.syncBrowserWebviewBounds(payload, visible).catch((error) => {
+      runtimeStore.browserBoundsSignature = "";
+      console.error(error);
+    });
+  });
+}
+
+async function navigateBrowser(value = uiState.browser.input) {
+  try {
+    const url = normalizeBrowserUrl(value);
+    const bounds = getBrowserViewportBounds();
+    if (!bounds) {
+      throw new Error("Browser surface is not ready.");
+    }
+    uiState.browser.input = url;
+    uiState.browser.url = url;
+    uiState.browser.loading = true;
+    uiState.browser.error = "";
+    requestRender(RENDER_BROWSER_SURFACES);
+    await bridge.openBrowserWebview(url, bounds);
+    runtimeStore.browserBoundsSignature = "";
+    scheduleBrowserWebviewSync();
+  } catch (error) {
+    uiState.browser.loading = false;
+    uiState.browser.error = error instanceof Error ? error.message : String(error);
+    requestRender(RENDER_BROWSER);
+  }
+}
+
+function toggleBrowserPanel(forceVisible = !uiState.browser.visible) {
+  uiState.browser.visible = Boolean(forceVisible && getActiveWorkspace());
+  if (uiState.browser.visible) {
+    uiState.browser.placement = "panel";
+    uiState.browser.paneId = "";
+  }
+  requestRender(RENDER_BROWSER_SURFACES);
+  scheduleBrowserWebviewSync();
+}
+
+function moveBrowserToPane(paneId = resolveActivePaneId()) {
+  const workspace = getActiveWorkspace();
+  if (!paneId || !workspace?.panes?.some((pane) => pane.id === paneId)) {
+    return;
+  }
+  uiState.browser.visible = true;
+  uiState.browser.placement = "pane";
+  uiState.browser.paneId = paneId;
+  requestRender(RENDER_BROWSER_SURFACES);
+  scheduleBrowserWebviewSync();
+}
+
+function moveBrowserToPanel() {
+  if (!getActiveWorkspace()) {
+    return;
+  }
+  uiState.browser.visible = true;
+  uiState.browser.placement = "panel";
+  uiState.browser.paneId = "";
+  requestRender(RENDER_BROWSER_SURFACES);
+  scheduleBrowserWebviewSync();
 }
 
 function detectPlatform() {
@@ -4875,6 +5064,12 @@ async function handleClick(event) {
     return;
   }
 
+  if (target.dataset.action === "set-workspace-companion") {
+    setWorkspaceCompanionPreference(target.dataset.companionId);
+    requestRender(RENDER_MODAL);
+    return;
+  }
+
   if (target.dataset.action === "show-launcher") {
     uiState.launcherVisible = true;
     hideSettingsSheet();
@@ -4905,6 +5100,43 @@ async function handleClick(event) {
 
   if (target.dataset.action === "toggle-file-explorer") {
     await toggleWorkspaceFileExplorer();
+    return;
+  }
+
+  if (target.dataset.action === "toggle-browser-panel") {
+    toggleBrowserPanel();
+    return;
+  }
+
+  if (target.dataset.action === "close-browser-panel") {
+    toggleBrowserPanel(false);
+    return;
+  }
+
+  if (target.dataset.action === "browser-move-to-pane") {
+    moveBrowserToPane();
+    return;
+  }
+
+  if (target.dataset.action === "browser-move-to-panel") {
+    moveBrowserToPanel();
+    return;
+  }
+
+  if (target.dataset.action === "browser-back" || target.dataset.action === "browser-forward") {
+    await bridge.browserHistory(target.dataset.action === "browser-back" ? "back" : "forward");
+    return;
+  }
+
+  if (target.dataset.action === "browser-reload") {
+    uiState.browser.loading = true;
+    requestRender(RENDER_BROWSER);
+    await bridge.reloadBrowserWebview();
+    return;
+  }
+
+  if (target.dataset.action === "open-browser-externally" && uiState.browser.url) {
+    await openExternalUrl(uiState.browser.url);
     return;
   }
 
@@ -5419,7 +5651,7 @@ function handlePointerDown(event) {
   maybeBeginWorkspaceTabDrag(event, target);
   const paneId = target?.closest("[data-pane-id]")?.dataset?.paneId || null;
   if (paneId) {
-    if (event.button === 0) {
+    if (event.button === 0 && !target.closest("[data-browser-pane]")) {
       claimPaneTerminalFocus(paneId);
     } else {
       setActivePaneId(paneId);
@@ -6532,6 +6764,7 @@ function handleWindowResize() {
     uiState.snapshot?.workspaces?.length || 0,
   );
   syncContextMenuPosition();
+  scheduleBrowserWebviewSync();
 }
 
 function handleWindowFocus() {
@@ -6584,6 +6817,13 @@ function handleFocusOut(event) {
 }
 
 async function handleSubmit(event) {
+  const browserForm = event.target.closest('[data-action="navigate-browser"]');
+  if (browserForm) {
+    event.preventDefault();
+    await navigateBrowser();
+    return;
+  }
+
   const renameForm = event.target.closest('[data-action="rename-workspace"]');
   if (renameForm) {
     event.preventDefault();
@@ -6640,6 +6880,12 @@ async function handleSubmit(event) {
 }
 
 function handleInput(event) {
+  const browserInput = event.target.closest("[data-browser-address]");
+  if (browserInput) {
+    uiState.browser.input = browserInput.value;
+    return;
+  }
+
   const fileEditorInput = event.target.closest("[data-workspace-file-editor-input]");
   if (fileEditorInput) {
     const workspace = getActiveWorkspace();
@@ -7114,6 +7360,7 @@ async function activateWorkspace(workspaceId) {
   }
 
   const activeWorkspaceId = uiState.snapshot?.activeWorkspaceId || "";
+  const didSwitchWorkspace = workspaceId !== activeWorkspaceId;
   let shouldDiscardActiveEditor = false;
   if (
     activeWorkspaceId
@@ -7135,7 +7382,7 @@ async function activateWorkspace(workspaceId) {
   const keepSourceControlOpen = uiState.gitPanelVisible;
   const keepTodoPanelOpen = uiState.todoPanelVisible;
 
-  if (workspaceId !== uiState.snapshot?.activeWorkspaceId) {
+  if (didSwitchWorkspace) {
     uiState.snapshot = await bridge.switchWorkspace(workspaceId);
   }
 
@@ -7150,8 +7397,10 @@ async function activateWorkspace(workspaceId) {
   closeWorkspaceOpenMenu();
   markWorkspaceAttentionSeen(workspaceId);
   closeQuickSwitcher();
-  if (keepSourceControlOpen) {
+  if (didSwitchWorkspace) {
     resetSourceControlState();
+  }
+  if (keepSourceControlOpen) {
     void loadActiveWorkspaceSourceControl({ force: true });
   }
 
@@ -7680,16 +7929,20 @@ function toggleSourceControlRowMenu(kind, key) {
 function syncSourceControlTaskTray(task, previousTask = null) {
   if (!task) {
     uiState.sourceControl.taskTrayExpanded = false;
+    uiState.sourceControl.taskInput = "";
     return;
   }
 
   const isNewTask = !previousTask || previousTask.id !== task.id;
+  if (isNewTask || task.status !== "running" || !task.canWriteInput) {
+    uiState.sourceControl.taskInput = "";
+  }
   if (task.status === "running" || task.canWriteInput || task.status === "failed") {
     uiState.sourceControl.taskTrayExpanded = true;
     return;
   }
 
-  if (isNewTask) {
+  if (isNewTask || previousTask?.status === "running") {
     uiState.sourceControl.taskTrayExpanded = false;
   }
 }
@@ -7718,6 +7971,27 @@ function syncPendingSourceControlCreateBranch(task, snapshot = uiState.sourceCon
   }
 
   uiState.sourceControl.pendingCreateBranch = null;
+}
+
+function syncPendingSourceControlCommit(task, snapshot = uiState.sourceControl.snapshot) {
+  const pending = uiState.sourceControl.pendingCommit;
+  if (
+    !pending
+    || pending.workspaceId !== (snapshot?.workspaceId || "")
+    || !task
+    || task.id !== pending.taskId
+    || task.status === "running"
+  ) {
+    return;
+  }
+
+  if (
+    task.status === "succeeded"
+    && uiState.sourceControl.commitMessage.trim() === pending.message
+  ) {
+    uiState.sourceControl.commitMessage = "";
+  }
+  uiState.sourceControl.pendingCommit = null;
 }
 
 function normalizeSourceControlRemoteOptions(remotes = [], defaultRemote = "") {
@@ -7945,7 +8219,6 @@ function captureSourceControlScrollState(root = document) {
     ".workspace-scm-branch-groups",
     ".workspace-scm-graph-list",
     ".workspace-scm-diff",
-    ".workspace-scm-task-output",
     ".workspace-scm-task-tray-output",
     ".workspace-scm-commit-body",
   ];
@@ -7962,7 +8235,7 @@ function captureSourceControlScrollState(root = document) {
         index,
         scrollTop: element.scrollTop,
         scrollLeft: element.scrollLeft,
-        stickToBottom: selector.includes("workspace-scm-task-output")
+        stickToBottom: selector.includes("workspace-scm-task-tray-output")
           ? isElementScrolledNearBottom(element)
           : false,
       };
@@ -8076,9 +8349,7 @@ function syncOpenSourceControlPanelDom(root = app) {
   modalRegion.innerHTML = renderGitPanel(activeWorkspace);
   modalRegion.classList.toggle("is-active", true);
 
-  if (sourceControlScrollState.length) {
-    restoreSourceControlScrollState(sourceControlScrollState, modalRegion);
-  }
+  restoreSourceControlScrollState(sourceControlScrollState, modalRegion);
   if (sourceControlFocusState) {
     restoreSourceControlFocusState(sourceControlFocusState, modalRegion);
   }
@@ -8119,7 +8390,7 @@ function restoreSettingsFocusState(state, root = document) {
 }
 
 function restoreSourceControlScrollState(states, root = document) {
-  if (!Array.isArray(states) || states.length === 0) {
+  if (!Array.isArray(states)) {
     return;
   }
 
@@ -8146,6 +8417,13 @@ function restoreSourceControlScrollState(states, root = document) {
     if (typeof state.scrollLeft === "number") {
       element.scrollLeft = state.scrollLeft;
     }
+  }
+
+  if (
+    uiState.sourceControl.taskTrayExpanded
+    && !states.some((state) => state.selector === ".workspace-scm-task-tray-output")
+  ) {
+    scrollElementToBottom(panel.querySelector(".workspace-scm-task-tray-output"));
   }
 }
 
@@ -8228,7 +8506,7 @@ async function openSourceControlPanel({ force = false } = {}) {
   }
   requestPanelSurfacesRender();
   await refreshActiveWorkspaceGitStatus({ force: true });
-  await loadActiveWorkspaceSourceControl({ force: force || !alreadyLoaded });
+  await loadActiveWorkspaceSourceControl({ force: true });
 }
 
 function resetSourceControlState({ keepTab = true } = {}) {
@@ -8249,6 +8527,7 @@ function resetSourceControlState({ keepTab = true } = {}) {
     createBranchName: "",
     createBranchStartPoint: "",
     pendingCreateBranch: null,
+    pendingCommit: null,
     commitMessage: "",
     generatingCommitMessage: false,
     branchSearch: "",
@@ -8265,8 +8544,22 @@ function resetSourceControlState({ keepTab = true } = {}) {
 }
 
 function applySourceControlSnapshot(snapshot, { appendGraph = false } = {}) {
+  const activeWorkspaceId = uiState.snapshot?.activeWorkspaceId || "";
+  if (activeWorkspaceId && snapshot.workspaceId !== activeWorkspaceId) {
+    return snapshot;
+  }
+
   const previous = uiState.sourceControl.snapshot;
   const previousTask = previous?.task || null;
+  const nextTask = reconcileSourceControlTask(snapshot.task || null, previousTask);
+  if (
+    previous?.workspaceId === snapshot.workspaceId
+    && previousTask
+    && nextTask === previousTask
+    && snapshot.task !== previousTask
+  ) {
+    return previous;
+  }
   const nextSnapshot = appendGraph && previous?.workspaceId === snapshot.workspaceId
     ? {
         ...snapshot,
@@ -8277,9 +8570,12 @@ function applySourceControlSnapshot(snapshot, { appendGraph = false } = {}) {
             ...(snapshot.graph?.commits || []),
           ],
         },
-        task: snapshot.task || previous.task || null,
+        task: nextTask,
       }
-    : snapshot;
+    : {
+        ...snapshot,
+        task: nextTask,
+      };
 
   uiState.sourceControl.snapshot = nextSnapshot;
   syncWorkspaceGitDetail(nextSnapshot.workspaceId, {
@@ -8297,6 +8593,7 @@ function applySourceControlSnapshot(snapshot, { appendGraph = false } = {}) {
   uiState.sourceControl.graphLoadingMore = false;
   syncSourceControlTaskTray(nextSnapshot.task || null, previousTask);
   syncPendingSourceControlCreateBranch(nextSnapshot.task || null, nextSnapshot);
+  syncPendingSourceControlCommit(nextSnapshot.task || null, nextSnapshot);
 
   if (
     uiState.sourceControl.selectedPath
@@ -8356,12 +8653,17 @@ function handleSourceControlRuntimeEvent(event) {
   let renderMask = 0;
   if (sourceControl.snapshot?.workspaceId === event.workspaceId) {
     const previousTask = sourceControl.snapshot.task || null;
+    const nextTask = reconcileSourceControlTask(event.task, previousTask);
+    if (nextTask === previousTask && event.task !== previousTask) {
+      return { handled: true, renderMask: 0 };
+    }
     sourceControl.snapshot = {
       ...sourceControl.snapshot,
-      task: event.task,
+      task: nextTask,
     };
-    syncSourceControlTaskTray(event.task, previousTask);
-    syncPendingSourceControlCreateBranch(event.task, sourceControl.snapshot);
+    syncSourceControlTaskTray(nextTask, previousTask);
+    syncPendingSourceControlCreateBranch(nextTask, sourceControl.snapshot);
+    syncPendingSourceControlCommit(nextTask, sourceControl.snapshot);
     if (
       uiState.gitPanelVisible
       && uiState.snapshot?.activeWorkspaceId === event.workspaceId
@@ -8455,10 +8757,11 @@ function applyWorkspaceGitSummaryUpdate(update) {
     renderMask |= RENDER_STATUS | (files ? RENDER_EXPLORER : 0);
   }
 
-  if (uiState.sourceControl.snapshot?.workspaceId === workspaceId) {
+  if (files && uiState.sourceControl.snapshot?.workspaceId === workspaceId) {
     uiState.sourceControl.snapshot = {
       ...uiState.sourceControl.snapshot,
       summary,
+      changes: files,
     };
     handled = true;
     if (
@@ -8567,6 +8870,9 @@ async function loadWorkspaceSourceControlFor(
   }
 
   const snapshot = await bridge.loadWorkspaceSourceControl(workspaceId, graphCursor);
+  if (uiState.snapshot?.activeWorkspaceId !== workspaceId) {
+    return snapshot;
+  }
   return applySourceControlSnapshot(snapshot, { appendGraph });
 }
 
@@ -8670,7 +8976,11 @@ function getSourceControlSections(snapshot = uiState.sourceControl.snapshot) {
 }
 
 function getSourceControlWorkspaceId() {
-  return uiState.sourceControl.snapshot?.workspaceId || uiState.snapshot?.activeWorkspaceId || "";
+  return uiState.snapshot?.activeWorkspaceId || uiState.sourceControl.snapshot?.workspaceId || "";
+}
+
+function isSourceControlTaskRunning(snapshot = uiState.sourceControl.snapshot) {
+  return snapshot?.task?.status === "running";
 }
 
 function getSourceControlSummary(snapshot = uiState.sourceControl.snapshot) {
@@ -8776,14 +9086,15 @@ async function beginSourceControlPublish(
 }
 
 async function submitSourceControlPush() {
-  const workspaceId = getSourceControlWorkspaceId();
-  const summary = getSourceControlSummary();
+  const snapshot = await ensureActiveWorkspaceSourceControlSnapshot();
+  const workspaceId = uiState.snapshot?.activeWorkspaceId || "";
+  const summary = snapshot?.summary || null;
   if (!workspaceId || !bridge.gitPush) {
     return null;
   }
 
   if (summary && !summary.upstream && summary.state !== "detached") {
-    return beginSourceControlPublish(getSourceControlCurrentBranch());
+    return beginSourceControlPublish(getSourceControlCurrentBranch(snapshot));
   }
 
   return runSourceControlMutation(() => bridge.gitPush(workspaceId), {
@@ -8804,13 +9115,17 @@ async function submitSourceControlTaskRecovery() {
 }
 
 async function runSourceControlMutation(runner, { resetGraphSelection = false } = {}) {
+  if (uiState.sourceControl.submitting || isSourceControlTaskRunning()) {
+    return null;
+  }
+
   uiState.sourceControl.submitting = true;
   requestSourceControlRender();
 
   try {
-    const snapshot = await runner();
+    let snapshot = await runner();
     if (snapshot) {
-      applySourceControlSnapshot(snapshot);
+      snapshot = applySourceControlSnapshot(snapshot);
       if (resetGraphSelection) {
         uiState.sourceControl.selectedCommitOid = "";
         uiState.sourceControl.commitDetail = null;
@@ -8854,8 +9169,13 @@ async function submitSourceControlCommit({ commitAll = false } = {}) {
   const snapshot = await runSourceControlMutation(() => bridge.gitCommit(workspaceId, message, commitAll), {
     resetGraphSelection: true,
   });
-  if (snapshot) {
-    uiState.sourceControl.commitMessage = "";
+  if (uiState.snapshot?.activeWorkspaceId === workspaceId && snapshot?.task?.id) {
+    uiState.sourceControl.pendingCommit = {
+      workspaceId,
+      taskId: snapshot.task.id,
+      message,
+    };
+    syncPendingSourceControlCommit(snapshot.task, snapshot);
     requestRender(RENDER_MODAL);
   }
 }
@@ -8969,7 +9289,7 @@ async function submitSourceControlCreateBranch() {
     () => bridge.gitCreateBranch(workspaceId, branchName, startPoint || null),
     { resetGraphSelection: true },
   );
-  if (snapshot?.task?.id) {
+  if (uiState.snapshot?.activeWorkspaceId === workspaceId && snapshot?.task?.id) {
     uiState.sourceControl.pendingCreateBranch = {
       workspaceId,
       taskId: snapshot.task.id,
@@ -8982,7 +9302,8 @@ async function submitSourceControlCreateBranch() {
 }
 
 async function promptSourceControlCreateBranch() {
-  const workspaceId = getSourceControlWorkspaceId();
+  const activeSnapshot = await ensureActiveWorkspaceSourceControlSnapshot();
+  const workspaceId = uiState.snapshot?.activeWorkspaceId || "";
   if (!workspaceId || !bridge.gitCreateBranch) {
     return;
   }
@@ -8992,13 +9313,13 @@ async function promptSourceControlCreateBranch() {
     return;
   }
 
-  const suggestedStartPoint = getSourceControlCurrentBranch() || "";
+  const suggestedStartPoint = getSourceControlCurrentBranch(activeSnapshot) || "";
   const startPoint = (window.prompt("Start point (optional)", suggestedStartPoint) || "").trim();
   const snapshot = await runSourceControlMutation(
     () => bridge.gitCreateBranch(workspaceId, branchName, startPoint || null),
     { resetGraphSelection: true },
   );
-  if (snapshot?.task?.id) {
+  if (uiState.snapshot?.activeWorkspaceId === workspaceId && snapshot?.task?.id) {
     uiState.sourceControl.pendingCreateBranch = {
       workspaceId,
       taskId: snapshot.task.id,
@@ -10058,7 +10379,7 @@ function ensureFrame() {
       <div class="workspace-main-shell">
         <aside class="workspace-sidebar-region" data-region="sidebar"></aside>
         <section class="workspace-stage" data-region="stage"></section>
-        ${renderWorkspaceCompanion()}
+        <div class="workspace-companion-region" data-region="companion"></div>
       </div>
       <footer class="workspace-statusbar-region" data-region="status"></footer>
       <div class="workspace-activity-layer" data-region="activity"></div>
@@ -10067,6 +10388,73 @@ function ensureFrame() {
     </div>
   `;
   app.dataset.frameMounted = "true";
+}
+
+function syncWorkspaceCompanion() {
+  const region = app.querySelector('[data-region="companion"]');
+  if (!(region instanceof HTMLElement)) {
+    return;
+  }
+
+  const companionId = normalizeWorkspaceCompanionId(uiState.workspaceCompanionId);
+  if (region.dataset.companionId !== companionId) {
+    region.innerHTML = renderWorkspaceCompanionScene(companionId);
+    region.dataset.companionId = companionId;
+  }
+
+  syncWorkspaceCompanionState(region);
+}
+
+function syncWorkspaceCompanionState(
+  region = app.querySelector('[data-region="companion"]'),
+) {
+  if (!(region instanceof HTMLElement)) {
+    return;
+  }
+
+  const state = WORKSPACE_COMPANION_STATE_DURATION_MS[uiState.workspaceCompanionState]
+    ? uiState.workspaceCompanionState
+    : "sleeping";
+  region.dataset.companionState = state;
+  const companion = region.querySelector(".workspace-companion");
+  if (companion instanceof HTMLElement) {
+    companion.classList.toggle("is-sleeping", state === "sleeping");
+    companion.classList.toggle("is-eating", state === "eating");
+    companion.classList.toggle("is-walking", state === "walking");
+  }
+}
+
+function clearWorkspaceCompanionTimer() {
+  if (!runtimeStore.workspaceCompanionTimer) {
+    return;
+  }
+  clearTimeout(runtimeStore.workspaceCompanionTimer);
+  runtimeStore.workspaceCompanionTimer = 0;
+}
+
+function syncWorkspaceCompanionRoutine() {
+  const isActive = normalizeWorkspaceCompanionId(uiState.workspaceCompanionId) !== "off"
+    && Boolean(uiState.snapshot?.activeWorkspace)
+    && !uiState.launcherVisible;
+  if (!isActive) {
+    clearWorkspaceCompanionTimer();
+    return;
+  }
+  if (runtimeStore.workspaceCompanionTimer) {
+    return;
+  }
+
+  const range = WORKSPACE_COMPANION_STATE_DURATION_MS[uiState.workspaceCompanionState]
+    || WORKSPACE_COMPANION_STATE_DURATION_MS.sleeping;
+  const duration = Math.round(range[0] + Math.random() * (range[1] - range[0]));
+  runtimeStore.workspaceCompanionTimer = window.setTimeout(() => {
+    runtimeStore.workspaceCompanionTimer = 0;
+    uiState.workspaceCompanionState = getNextWorkspaceCompanionState(
+      uiState.workspaceCompanionState,
+    );
+    syncWorkspaceCompanionState();
+    syncWorkspaceCompanionRoutine();
+  }, duration);
 }
 
 function createWorkspaceScreenElement(
@@ -10224,6 +10612,7 @@ function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskInterse
   pruneCodexRestoreState(snapshot);
   prunePaneAttentionState(snapshot);
   ensureFrame();
+  syncWorkspaceCompanion();
   if (!isTimeBlockingEnabled(snapshot)) {
     closeTimeBlockPopover();
   }
@@ -10231,6 +10620,8 @@ function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskInterse
 
   const activeWorkspace = snapshot.activeWorkspace;
   const shouldShowLauncher = uiState.launcherVisible || !activeWorkspace;
+  syncWorkspaceCompanionRoutine();
+  scheduleBrowserWebviewSync();
 
   if (activeWorkspace) {
     syncActivePaneId(activeWorkspace);
@@ -10419,7 +10810,7 @@ function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskInterse
   syncSourceControlTaskLoop();
   syncSystemHealthLoop();
 
-  if (!renderMaskIntersects(mask, RENDER_STAGE | RENDER_EXPLORER)) {
+  if (!renderMaskIntersects(mask, RENDER_STAGE | RENDER_EXPLORER | RENDER_BROWSER)) {
     if (refreshVisibleTerminals) {
       scheduleVisibleTerminalRefresh(activeWorkspace);
       recordRenderMetric("terminals");
@@ -10512,8 +10903,13 @@ function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskInterse
   }
 
   if (!renderMaskIncludes(mask, RENDER_STAGE)) {
-    syncWorkspaceFileExplorerSurface(activeWorkspace);
-    syncWorkspaceFileEditorSurface(activeWorkspace);
+    if (renderMaskIncludes(mask, RENDER_EXPLORER)) {
+      syncWorkspaceFileExplorerSurface(activeWorkspace);
+      syncWorkspaceFileEditorSurface(activeWorkspace);
+    }
+    if (renderMaskIncludes(mask, RENDER_BROWSER)) {
+      syncWorkspaceBrowserSurface();
+    }
     recordRenderMetric("explorer");
     if (refreshVisibleTerminals) {
       scheduleVisibleTerminalRefresh(activeWorkspace);
@@ -10601,6 +10997,15 @@ function renderFolderIcon() {
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
       <path d="M4.5 7.5A2.5 2.5 0 0 1 7 5h3l1.6 1.8H17A2.5 2.5 0 0 1 19.5 9.3v6.2A2.5 2.5 0 0 1 17 18H7a2.5 2.5 0 0 1-2.5-2.5V7.5Z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"></path>
+    </svg>
+  `;
+}
+
+function renderBrowserIcon() {
+  return `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <circle cx="12" cy="12" r="8.2" fill="none" stroke="currentColor" stroke-width="1.6"></circle>
+      <path d="M4.2 12h15.6M12 3.8c2.2 2.1 3.4 4.9 3.4 8.2S14.2 18.1 12 20.2C9.8 18.1 8.6 15.3 8.6 12S9.8 5.9 12 3.8Z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"></path>
     </svg>
   `;
 }
@@ -10885,6 +11290,7 @@ function renderWorkspaceStatusBar(snapshot, activeWorkspace) {
 
     leftItems.push(renderStatusBarItem(pathLabel, activeWorkspace.path, "is-path is-primary"));
     leftItems.push(renderStatusBarFilesButton(activeWorkspace));
+    leftItems.push(renderStatusBarBrowserButton());
     if (hasAvailableCodexCli(snapshot)) {
       leftItems.push(renderStatusBarCodexButton(activeWorkspace));
     }
@@ -10976,6 +11382,24 @@ function renderStatusBarFilesButton(activeWorkspace) {
       <span class="workspace-statusbar-icon" aria-hidden="true">${renderFolderIcon()}</span>
       <span>Files</span>
       ${hasDraft ? '<span class="workspace-statusbar-draft-dot" aria-hidden="true"></span>' : ""}
+    </button>
+  `;
+}
+
+function renderStatusBarBrowserButton() {
+  const isOpen = uiState.browser.visible;
+  const title = isOpen ? "Close workspace browser" : "Open workspace browser";
+  return `
+    <button
+      class="workspace-statusbar-item workspace-statusbar-button is-neutral ${isOpen ? "is-panel-open" : ""}"
+      type="button"
+      data-action="toggle-browser-panel"
+      title="${title}"
+      aria-label="${title}"
+      aria-pressed="${isOpen ? "true" : "false"}"
+    >
+      <span class="workspace-statusbar-icon" aria-hidden="true">${renderBrowserIcon()}</span>
+      <span>Browser</span>
     </button>
   `;
 }
@@ -12375,6 +12799,7 @@ function renderSettingsSheet(snapshot) {
                     preview: renderTerminalTextPreview(),
                   })}
                 </div>
+                ${renderSettingsCompanionCard()}
                 ${renderSettingsTimeBlockCard(snapshot)}
                 ${hasAvailableCodexCli(snapshot) ? renderSettingsCodexCard(getDraftCodexCli(snapshot)) : ""}
                 ${renderSettingsAppUpdateCard(snapshot)}
@@ -12657,6 +13082,51 @@ function renderTerminalTextPreview() {
       <div class="settings-preview-terminal-line is-muted">On branch main</div>
       <div class="settings-preview-terminal-line is-accent">modified: src-web/app.js</div>
     </div>
+  `;
+}
+
+function renderSettingsCompanionCard() {
+  const activeId = normalizeWorkspaceCompanionId(uiState.workspaceCompanionId);
+  const activeCompanion = WORKSPACE_COMPANIONS.find(
+    (companion) => companion.id === activeId,
+  );
+
+  return `
+    <section class="settings-ai-card settings-companion-card">
+      <div class="settings-ai-head">
+        <div>
+          <p class="settings-panel-kicker">Ambient companion</p>
+          <h4 class="settings-adjustment-title">Terminal walker</h4>
+          <p class="settings-adjustment-copy">Choose who keeps you company while you work. The companion never captures terminal input.</p>
+        </div>
+        <span class="settings-ai-status ${activeId === "off" ? "" : "is-active"}">${escapeHtml(activeCompanion?.label || "Off")}</span>
+      </div>
+      <div class="settings-companion-picker" aria-label="Terminal companion">
+        ${WORKSPACE_COMPANIONS.map((companion) => {
+          const isActive = companion.id === activeId;
+          return `
+            <button
+              class="settings-companion-option ${isActive ? "is-active" : ""}"
+              type="button"
+              data-action="set-workspace-companion"
+              data-companion-id="${escapeHtml(companion.id)}"
+              aria-pressed="${isActive ? "true" : "false"}"
+              title="${escapeHtml(companion.copy)}"
+            >
+              <span class="settings-companion-preview">
+                ${
+                  companion.id === "off"
+                    ? '<span class="settings-companion-off" aria-hidden="true"></span>'
+                    : renderWorkspaceCompanion(companion.id)
+                }
+              </span>
+              <strong>${escapeHtml(companion.label)}</strong>
+              <span>${escapeHtml(companion.copy)}</span>
+            </button>
+          `;
+        }).join("")}
+      </div>
+    </section>
   `;
 }
 
@@ -13119,7 +13589,7 @@ function renderSourceControlBody(snapshot) {
   }
 
   return `
-    <div class="workspace-git-panel-body workspace-scm-shell">
+    <div class="workspace-git-panel-body workspace-scm-shell" ${uiState.sourceControl.submitting || isSourceControlTaskRunning(snapshot) ? 'aria-busy="true"' : ""}>
       ${renderSourceControlToolbar(snapshot)}
       ${renderSourceControlTabs()}
       <div class="workspace-scm-content">
@@ -13129,21 +13599,18 @@ function renderSourceControlBody(snapshot) {
             : uiState.sourceControl.activeTab === "branches"
               ? renderSourceControlBranchesTab(snapshot)
               : renderSourceControlGraphTab(snapshot)
-        }
+          }
       </div>
-      <div data-scm-task-region>
-        ${renderSourceControlTaskPanel(snapshot.task)}
-      </div>
+      ${snapshot.task ? `<div data-scm-task-region>${renderSourceControlTaskPanel(snapshot.task)}</div>` : ""}
     </div>
   `;
 }
 
-function renderSourceControlSummaryStat({ label, value, copy, tone = "" }) {
+function renderSourceControlSummaryStat({ label, value, tone = "" }) {
   return `
     <div class="workspace-scm-toolbar-stat ${tone ? `is-${tone}` : ""}">
       <span class="workspace-scm-toolbar-stat-label">${escapeHtml(label)}</span>
       <strong class="workspace-scm-toolbar-stat-value">${escapeHtml(value)}</strong>
-      <span class="workspace-scm-toolbar-stat-copy">${escapeHtml(copy)}</span>
     </div>
   `;
 }
@@ -13152,22 +13619,18 @@ function renderSourceControlToolbar(snapshot) {
   const summary = snapshot.summary;
   const fileCount = snapshot.changes?.length || 0;
   const tone = getGitTone(summary);
+  const taskRunning = uiState.sourceControl.submitting || isSourceControlTaskRunning(snapshot);
   const scopeValue = snapshot.workspaceRelativePath && snapshot.workspaceRelativePath !== "."
     ? snapshot.workspaceRelativePath
     : "Repository root";
-  const scopeCopy = snapshot.repoRoot || snapshot.workspacePath;
   const syncValue = summary.upstream
     ? (Number(summary.ahead || 0) > 0 || Number(summary.behind || 0) > 0
       ? `+${summary.ahead || 0} / -${summary.behind || 0}`
       : "Up to date")
     : "Local only";
-  const syncCopy = summary.upstream || "No upstream configured";
   const changeValue = fileCount === 0
     ? "Clean"
     : `${fileCount} ${fileCount === 1 ? "change" : "changes"}`;
-  const changeCopy = fileCount === 0
-    ? "Working tree has no pending edits."
-    : `${hasStagedSourceControlChanges(snapshot) ? "Ready to review and commit." : "Stage files to prepare a commit."}`;
 
   return `
     <section class="workspace-scm-toolbar">
@@ -13179,33 +13642,27 @@ function renderSourceControlToolbar(snapshot) {
               <span class="workspace-scm-toolbar-chip-icon" aria-hidden="true">${renderBranchIcon()}</span>
               <span>${escapeHtml(formatGitBranchLabel(summary))}</span>
             </span>
-            <span class="workspace-scm-toolbar-state is-${tone}">
-              ${escapeHtml(formatGitStateText(summary))}
-            </span>
           </div>
         </div>
         <div class="workspace-scm-toolbar-actions">
-          <button type="button" class="workspace-scm-toolbar-button" data-action="scm-fetch">Fetch</button>
-          <button type="button" class="workspace-scm-toolbar-button" data-action="scm-pull">Pull</button>
-          <button type="button" class="workspace-scm-toolbar-button" data-action="scm-push">Push</button>
+          <button type="button" class="workspace-scm-toolbar-button" data-action="scm-fetch" ${taskRunning ? "disabled" : ""}>Fetch</button>
+          <button type="button" class="workspace-scm-toolbar-button" data-action="scm-pull" ${taskRunning ? "disabled" : ""}>Pull</button>
+          <button type="button" class="workspace-scm-toolbar-button" data-action="scm-push" ${taskRunning ? "disabled" : ""}>Push</button>
         </div>
       </div>
       <div class="workspace-scm-toolbar-stats">
         ${renderSourceControlSummaryStat({
           label: "Sync",
           value: syncValue,
-          copy: syncCopy,
           tone: summary.upstream ? tone : "",
         })}
         ${renderSourceControlSummaryStat({
           label: "Workspace scope",
           value: scopeValue,
-          copy: scopeCopy,
         })}
         ${renderSourceControlSummaryStat({
           label: "Changes",
           value: changeValue,
-          copy: changeCopy,
           tone: fileCount ? tone : "clean",
         })}
       </div>
@@ -13271,9 +13728,10 @@ function renderSourceControlChangesTab(snapshot) {
 function renderSourceControlCommitCard(snapshot, stagedPaths) {
   const stagedCount = stagedPaths.length;
   const pendingCount = snapshot.changes?.length || 0;
-  const commitDisabled = stagedCount === 0 || uiState.sourceControl.submitting;
-  const commitAllDisabled = stagedCount > 0 || pendingCount === 0 || uiState.sourceControl.submitting;
-  const generateDisabled = pendingCount === 0 || uiState.sourceControl.generatingCommitMessage;
+  const taskRunning = isSourceControlTaskRunning(snapshot);
+  const commitDisabled = stagedCount === 0 || uiState.sourceControl.submitting || taskRunning;
+  const commitAllDisabled = stagedCount > 0 || pendingCount === 0 || uiState.sourceControl.submitting || taskRunning;
+  const generateDisabled = pendingCount === 0 || uiState.sourceControl.generatingCommitMessage || taskRunning;
   const summaryCopy = stagedCount
     ? `${stagedCount} ${stagedCount === 1 ? "file is" : "files are"} staged and ready to commit.`
     : pendingCount
@@ -13293,7 +13751,7 @@ function renderSourceControlCommitCard(snapshot, stagedPaths) {
         class="workspace-scm-commit-input"
         data-scm-commit-input
         placeholder="Summarize the change"
-        rows="4"
+        rows="3"
         spellcheck="false"
         autocapitalize="off"
       >${escapeHtml(uiState.sourceControl.commitMessage)}</textarea>
@@ -13382,21 +13840,22 @@ function renderSourceControlCountBadges(summary) {
 
 function renderSourceControlSection(section) {
   const sectionActions = [];
+  const taskRunning = uiState.sourceControl.submitting || isSourceControlTaskRunning();
 
   if (section.key === "staged") {
     sectionActions.push(`
-      <button type="button" class="workspace-scm-inline-action" data-action="scm-unstage-section" data-section="${section.key}">
+      <button type="button" class="workspace-scm-inline-action" data-action="scm-unstage-section" data-section="${section.key}" ${taskRunning ? "disabled" : ""}>
         Unstage all
       </button>
     `);
   } else {
     sectionActions.push(`
-      <button type="button" class="workspace-scm-inline-action" data-action="scm-stage-section" data-section="${section.key}">
+      <button type="button" class="workspace-scm-inline-action" data-action="scm-stage-section" data-section="${section.key}" ${taskRunning ? "disabled" : ""}>
         Stage all
       </button>
     `);
     sectionActions.push(`
-      <button type="button" class="workspace-scm-inline-action is-danger" data-action="scm-discard-section" data-section="${section.key}">
+      <button type="button" class="workspace-scm-inline-action is-danger" data-action="scm-discard-section" data-section="${section.key}" ${taskRunning ? "disabled" : ""}>
         Discard
       </button>
     `);
@@ -13483,6 +13942,7 @@ function renderSourceControlFileRow(file, sectionKey) {
   }
 
   const isSelected = uiState.sourceControl.selectedPath === file.path;
+  const taskRunning = uiState.sourceControl.submitting || isSourceControlTaskRunning();
   const primaryAction = sectionKey === "staged"
     ? { action: "scm-unstage-path", label: "Unstage" }
     : { action: "scm-stage-path", label: "Stage" };
@@ -13529,6 +13989,7 @@ function renderSourceControlFileRow(file, sectionKey) {
           class="workspace-scm-row-primary"
           data-action="${primaryAction.action}"
           data-path="${escapeHtml(file.path)}"
+          ${taskRunning ? "disabled" : ""}
         >
           ${primaryAction.label}
         </button>
@@ -13985,7 +14446,7 @@ function renderSourceControlTaskPanel(task) {
               <input
                 class="workspace-scm-input"
                 data-scm-task-input-value
-                type="text"
+                type="${isSourceControlTaskInputSensitive(task) ? "password" : "text"}"
                 value="${escapeHtml(uiState.sourceControl.taskInput)}"
                 placeholder="Send input to Git task"
                 autocomplete="off"
@@ -14124,7 +14585,9 @@ function formatSourceControlTaskOutput(task) {
     return "";
   }
 
-  const output = typeof task.output === "string" ? task.output : "";
+  const output = typeof task.output === "string"
+    ? task.output.replace(/^\$ git [^\r\n]*(?:\r?\n){2}Starting task\.\.\.(?:\r?\n)?/, "")
+    : "";
   if (output.trim()) {
     return output;
   }
@@ -14138,6 +14601,11 @@ function formatSourceControlTaskOutput(task) {
   }
 
   return `Running ${task.command}...`;
+}
+
+function isSourceControlTaskInputSensitive(task) {
+  const outputTail = String(task?.output || "").slice(-512);
+  return /(password|passphrase|one-time password|two-factor|\b2fa\b|\botp\b|\bpin\b)/i.test(outputTail);
 }
 
 function queryableEmptyCopy(title, remote) {
@@ -14455,7 +14923,7 @@ function syncSourceControlTaskLoop() {
         }
 
         const previousTask = uiState.sourceControl.snapshot?.task || null;
-        const nextTask = snapshot.task || null;
+        const nextTask = reconcileSourceControlTask(snapshot.task || null, previousTask);
         if (nextTask) {
           uiState.sourceControl.snapshot = {
             ...uiState.sourceControl.snapshot,
@@ -14463,6 +14931,7 @@ function syncSourceControlTaskLoop() {
           };
           syncSourceControlTaskTray(nextTask, previousTask);
           syncPendingSourceControlCreateBranch(nextTask, uiState.sourceControl.snapshot);
+          syncPendingSourceControlCommit(nextTask, uiState.sourceControl.snapshot);
           requestSourceControlModalSync();
         }
 
@@ -15186,7 +15655,106 @@ function renderWorkspace(workspace) {
       </section>
       ${renderWorkspaceFileExplorerShell(workspace)}
       ${renderWorkspaceFileEditorShell(workspace)}
+      ${renderWorkspaceBrowserShell()}
     </main>
+  `;
+}
+
+function browserPanelSignature() {
+  return JSON.stringify([
+    uiState.browser.placement,
+    uiState.browser.paneId,
+    uiState.browser.url,
+    uiState.browser.loading,
+    uiState.browser.error,
+  ]);
+}
+
+function renderWorkspaceBrowserShell() {
+  const visible = uiState.browser.visible && uiState.browser.placement === "panel";
+  return `
+    <aside
+      class="workspace-browser-shell ${visible ? "is-visible" : ""}"
+      data-workspace-browser
+      aria-hidden="${visible ? "false" : "true"}"
+    >
+      ${renderWorkspaceBrowserPanel("panel")}
+    </aside>
+  `;
+}
+
+function renderWorkspaceBrowserPanel(placement = "panel") {
+  const hasPage = Boolean(uiState.browser.url);
+  const isActiveSurface = uiState.browser.visible && uiState.browser.placement === placement;
+  return `
+    <div class="workspace-browser-panel ${placement === "pane" ? "is-pane" : ""}">
+      <header class="workspace-browser-toolbar">
+        <div class="workspace-browser-navigation" aria-label="Browser navigation">
+          <button class="workspace-browser-action is-back" type="button" data-action="browser-back" title="Back" aria-label="Back" ${hasPage ? "" : "disabled"}>
+            ${renderChevronIcon("right")}
+          </button>
+          <button class="workspace-browser-action" type="button" data-action="browser-forward" title="Forward" aria-label="Forward" ${hasPage ? "" : "disabled"}>
+            ${renderChevronIcon("right")}
+          </button>
+          <button class="workspace-browser-action ${uiState.browser.loading ? "is-loading" : ""}" type="button" data-action="browser-reload" title="Reload" aria-label="Reload" ${hasPage ? "" : "disabled"}>
+            ${renderRefreshIcon()}
+          </button>
+        </div>
+        <form class="workspace-browser-address-form" data-action="navigate-browser">
+          <span class="workspace-browser-address-icon" aria-hidden="true">${renderBrowserIcon()}</span>
+          <input
+            class="workspace-browser-address"
+            type="text"
+            value="${escapeHtml(uiState.browser.input)}"
+            data-browser-address
+            placeholder="localhost:3000 or https://…"
+            aria-label="Web address"
+            autocomplete="off"
+            autocapitalize="none"
+            spellcheck="false"
+          />
+        </form>
+        <button class="workspace-browser-action" type="button" data-action="open-browser-externally" title="Open in default browser" aria-label="Open in default browser" ${hasPage ? "" : "disabled"}>
+          ${renderBrowserIcon()}
+        </button>
+        ${
+          placement === "pane"
+            ? `
+              <button class="workspace-browser-action" type="button" data-action="browser-move-to-panel" title="Move browser to side panel" aria-label="Move browser to side panel">
+                ${renderBrowserIcon()}
+              </button>
+            `
+            : `
+              <button class="workspace-browser-action" type="button" data-action="browser-move-to-pane" title="Open browser in active pane" aria-label="Open browser in active pane">
+                ${renderWorkspaceTerminalIcon()}
+              </button>
+            `
+        }
+        <button class="workspace-browser-action" type="button" data-action="close-browser-panel" title="Close browser" aria-label="Close browser">
+          ${renderCloseIcon()}
+        </button>
+      </header>
+      <div class="workspace-browser-viewport" ${isActiveSurface ? 'data-browser-viewport="active"' : ""} aria-busy="${uiState.browser.loading ? "true" : "false"}">
+        ${
+          uiState.browser.error
+            ? `
+              <div class="workspace-browser-empty is-error">
+                <strong>Could not open that page</strong>
+                <span>${escapeHtml(uiState.browser.error)}</span>
+              </div>
+            `
+            : !hasPage
+              ? `
+                <div class="workspace-browser-empty">
+                  <span class="workspace-browser-empty-icon" aria-hidden="true">${renderBrowserIcon()}</span>
+                  <strong>Preview without leaving CrewDock</strong>
+                  <span>Enter a local dev server or web address above.</span>
+                </div>
+              `
+              : ""
+        }
+      </div>
+    </div>
   `;
 }
 
@@ -16396,6 +16964,9 @@ function renderContextMenu(contextMenu, workspace) {
       <button class="terminal-context-item" data-action="context-show-in-file-manager">
         <span>Show in ${escapeHtml(fileManagerLabel)}</span>
       </button>
+      <button class="terminal-context-item" data-action="context-open-browser">
+        <span>Open browser in pane</span>
+      </button>
       <div class="terminal-context-divider"></div>
       ${renderContextSplitAction("Split pane right", "context-split-pane", "right", `${primaryModifier}+D`, canSplit)}
       ${renderContextSplitAction("Split pane left", "context-split-pane", "left", "", canSplit)}
@@ -16524,6 +17095,8 @@ async function handleContextMenuAction(target) {
       } else if (typeof bridge.showInFinder === "function") {
         await bridge.showInFinder(workspace.path);
       }
+    } else if (action === "context-open-browser") {
+      moveBrowserToPane(paneId);
     } else if (
       action === "context-split-pane"
       || action === "context-close-pane"
@@ -16707,6 +17280,55 @@ function syncWorkspaceFileEditorSurface(workspace, root = document) {
   }
 }
 
+function syncWorkspaceBrowserSurface(root = document) {
+  const shell = root.querySelector("[data-workspace-browser]");
+  if (!(shell instanceof HTMLElement)) {
+    return;
+  }
+
+  const workspace = getActiveWorkspace();
+  if (
+    uiState.browser.visible
+    && uiState.browser.placement === "pane"
+    && !workspace?.panes?.some((pane) => pane.id === uiState.browser.paneId)
+  ) {
+    uiState.browser.paneId = resolveActivePaneId(workspace) || "";
+  }
+
+  const visible = uiState.browser.visible && uiState.browser.placement === "panel";
+  const signature = browserPanelSignature();
+  shell.classList.toggle("is-visible", visible);
+  shell.setAttribute("aria-hidden", visible ? "false" : "true");
+  if (shell.dataset.browserSignature !== signature) {
+    shell.innerHTML = renderWorkspaceBrowserPanel("panel");
+    shell.dataset.browserSignature = signature;
+  }
+
+  const targetPaneId = uiState.browser.visible && uiState.browser.placement === "pane"
+    ? uiState.browser.paneId
+    : "";
+  for (const paneElement of root.querySelectorAll("[data-pane-id]")) {
+    const isTarget = paneElement.dataset.paneId === targetPaneId;
+    paneElement.classList.toggle("has-browser", isTarget);
+    const browserPane = paneElement.querySelector("[data-browser-pane]");
+    if (!isTarget) {
+      browserPane?.remove();
+      continue;
+    }
+    const paneSurface = browserPane || document.createElement("div");
+    paneSurface.className = "terminal-pane-browser";
+    paneSurface.dataset.browserPane = "";
+    if (!browserPane) {
+      paneElement.appendChild(paneSurface);
+    }
+    if (paneSurface.dataset.browserSignature !== signature) {
+      paneSurface.innerHTML = renderWorkspaceBrowserPanel("pane");
+      paneSurface.dataset.browserSignature = signature;
+    }
+  }
+  scheduleBrowserWebviewSync();
+}
+
 function syncWorkspace(workspace) {
   const theme = getCurrentThemeDefinition();
   const terminalFontSize = getTerminalFontSize();
@@ -16715,6 +17337,7 @@ function syncWorkspace(workspace) {
 
   syncWorkspaceFileExplorerSurface(workspace);
   syncWorkspaceFileEditorSurface(workspace);
+  syncWorkspaceBrowserSurface();
 
   for (const pane of workspace.panes) {
     const paneElement = document.querySelector(`[data-pane-id="${pane.id}"]`);

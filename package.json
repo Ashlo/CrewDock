@@ -18,6 +18,7 @@
     "build:mac": "bash scripts/build-macos-dmg.sh",
     "build:windows:nsis": "cargo tauri build --target x86_64-pc-windows-msvc",
     "build:windows:nsis:xwin": "cargo tauri build --runner cargo-xwin --target x86_64-pc-windows-msvc",
+    "test": "node --test src-web/*.test.js",
     "check": "cargo check --manifest-path src-tauri/Cargo.toml",
     "fmt": "cargo fmt --manifest-path src-tauri/Cargo.toml --all"
   },

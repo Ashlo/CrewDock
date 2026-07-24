@@ -16,9 +16,8 @@ use crate::{
     collect_git_detail,
     events::{emit_runtime_event, RuntimeEvent},
     persistence::{self, ActivityEventKind},
-    telemetry,
-    run_git_command, validate_git_cli_arg, GitFileSnapshot, GitState, GitSummarySnapshot,
-    RuntimeState,
+    run_git_command, telemetry, validate_git_cli_arg, GitFileSnapshot, GitState,
+    GitSummarySnapshot, RuntimeState,
 };
 
 const GRAPH_PAGE_SIZE: usize = 120;
@@ -165,6 +164,7 @@ pub(crate) struct GitCommitFileSnapshot {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct GitTaskSnapshot {
     pub(crate) id: String,
+    pub(crate) revision: u64,
     pub(crate) title: String,
     pub(crate) command: String,
     pub(crate) status: GitTaskStatus,
@@ -683,6 +683,7 @@ pub(crate) fn git_task_write_stdin(
         .flush()
         .map_err(|error| format!("failed to flush git task input: {error}"))?;
     task.snapshot.can_write_input = false;
+    task.snapshot.revision = task.snapshot.revision.saturating_add(1);
     Ok(())
 }
 
@@ -693,53 +694,35 @@ pub(crate) fn start_git_task(
     title: String,
     args: Vec<String>,
 ) -> Result<WorkspaceSourceControlSnapshot, String> {
-    let repo_root = {
-        let runtime = shared
-            .lock()
-            .map_err(|_| "failed to acquire application state".to_string())?;
-        workspace_repo_root(&runtime, &workspace_id)?
-    };
-    let spawned = spawn_git_task_process(&repo_root, &args)?;
-    let mut child = spawned.child;
-    let reader = spawned.reader;
-    let writer = Arc::new(Mutex::new(spawned.writer));
-
-    let task_snapshot = {
-        let mut runtime = shared
-            .lock()
-            .map_err(|_| "failed to acquire application state".to_string())?;
-        if runtime
-            .git_tasks
-            .get(&workspace_id)
-            .map(|task| task.snapshot.status == GitTaskStatus::Running)
-            .unwrap_or(false)
-        {
-            return Err("a git task is already running for this workspace".to_string());
-        }
-
-        let task_snapshot = GitTaskSnapshot {
-            id: runtime.next_id("git-task"),
-            title: title.clone(),
-            command: format!("git {}", args.join(" ")),
-            status: GitTaskStatus::Running,
-            output: format_git_task_start_output(&args),
-            can_write_input: false,
-            started_at: now_timestamp_ms(),
-            finished_at: None,
-            exit_code: None,
-            recovery: None,
-        };
-        runtime.git_tasks.insert(
-            workspace_id.clone(),
-            GitTaskRecord {
-                snapshot: task_snapshot.clone(),
-                writer: Some(writer.clone()),
-                args: args.clone(),
-                repo_root: repo_root.clone(),
-            },
-        );
-        task_snapshot
-    };
+    let (mut child, reader, task_snapshot) =
+        with_idle_git_task(&shared, &workspace_id, |runtime| {
+            let repo_root = workspace_repo_root(runtime, &workspace_id)?;
+            let spawned = spawn_git_task_process(&repo_root, &args)?;
+            let writer = Arc::new(Mutex::new(spawned.writer));
+            let task_snapshot = GitTaskSnapshot {
+                id: runtime.next_id("git-task"),
+                revision: 0,
+                title: title.clone(),
+                command: format!("git {}", args.join(" ")),
+                status: GitTaskStatus::Running,
+                output: format_git_task_start_output(&args),
+                can_write_input: false,
+                started_at: now_timestamp_ms(),
+                finished_at: None,
+                exit_code: None,
+                recovery: None,
+            };
+            runtime.git_tasks.insert(
+                workspace_id.clone(),
+                GitTaskRecord {
+                    snapshot: task_snapshot.clone(),
+                    writer: Some(writer),
+                    args: args.clone(),
+                    repo_root,
+                },
+            );
+            Ok((spawned.child, spawned.reader, task_snapshot))
+        })?;
 
     let _ = emit_runtime_event(
         &app,
@@ -766,6 +749,25 @@ pub(crate) fn start_git_task(
         .lock()
         .map_err(|_| "failed to acquire application state".to_string())?;
     load_workspace_source_control(&runtime, &workspace_id, None)
+}
+
+fn with_idle_git_task<T>(
+    shared: &Arc<Mutex<RuntimeState>>,
+    workspace_id: &str,
+    start: impl FnOnce(&mut RuntimeState) -> Result<T, String>,
+) -> Result<T, String> {
+    let mut runtime = shared
+        .lock()
+        .map_err(|_| "failed to acquire application state".to_string())?;
+    if runtime
+        .git_tasks
+        .get(workspace_id)
+        .map(|task| task.snapshot.status == GitTaskStatus::Running)
+        .unwrap_or(false)
+    {
+        return Err("a git task is already running for this workspace".to_string());
+    }
+    start(&mut runtime)
 }
 
 fn format_git_task_start_output(args: &[String]) -> String {
@@ -940,6 +942,7 @@ fn run_git_task_blocking(
 
     Ok(GitTaskSnapshot {
         id: "test-task".to_string(),
+        revision: 1,
         title: title.to_string(),
         command: format!("git {}", args.join(" ")),
         status: task_status,
@@ -1101,6 +1104,7 @@ fn append_git_task_output(
         .ok_or_else(|| "git task not found".to_string())?;
     task.snapshot.output.push_str(chunk);
     trim_task_output(&mut task.snapshot.output);
+    task.snapshot.revision = task.snapshot.revision.saturating_add(1);
     let should_accept_input =
         task.writer.is_some() && git_task_output_requests_input(&task.snapshot.output);
     let did_enable_input = should_accept_input && !task.snapshot.can_write_input;
@@ -1135,6 +1139,7 @@ fn finish_git_task(
         task.snapshot.exit_code = exit_code;
         task.snapshot.finished_at = Some(now_timestamp_ms());
         task.snapshot.recovery = None;
+        task.snapshot.revision = task.snapshot.revision.saturating_add(1);
         task.writer = None;
         (
             task.repo_root.clone(),
@@ -1153,6 +1158,7 @@ fn finish_git_task(
         .get_mut(workspace_id)
         .ok_or_else(|| "git task not found".to_string())?;
     task.snapshot.recovery = recovery;
+    task.snapshot.revision = task.snapshot.revision.saturating_add(1);
     Ok(task.snapshot.clone())
 }
 
@@ -1774,7 +1780,11 @@ mod tests {
         fs,
         path::PathBuf,
         process::Command,
-        sync::{Arc, Mutex},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Barrier, Mutex,
+        },
+        thread,
         time::{SystemTime, UNIX_EPOCH},
     };
 
@@ -1782,8 +1792,8 @@ mod tests {
         build_commit_message_generation_request, extract_openai_response_text,
         format_git_task_start_output, git_task_output_requests_input, load_git_remotes,
         parse_commit_detail, record_git_task_activity, resolve_repo_relative_existing_path,
-        run_git_task_blocking, select_default_git_remote, GitTaskRecoveryKind, GitTaskSnapshot,
-        GitTaskStatus,
+        run_git_task_blocking, select_default_git_remote, GitTaskRecord, GitTaskRecoveryKind,
+        GitTaskSnapshot, GitTaskStatus,
     };
 
     #[test]
@@ -2245,6 +2255,61 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_git_task_starts_only_once() {
+        let shared = Arc::new(Mutex::new(crate::RuntimeState::seeded()));
+        let barrier = Arc::new(Barrier::new(3));
+        let starts = Arc::new(AtomicUsize::new(0));
+        let handles = (0..2)
+            .map(|_| {
+                let shared = shared.clone();
+                let barrier = barrier.clone();
+                let starts = starts.clone();
+                thread::spawn(move || {
+                    barrier.wait();
+                    super::with_idle_git_task(&shared, "workspace-1", |runtime| {
+                        starts.fetch_add(1, Ordering::SeqCst);
+                        runtime.git_tasks.insert(
+                            "workspace-1".to_string(),
+                            GitTaskRecord {
+                                snapshot: GitTaskSnapshot {
+                                    id: "task-1".to_string(),
+                                    revision: 0,
+                                    title: "Fetch".to_string(),
+                                    command: "git fetch".to_string(),
+                                    status: GitTaskStatus::Running,
+                                    output: String::new(),
+                                    can_write_input: false,
+                                    started_at: 0,
+                                    finished_at: None,
+                                    exit_code: None,
+                                    recovery: None,
+                                },
+                                writer: None,
+                                args: vec!["fetch".to_string()],
+                                repo_root: PathBuf::new(),
+                            },
+                        );
+                        Ok(())
+                    })
+                })
+            })
+            .collect::<Vec<_>>();
+
+        barrier.wait();
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("start thread should not panic"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+        assert!(results.iter().any(|result| matches!(
+            result,
+            Err(error) if error == "a git task is already running for this workspace"
+        )));
+    }
+
+    #[test]
     fn commit_message_generation_prefers_staged_changes() {
         let repo = init_test_repo("commit-message-staged");
         fs::write(repo.join("src-web-app.js"), "console.log('staged');\n")
@@ -2329,6 +2394,7 @@ mod tests {
         let shared = Arc::new(Mutex::new(runtime_with_workspace(&repo)));
         let task = GitTaskSnapshot {
             id: "task-1".to_string(),
+            revision: 1,
             title: "Push main".to_string(),
             command: "git push".to_string(),
             status: GitTaskStatus::Failed,
@@ -2372,6 +2438,7 @@ mod tests {
         let shared = Arc::new(Mutex::new(runtime_with_workspace(&repo)));
         let task = GitTaskSnapshot {
             id: "task-2".to_string(),
+            revision: 0,
             title: "Publish branch".to_string(),
             command: "git push --set-upstream origin feature/demo".to_string(),
             status: GitTaskStatus::Running,

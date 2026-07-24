@@ -1,6 +1,7 @@
 const STATE_EVENT = "crewdock://state-changed";
 const TERMINAL_DATA_EVENT = "crewdock://terminal-data";
 const RUNTIME_EVENT = "crewdock://runtime-event";
+const BROWSER_NAVIGATION_EVENT = "crewdock://browser-navigation";
 
 export function createBridge({
   defaultThemeId = "one-dark",
@@ -37,6 +38,14 @@ export function createBridge({
         tauriApi.core.invoke("dismiss_app_update", { version }),
       openExternalUrl: (url) =>
         tauriApi.core.invoke("open_external_url", { url }),
+      openBrowserWebview: (url, bounds) =>
+        tauriApi.core.invoke("open_browser_webview", { url, ...bounds }),
+      syncBrowserWebviewBounds: (bounds, visible) =>
+        tauriApi.core.invoke("sync_browser_webview_bounds", { ...bounds, visible }),
+      browserHistory: (direction) =>
+        tauriApi.core.invoke("browser_history", { direction }),
+      reloadBrowserWebview: () =>
+        tauriApi.core.invoke("reload_browser_webview"),
       setTheme: (themeId) => tauriApi.core.invoke("set_theme", { themeId }),
       setSettings: (themeId, interfaceTextScale, terminalFontSize) =>
         tauriApi.core.invoke("set_settings", {
@@ -188,6 +197,8 @@ export function createBridge({
         tauriApi.event.listen(TERMINAL_DATA_EVENT, (event) => handler(event.payload)),
       listenRuntimeEvents: (handler) =>
         tauriApi.event.listen(RUNTIME_EVENT, (event) => handler(event.payload)),
+      listenBrowserNavigation: (handler) =>
+        tauriApi.event.listen(BROWSER_NAVIGATION_EVENT, (event) => handler(event.payload)),
       listenDragDrop: (handler) => {
         const currentWebview = tauriApi.webview?.getCurrentWebview?.();
         if (currentWebview?.onDragDropEvent) {
@@ -943,6 +954,7 @@ function createMockBridge({
     const finishedAt = Date.now();
     workspace.gitTask = {
       id: `git-task-${finishedAt}`,
+      revision: 1,
       title,
       command,
       status,
@@ -997,6 +1009,10 @@ function createMockBridge({
       return emitState();
     },
     openExternalUrl: async (_url) => {},
+    openBrowserWebview: async () => {},
+    syncBrowserWebviewBounds: async () => {},
+    browserHistory: async () => {},
+    reloadBrowserWebview: async () => {},
     loadSystemHealthSnapshot: async () => buildMockSystemHealthSnapshot(),
     listenState: async (handler) => {
       stateListeners.add(handler);
@@ -1010,6 +1026,7 @@ function createMockBridge({
       runtimeListeners.add(handler);
       return () => runtimeListeners.delete(handler);
     },
+    listenBrowserNavigation: async () => () => {},
     listenDragDrop: async () => () => {},
     startDragging: async () => {},
     setTheme: async (themeId) => {
