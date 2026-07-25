@@ -3478,6 +3478,21 @@ function claimPaneTerminalFocus(paneId, workspace = getActiveWorkspace()) {
   return resolvedPaneId;
 }
 
+function getPaneTerminalSelection(paneId) {
+  const terminal = paneTerminals.get(paneId)?.terminal;
+  return terminal?.hasSelection() ? terminal.getSelection() : "";
+}
+
+async function copyPaneTerminalSelection(paneId) {
+  const selection = getPaneTerminalSelection(paneId);
+  if (!selection) {
+    return false;
+  }
+
+  await copyText(selection);
+  return true;
+}
+
 function clearDragHoverPaneId() {
   uiState.dragHoverPaneId = null;
 }
@@ -3838,7 +3853,12 @@ function hasAvailableCodexCli(snapshot = uiState.snapshot) {
 }
 
 function getResolvedTerminalTheme(theme = getCurrentThemeDefinition()) {
-  return { ...theme.terminalTheme };
+  return {
+    ...theme.terminalTheme,
+    selectionInactiveBackground:
+      theme.terminalTheme.selectionInactiveBackground
+      || theme.terminalTheme.selectionBackground,
+  };
 }
 
 function getAppVersion(snapshot = uiState.snapshot) {
@@ -5651,7 +5671,8 @@ function handlePointerDown(event) {
   maybeBeginWorkspaceTabDrag(event, target);
   const paneId = target?.closest("[data-pane-id]")?.dataset?.paneId || null;
   if (paneId) {
-    if (event.button === 0 && !target.closest("[data-browser-pane]")) {
+    const isTerminalPointer = Boolean(target.closest("[data-terminal-host]"));
+    if (event.button === 0 && !target.closest("[data-browser-pane]") && !isTerminalPointer) {
       claimPaneTerminalFocus(paneId);
     } else {
       setActivePaneId(paneId);
@@ -16950,6 +16971,10 @@ function renderContextMenu(contextMenu, workspace) {
   const canClose = workspace.panes.length > 1;
   const fileManagerLabel = getFileManagerLabel();
   const primaryModifier = getPrimaryModifierLabel();
+  const copyShortcut = document.body.dataset.platform === "macos"
+    ? `${primaryModifier}+C`
+    : `${primaryModifier}+Shift+C`;
+  const hasTerminalSelection = Boolean(getPaneTerminalSelection(contextMenu.paneId));
 
   return `
     <div
@@ -16958,6 +16983,10 @@ function renderContextMenu(contextMenu, workspace) {
       data-context-y="${contextMenu.y}"
       style="left:0; top:0; visibility:hidden;"
     >
+      <button class="terminal-context-item" data-action="context-copy-selection" ${hasTerminalSelection ? "" : "disabled"}>
+        <span>Copy selection</span>
+        <span class="terminal-context-shortcut">${copyShortcut}</span>
+      </button>
       <button class="terminal-context-item" data-action="context-copy-path">
         <span>Copy Path</span>
       </button>
@@ -17087,7 +17116,9 @@ async function handleContextMenuAction(target) {
   let requiresWorkspaceRender = false;
 
   try {
-    if (action === "context-copy-path") {
+    if (action === "context-copy-selection") {
+      await copyPaneTerminalSelection(paneId);
+    } else if (action === "context-copy-path") {
       await copyText(workspace.path);
     } else if (action === "context-show-in-file-manager") {
       if (typeof bridge.showInFileManager === "function") {
@@ -17141,12 +17172,29 @@ function mountWorkspaceTerminals(workspace, root = document) {
       fontWeightBold: "560",
       letterSpacing: 0,
       lineHeight: 1.24,
+      macOptionClickForcesSelection: true,
+      rightClickSelectsWord: true,
       scrollback: 8000,
       theme: getResolvedTerminalTheme(theme),
     });
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
     terminal.open(surface);
+    terminal.attachCustomKeyEventHandler((event) => {
+      const isCopyShortcut =
+        event.key.toLowerCase() === "c"
+        && !event.altKey
+        && (
+          (event.metaKey && !event.ctrlKey && !event.shiftKey)
+          || (event.ctrlKey && event.shiftKey && !event.metaKey)
+        );
+      if (!isCopyShortcut) {
+        return true;
+      }
+
+      void copyPaneTerminalSelection(pane.id).catch((error) => console.error(error));
+      return false;
+    });
 
     const state = {
       terminal,
