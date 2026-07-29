@@ -6262,6 +6262,7 @@ function renderWorkspaceSidebarRegion(
     activeWorkspaceId: snapshot.activeWorkspaceId,
     workspaceRenameDraft: uiState.workspaceRenameDraft,
     collapsed: uiState.workspaceSidebarCollapsed,
+    showTimeBlockBomb: Boolean(isTimeBlockingEnabled(snapshot) && uiState.timeBlock.current),
     getWorkspaceAttention,
     hasWorkspaceFileDraftIndicator: workspaceHasFileDraftIndicator,
     getWorkspaceFileDraftIndicatorTitle,
@@ -6273,6 +6274,7 @@ function renderWorkspaceSidebarRegion(
     sidebarRegion.innerHTML = markup;
     sidebarRegion.__crewdockSidebarMarkup = markup;
   }
+  syncTimeBlockSidebarBomb(snapshot);
   syncWorkspaceTabRail(snapshot.activeWorkspaceId, snapshot.workspaces.length);
   if (
     uiState.workspaceRenameDraft
@@ -6281,6 +6283,44 @@ function renderWorkspaceSidebarRegion(
   ) {
     focusWorkspaceRenameInput();
   }
+}
+
+function syncTimeBlockSidebarBomb(snapshot = uiState.snapshot) {
+  const bomb = app.querySelector("[data-time-block-sidebar-bomb]");
+  const current = uiState.timeBlock.current;
+  const display = isTimeBlockingEnabled(snapshot) ? getTimeBlockDisplay(current) : null;
+
+  if (!bomb || !current || !display) {
+    runtimeStore.timeBlockBombExplodedId = "";
+    runtimeStore.timeBlockBombExplodedAtMs = 0;
+    return;
+  }
+
+  const expired = display.remainingMs <= 0;
+  if (expired && runtimeStore.timeBlockBombExplodedId !== current.id) {
+    runtimeStore.timeBlockBombExplodedId = current.id;
+    runtimeStore.timeBlockBombExplodedAtMs = Date.now();
+  }
+
+  const explosionAgeMs = Date.now() - runtimeStore.timeBlockBombExplodedAtMs;
+  const exploding = expired && explosionAgeMs < 1400;
+  bomb.classList.toggle("is-running", display.status === "running" && !expired);
+  bomb.classList.toggle("is-paused", display.status === "paused" && !expired);
+  bomb.classList.toggle("is-exploding", exploding);
+  bomb.classList.toggle("is-spent", expired && !exploding);
+
+  const clock = bomb.querySelector("[data-time-block-bomb-clock]");
+  const task = bomb.querySelector("[data-time-block-bomb-task]");
+  const clockText = `${expired ? "+" : ""}${formatTimeBlockClock(display.clockMs)}`;
+  if (clock) {
+    clock.textContent = clockText;
+  }
+  if (task) {
+    task.textContent = display.task;
+  }
+  const stateLabel = expired ? "expired" : display.status;
+  bomb.setAttribute("aria-label", `${display.task}, ${clockText}, ${stateLabel}. Open Time Block`);
+  bomb.title = `${display.task} · ${clockText}`;
 }
 
 function mountWorkspaceTabDragChrome() {

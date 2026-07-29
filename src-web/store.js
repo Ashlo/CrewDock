@@ -183,6 +183,8 @@ export function createRuntimeStore() {
     workspaceCodeEditors: new Map(),
     codeMirrorModulePromise: null,
     timeBlockTickTimer: 0,
+    timeBlockBombExplodedId: "",
+    timeBlockBombExplodedAtMs: 0,
     workspaceCompanionTimer: 0,
     browserBoundsFrame: 0,
     browserBoundsSignature: "",

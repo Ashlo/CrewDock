@@ -52,6 +52,7 @@ export function renderWorkspaceSidebar({
   activeWorkspaceId,
   workspaceRenameDraft,
   collapsed,
+  showTimeBlockBomb,
   getWorkspaceAttention,
   hasWorkspaceFileDraftIndicator,
   getWorkspaceFileDraftIndicatorTitle,
@@ -113,6 +114,7 @@ export function renderWorkspaceSidebar({
           </div>
         </div>
       </div>
+      ${showTimeBlockBomb ? renderTimeBlockBomb() : ""}
       <button
         class="workspace-sidebar-new"
         type="button"
@@ -124,6 +126,34 @@ export function renderWorkspaceSidebar({
         <span>New workspace</span>
       </button>
     </nav>
+  `;
+}
+
+function renderTimeBlockBomb() {
+  return `
+    <button
+      class="workspace-time-block-bomb"
+      type="button"
+      data-action="toggle-time-block-popover"
+      data-time-block-sidebar-bomb
+      aria-label="Open Time Block"
+      title="Open Time Block"
+    >
+      <span class="workspace-time-block-bomb-stage" aria-hidden="true">
+        <span class="workspace-time-block-bomb-visual">
+          <span class="workspace-time-block-bomb-fuse"></span>
+          <span class="workspace-time-block-bomb-spark"></span>
+          <span class="workspace-time-block-bomb-shell">
+            <span class="workspace-time-block-bomb-clock" data-time-block-bomb-clock>0:00</span>
+          </span>
+        </span>
+        <span class="workspace-time-block-bomb-blast">
+          <strong>BOOM</strong>
+          <i></i><i></i><i></i><i></i><i></i><i></i>
+        </span>
+      </span>
+      <span class="workspace-time-block-bomb-task" data-time-block-bomb-task>Focus block</span>
+    </button>
   `;
 }
 
