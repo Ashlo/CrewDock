@@ -25,7 +25,9 @@ use portable_pty::{ChildKiller, PtySize};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sysinfo::{CpuRefreshKind, DiskRefreshKind, Disks, MemoryRefreshKind, RefreshKind, System};
+use sysinfo::{
+    CpuRefreshKind, DiskRefreshKind, Disks, MemoryRefreshKind, Pid, RefreshKind, System,
+};
 use tauri::{
     webview::{PageLoadEvent, WebviewBuilder},
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, State, Url, WebviewUrl,
@@ -5452,6 +5454,62 @@ fn write_to_pane(pane_id: String, data: String, state: State<'_, AppState>) -> R
     write_shell_command(&writer, &data)
 }
 
+fn is_codex_process_name(name: &OsStr) -> bool {
+    Path::new(name)
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .is_some_and(|name| name.eq_ignore_ascii_case("codex"))
+}
+
+fn process_tree_has_codex(shell_pid: u32) -> bool {
+    let system = System::new_all();
+    let mut descendants = HashSet::from([Pid::from_u32(shell_pid)]);
+
+    loop {
+        let mut discovered = Vec::new();
+        for (pid, process) in system.processes() {
+            if descendants.contains(pid) {
+                if is_codex_process_name(process.name())
+                    || process
+                        .exe()
+                        .and_then(Path::file_name)
+                        .is_some_and(is_codex_process_name)
+                {
+                    return true;
+                }
+                continue;
+            }
+            if process
+                .parent()
+                .is_some_and(|parent| descendants.contains(&parent))
+            {
+                discovered.push(*pid);
+            }
+        }
+        if discovered.is_empty() {
+            return false;
+        }
+        descendants.extend(discovered);
+    }
+}
+
+#[tauri::command]
+fn pane_has_codex_process(pane_id: String, state: State<'_, AppState>) -> Result<bool, String> {
+    let shell_pid = {
+        let runtime = state
+            .inner
+            .lock()
+            .map_err(|_| "failed to acquire application state".to_string())?;
+        runtime
+            .sessions
+            .get(&pane_id)
+            .ok_or_else(|| "pane session not found".to_string())?
+            .shell_pid
+    };
+
+    Ok(shell_pid.is_some_and(process_tree_has_codex))
+}
+
 #[tauri::command]
 fn resize_pane(
     pane_id: String,
@@ -6988,6 +7046,7 @@ pub fn run() {
             open_workspace_in_target,
             run_launcher_command,
             write_to_pane,
+            pane_has_codex_process,
             resize_pane
         ])
         .run(tauri::generate_context!())
@@ -7017,15 +7076,16 @@ mod tests {
         collect_git_detail_with_binary, compare_codex_cli_versions,
         complete_launcher_input_for_base, default_launcher_path, execute_launcher_command,
         external_workspace_target_spec, extract_login_shell_path, extract_navigation_target,
-        layout_for_pane_count, layout_presets, load_workspace_codex_sessions_snapshot,
-        load_workspace_file_explorer_directory_snapshot, load_workspace_text_file_snapshot,
-        merge_path_values, normalize_workspace_path, parse_battery_snapshot, parse_browser_url,
-        parse_codex_cli_version, parse_git_status_porcelain, persistence::ActivityEventKind,
-        prepare_workspace_launch, read_codex_session_summary, resolve_navigation_path,
-        run_command_output_with_timeout, save_workspace_text_file_snapshot,
-        try_bind_pending_codex_start, upsert_workspace_codex_restore_binding, validate_git_cli_arg,
-        BatteryState, CodexCliCandidateSnapshot, CodexCliSelectionMode, CodexCliSnapshot,
-        CodexCliSource, CodexCliStatus, ExternalWorkspaceTargetKind, GitFileKind, GitState,
+        is_codex_process_name, layout_for_pane_count, layout_presets,
+        load_workspace_codex_sessions_snapshot, load_workspace_file_explorer_directory_snapshot,
+        load_workspace_text_file_snapshot, merge_path_values, normalize_workspace_path,
+        parse_battery_snapshot, parse_browser_url, parse_codex_cli_version,
+        parse_git_status_porcelain, persistence::ActivityEventKind, prepare_workspace_launch,
+        read_codex_session_summary, resolve_navigation_path, run_command_output_with_timeout,
+        save_workspace_text_file_snapshot, try_bind_pending_codex_start,
+        upsert_workspace_codex_restore_binding, validate_git_cli_arg, BatteryState,
+        CodexCliCandidateSnapshot, CodexCliSelectionMode, CodexCliSnapshot, CodexCliSource,
+        CodexCliStatus, ExternalWorkspaceTargetKind, GitFileKind, GitState,
         PendingCodexStartRecord, RuntimeState, ThemeId, WorkspaceFileDraftRecord,
         WorkspaceFileExplorerEntryKind, WorkspaceTextFileNewlineStyle, WorkspaceTodoRecord,
         DEFAULT_INTERFACE_TEXT_SCALE, DEFAULT_TERMINAL_FONT_SIZE,
@@ -7046,6 +7106,14 @@ mod tests {
             runtime.settings.terminal_font_size,
             DEFAULT_TERMINAL_FONT_SIZE
         );
+    }
+
+    #[test]
+    fn codex_process_name_matches_native_macos_and_windows_binaries() {
+        assert!(is_codex_process_name(OsStr::new("codex")));
+        assert!(is_codex_process_name(OsStr::new("codex.exe")));
+        assert!(!is_codex_process_name(OsStr::new("node")));
+        assert!(!is_codex_process_name(OsStr::new("codex-code-mode-host")));
     }
 
     #[test]

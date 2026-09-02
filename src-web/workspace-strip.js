@@ -5,6 +5,7 @@ export function renderWorkspaceStrip({
   workspaceRenameDraft,
   workspaceOpenControlHtml,
   workspaceGitControlHtml,
+  taskBoardControlHtml,
   timeBlockControlHtml,
   getWorkspaceAttention,
   hasWorkspaceFileDraftIndicator,
@@ -21,6 +22,7 @@ export function renderWorkspaceStrip({
       ${renderWindowSummary(windowSummary, workspaces.length, escapeHtml)}
       ${renderActiveWorkspaceCrumb(activeWorkspace, tabLabels, escapeHtml)}
       <div class="workspace-strip-actions">
+        ${taskBoardControlHtml || ""}
         ${timeBlockControlHtml || ""}
         ${workspaceOpenControlHtml || ""}
         ${workspaceGitControlHtml || ""}

@@ -25,6 +25,7 @@ pub(crate) struct PaneJob {
 
 pub(crate) struct LiveSession {
     pub(crate) workspace_id: String,
+    pub(crate) shell_pid: Option<u32>,
     pub(crate) master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
     pub(crate) writer: Arc<Mutex<Box<dyn Write + Send>>>,
     pub(crate) killer: Box<dyn ChildKiller + Send + Sync>,
@@ -135,6 +136,7 @@ fn spawn_terminal_session(
         .master
         .take_writer()
         .map_err(|error| format!("failed to open PTY writer: {error}"))?;
+    let shell_pid = child.process_id();
     let killer = child.clone_killer();
     let master = Arc::new(Mutex::new(pair.master));
     let writer = Arc::new(Mutex::new(writer));
@@ -171,6 +173,7 @@ fn spawn_terminal_session(
             pane_id.clone(),
             LiveSession {
                 workspace_id: workspace_id.clone(),
+                shell_pid,
                 master: master.clone(),
                 writer: writer.clone(),
                 killer,
@@ -212,6 +215,7 @@ fn spawn_terminal_session(
 }
 
 fn strip_tooling_env(command: &mut CommandBuilder) {
+    command.env_remove("NO_COLOR");
     for (key, _) in env::vars_os() {
         let key = key.to_string_lossy();
         if key.starts_with("npm_") || key.starts_with("NPM_") {

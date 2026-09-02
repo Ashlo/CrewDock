@@ -18,7 +18,13 @@ import { renderActivityRail } from "./activity-rail.js";
 import {
   createRuntimeStore,
   createUiState,
+  moveTaskBoardTask,
+  normalizeTaskBoardTasks,
+  reconcileCodexPanePresentation,
   reconcileSourceControlTask,
+  resolveTerminalFitViewportLine,
+  TASK_BOARD_STATUSES,
+  TERMINAL_VIEWPORT_PINNED_TO_BOTTOM,
 } from "./store.js";
 import {
   buildWorkspaceTabLabels,
@@ -35,7 +41,6 @@ const MAX_PENDING_TERMINAL_BYTES = 4 * 1024 * 1024;
 const MAX_RUNTIME_ACTIVITY_ITEMS = 120;
 const MAX_WORKSPACE_ATTENTION_COUNT = 99;
 const DISPATCH_FEATURE_ENABLED = false;
-const TERMINAL_VIEWPORT_PINNED_TO_BOTTOM = -1;
 const TERMINAL_VIEWPORT_BOTTOM_THRESHOLD_ROWS = 2;
 const MAX_DISPATCH_TOASTS = 4;
 const DISPATCH_TOAST_LIFETIME_MS = 5000;
@@ -64,10 +69,16 @@ const WORKSPACE_FILE_EDITOR_MIN_WIDTH = 340;
 const WORKSPACE_FILE_EDITOR_MAX_WIDTH = 1160;
 const WORKSPACE_FILE_EDITOR_MIN_STAGE_WIDTH = 420;
 const TIME_BLOCK_STATE_STORAGE_KEY = "crewdock.timeBlock.state";
+const TASK_BOARD_STORAGE_KEY = "crewdock.taskBoard.tasks";
 const TIME_BLOCK_DEFAULT_DURATION_MINUTES = 50;
 const TIME_BLOCK_MIN_DURATION_MINUTES = 1;
 const TIME_BLOCK_MAX_DURATION_MINUTES = 240;
 const TIME_BLOCK_PRESETS_MINUTES = Object.freeze([25, 50, 90]);
+const TASK_BOARD_COLUMN_META = Object.freeze({
+  todo: Object.freeze({ label: "To do", eyebrow: "Queue" }),
+  "in-progress": Object.freeze({ label: "In progress", eyebrow: "Active" }),
+  done: Object.freeze({ label: "Done", eyebrow: "Shipped" }),
+});
 const WORKSPACE_COMPANION_STATE_DURATION_MS = Object.freeze({
   sleeping: Object.freeze([12_000, 24_000]),
   eating: Object.freeze([6_000, 11_000]),
@@ -1013,6 +1024,7 @@ uiState.workspaceSidebarCollapsed = loadWorkspaceSidebarCollapsedPreference();
 uiState.workspaceCompanionId = loadWorkspaceCompanionPreference();
 uiState.workspaceFileEditorWidth = loadWorkspaceFileEditorWidthPreference();
 uiState.timeBlock = loadTimeBlockState();
+uiState.taskBoard.tasks = loadTaskBoardTasks();
 const runtimeStore = createRuntimeStore();
 const {
   paneTerminals,
@@ -1201,6 +1213,170 @@ function persistTimeBlockState() {
   } catch {
     // Time blocking is a local convenience feature; it should not block the workbench.
   }
+}
+
+function loadTaskBoardTasks() {
+  try {
+    const raw = window.localStorage?.getItem(TASK_BOARD_STORAGE_KEY);
+    return normalizeTaskBoardTasks(raw ? JSON.parse(raw) : []);
+  } catch {
+    return [];
+  }
+}
+
+function persistTaskBoardTasks() {
+  try {
+    window.localStorage?.setItem(
+      TASK_BOARD_STORAGE_KEY,
+      JSON.stringify(uiState.taskBoard.tasks),
+    );
+  } catch {
+    // Personal tasks remain usable for this session when local storage is unavailable.
+  }
+}
+
+function createTaskBoardTaskId() {
+  return globalThis.crypto?.randomUUID?.() || `task-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function requestTaskBoardRender() {
+  requestRender(RENDER_STRIP | RENDER_STAGE);
+}
+
+function setTaskBoardVisible(visible) {
+  uiState.taskBoard.visible = Boolean(visible);
+  finishTaskBoardPointerDrag();
+  if (!visible) {
+    cancelTaskBoardEdit();
+  }
+  if (visible) {
+    uiState.taskBoard.shouldFocus = true;
+    uiState.launcherVisible = false;
+    closeTimeBlockPopover();
+    hideSettingsSheet();
+    closeTodoPanel();
+    closeCodexModal();
+    closeSystemHealthPanel();
+    closeSourceControlPanel();
+    closeWorkspaceOpenMenu();
+    closeWorkspaceGitMenu();
+    uiState.activityRailVisible = false;
+    closeQuickSwitcher();
+    uiState.pendingWorkspaceDraft = null;
+    uiState.contextMenu = null;
+  }
+  scheduleBrowserWebviewSync();
+  requestRender(RENDER_ALL);
+}
+
+function addTaskBoardTask(text) {
+  const normalizedText = String(text || "").trim().slice(0, 160);
+  if (!normalizedText) {
+    return false;
+  }
+  const now = Date.now();
+  uiState.taskBoard.tasks = [{
+    id: createTaskBoardTaskId(),
+    text: normalizedText,
+    status: "todo",
+    createdAtMs: now,
+    updatedAtMs: now,
+  }, ...uiState.taskBoard.tasks];
+  uiState.taskBoard.draft = "";
+  uiState.taskBoard.shouldFocus = true;
+  persistTaskBoardTasks();
+  return true;
+}
+
+function updateTaskBoardTask(taskId, update) {
+  let changed = false;
+  uiState.taskBoard.tasks = uiState.taskBoard.tasks.map((task) => {
+    if (task.id !== taskId) {
+      return task;
+    }
+    const next = update(task);
+    changed = next !== task;
+    return changed ? { ...next, updatedAtMs: Date.now() } : task;
+  });
+  if (changed) {
+    persistTaskBoardTasks();
+  }
+  return changed;
+}
+
+function beginTaskBoardEdit(taskId) {
+  const task = uiState.taskBoard.tasks.find((entry) => entry.id === taskId);
+  if (!task) {
+    return false;
+  }
+  uiState.taskBoard.editingTaskId = task.id;
+  uiState.taskBoard.editDraft = task.text;
+  uiState.taskBoard.editShouldFocus = true;
+  return true;
+}
+
+function cancelTaskBoardEdit() {
+  uiState.taskBoard.editingTaskId = "";
+  uiState.taskBoard.editDraft = "";
+  uiState.taskBoard.editShouldFocus = false;
+}
+
+function saveTaskBoardEdit(taskId, text) {
+  const normalizedText = String(text || "").trim().slice(0, 160);
+  if (!normalizedText) {
+    return false;
+  }
+  updateTaskBoardTask(taskId, (task) => (
+    task.text === normalizedText ? task : { ...task, text: normalizedText }
+  ));
+  cancelTaskBoardEdit();
+  return true;
+}
+
+function setTaskBoardTaskStatus(taskId, status) {
+  if (!TASK_BOARD_STATUSES.includes(status)) {
+    return false;
+  }
+  const current = uiState.taskBoard.tasks.find((task) => task.id === taskId);
+  if (!current || current.status === status) {
+    return false;
+  }
+  const moved = moveTaskBoardTask(uiState.taskBoard.tasks, taskId, status);
+  uiState.taskBoard.tasks = moved.map((task) => task.id === taskId
+    ? { ...task, updatedAtMs: Date.now() }
+    : task);
+  persistTaskBoardTasks();
+  return true;
+}
+
+function moveTaskBoardTaskByDirection(taskId, direction) {
+  const task = uiState.taskBoard.tasks.find((entry) => entry.id === taskId);
+  const index = task ? TASK_BOARD_STATUSES.indexOf(task.status) : -1;
+  const nextIndex = index + (direction === "left" ? -1 : 1);
+  if (index < 0 || nextIndex < 0 || nextIndex >= TASK_BOARD_STATUSES.length) {
+    return false;
+  }
+  return setTaskBoardTaskStatus(taskId, TASK_BOARD_STATUSES[nextIndex]);
+}
+
+function deleteTaskBoardTask(taskId) {
+  const task = uiState.taskBoard.tasks.find((entry) => entry.id === taskId);
+  if (!task || !window.confirm(`Delete "${task.text}"?`)) {
+    return false;
+  }
+  uiState.taskBoard.tasks = uiState.taskBoard.tasks.filter((entry) => entry.id !== taskId);
+  persistTaskBoardTasks();
+  return true;
+}
+
+function clearCompletedTaskBoardTasks() {
+  const completedCount = uiState.taskBoard.tasks.filter((task) => task.status === "done").length;
+  if (!completedCount || !window.confirm(`Delete ${completedCount} completed task${completedCount === 1 ? "" : "s"}?`)) {
+    return false;
+  }
+  uiState.taskBoard.tasks = uiState.taskBoard.tasks.filter((task) => task.status !== "done");
+  persistTaskBoardTasks();
+  return true;
 }
 
 function isTimeBlockingEnabled(snapshot = uiState.snapshot) {
@@ -1463,6 +1639,7 @@ function isBrowserWebviewVisible() {
     && uiState.browser.url
     && workspace
     && browserPaneAvailable
+    && !uiState.taskBoard.visible
     && !uiState.launcherVisible
     && !uiState.quickSwitcherVisible
     && !uiState.settingsVisible
@@ -1651,12 +1828,22 @@ function pruneWorkspaceFileExplorerState(snapshot = uiState.snapshot) {
 }
 
 function pruneCodexRestoreState(snapshot = uiState.snapshot) {
-  const paneIds = new Set(
-    (snapshot?.workspaces || []).flatMap((workspace) => workspace.panes?.map((pane) => pane.id) || []),
-  );
+  const activeWorkspaceId = snapshot?.activeWorkspace?.id;
+  const paneIds = new Set(snapshot?.activeWorkspace?.panes?.map((pane) => pane.id) || []);
   for (const paneId of uiState.codexRestoreByPane.keys()) {
     if (!paneIds.has(paneId)) {
       uiState.codexRestoreByPane.delete(paneId);
+    }
+  }
+  const workspaceIds = new Set((snapshot?.workspaces || []).map((workspace) => workspace.id));
+  if (activeWorkspaceId) {
+    workspaceIds.add(activeWorkspaceId);
+  }
+  for (const [paneId, presentation] of uiState.codexPanePresentationById.entries()) {
+    const workspaceRemoved = !workspaceIds.has(presentation.workspaceId);
+    const activePaneRemoved = presentation.workspaceId === activeWorkspaceId && !paneIds.has(paneId);
+    if (workspaceRemoved || activePaneRemoved) {
+      clearCodexPanePresentation(paneId, { syncDom: false });
     }
   }
 }
@@ -4978,11 +5165,75 @@ async function handleClick(event) {
     return;
   }
 
+  if (target.dataset.action === "run-pane-header-action") {
+    const pane = target.closest("[data-pane-id]");
+    const paneId = pane?.dataset.paneId;
+    const paneAction = target.dataset.paneAction;
+    if (!paneId || !paneAction) {
+      return;
+    }
+
+    const focusPaneId = await runPaneAction(paneAction, paneId, {
+      direction: target.dataset.direction || "right",
+    });
+    render();
+    focusPaneTerminal(focusPaneId);
+    return;
+  }
+
   if (
     target.dataset.action?.startsWith("scm-")
     || target.dataset.action === "close-scm-publish-modal"
   ) {
     await handleSourceControlAction(target);
+    return;
+  }
+
+  if (target.dataset.action === "toggle-task-board") {
+    setTaskBoardVisible(!uiState.taskBoard.visible);
+    return;
+  }
+
+  if (target.dataset.action === "move-task-board-task") {
+    if (moveTaskBoardTaskByDirection(target.dataset.taskId || "", target.dataset.direction)) {
+      requestTaskBoardRender();
+    }
+    return;
+  }
+
+  if (target.dataset.action === "edit-task-board-task") {
+    if (beginTaskBoardEdit(target.dataset.taskId || "")) {
+      requestTaskBoardRender();
+    }
+    return;
+  }
+
+  if (target.dataset.action === "save-task-board-edit") {
+    event.preventDefault();
+    const form = target.closest("[data-task-board-edit-form]");
+    if (saveTaskBoardEdit(form?.dataset.taskId || "", uiState.taskBoard.editDraft)) {
+      requestTaskBoardRender();
+    }
+    return;
+  }
+
+  if (target.dataset.action === "cancel-task-board-edit") {
+    cancelTaskBoardEdit();
+    requestTaskBoardRender();
+    return;
+  }
+
+  if (target.dataset.action === "delete-task-board-task") {
+    if (deleteTaskBoardTask(target.dataset.taskId || "")) {
+      requestTaskBoardRender();
+    }
+    return;
+  }
+
+  if (target.dataset.action === "clear-task-board-done") {
+    if (clearCompletedTaskBoardTasks()) {
+      requestTaskBoardRender();
+    }
     return;
   }
 
@@ -5091,6 +5342,7 @@ async function handleClick(event) {
   }
 
   if (target.dataset.action === "show-launcher") {
+    uiState.taskBoard.visible = false;
     uiState.launcherVisible = true;
     hideSettingsSheet();
     closeTodoPanel();
@@ -5665,6 +5917,9 @@ function handleMouseDown(event) {
 
 function handlePointerDown(event) {
   const target = event.target instanceof Element ? event.target : null;
+  if (maybeBeginTaskBoardPointerDrag(event, target)) {
+    return;
+  }
   if (maybeBeginWorkspaceFileEditorResize(event, target)) {
     return;
   }
@@ -5716,6 +5971,9 @@ function handlePointerDown(event) {
 }
 
 function handlePointerMove(event) {
+  if (updateTaskBoardPointerDrag(event)) {
+    return;
+  }
   if (updateWorkspaceFileEditorResize(event)) {
     return;
   }
@@ -5739,6 +5997,9 @@ function handlePointerMove(event) {
 }
 
 async function handlePointerUp(event) {
+  if (completeTaskBoardPointerDrag(event)) {
+    return;
+  }
   if (completeWorkspaceFileEditorResize(event)) {
     return;
   }
@@ -5758,6 +6019,9 @@ async function handlePointerUp(event) {
 }
 
 function handlePointerCancel(event) {
+  if (cancelTaskBoardPointerDrag(event)) {
+    return;
+  }
   if (cancelWorkspaceFileEditorResize(event)) {
     return;
   }
@@ -6106,6 +6370,7 @@ function renderWorkspaceStripRegion(
     workspaceGitControlHtml: snapshot.activeWorkspace
       ? renderWorkspaceGitControl(snapshot.activeWorkspace)
       : "",
+    taskBoardControlHtml: renderTaskBoardControl(),
     timeBlockControlHtml: renderTimeBlockControl(snapshot),
     getWorkspaceAttention,
     hasWorkspaceFileDraftIndicator: workspaceHasFileDraftIndicator,
@@ -6114,6 +6379,25 @@ function renderWorkspaceStripRegion(
     getGitTone,
     formatGitBadgeTitle,
   });
+}
+
+function renderTaskBoardControl() {
+  const activeCount = uiState.taskBoard.tasks.filter((task) => task.status !== "done").length;
+  return `
+    <button
+      class="workspace-task-board-button ${uiState.taskBoard.visible ? "is-active" : ""}"
+      type="button"
+      data-action="toggle-task-board"
+      data-tauri-drag-region="false"
+      aria-label="${uiState.taskBoard.visible ? "Return to workspace" : "Open Task Board"}"
+      aria-pressed="${uiState.taskBoard.visible ? "true" : "false"}"
+      title="${uiState.taskBoard.visible ? "Return to workspace" : "Open Task Board"}"
+    >
+      <span aria-hidden="true">${renderTasksIcon()}</span>
+      <strong>Task Board</strong>
+      <small>${escapeHtml(String(activeCount))}</small>
+    </button>
+  `;
 }
 
 function renderTimeBlockControl(snapshot = uiState.snapshot) {
@@ -6772,6 +7056,102 @@ function handleDocumentDrop(event) {
   clearDragHoverPaneId();
 }
 
+function maybeBeginTaskBoardPointerDrag(event, target) {
+  const card = target?.closest("[data-task-board-card]");
+  if (
+    !uiState.taskBoard.visible
+    || event.button !== 0
+    || !(card instanceof HTMLElement)
+    || target?.closest("button, input, textarea, a")
+  ) {
+    return false;
+  }
+
+  runtimeStore.taskBoardPointerDrag = {
+    pointerId: event.pointerId,
+    taskId: card.dataset.taskBoardCard || "",
+    startX: event.clientX,
+    startY: event.clientY,
+    status: "pending",
+    dropStatus: "",
+    card,
+  };
+  try {
+    card.setPointerCapture(event.pointerId);
+  } catch {
+    // Pointer capture is best effort when the webview changes focus mid-gesture.
+  }
+  event.preventDefault();
+  return true;
+}
+
+function updateTaskBoardPointerDrag(event) {
+  const drag = runtimeStore.taskBoardPointerDrag;
+  if (!drag || event.pointerId !== drag.pointerId) {
+    return false;
+  }
+  if (
+    drag.status === "pending"
+    && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) < 5
+  ) {
+    return true;
+  }
+
+  drag.status = "dragging";
+  drag.card?.classList.add("is-dragging");
+  document.body.classList.add("is-dragging-task-board-card");
+  const column = document.elementFromPoint(event.clientX, event.clientY)
+    ?.closest?.("[data-task-board-column]");
+  drag.dropStatus = column?.dataset?.taskBoardColumn || "";
+  for (const candidate of document.querySelectorAll("[data-task-board-column]")) {
+    candidate.classList.toggle("is-drop-target", candidate === column);
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function completeTaskBoardPointerDrag(event) {
+  const drag = runtimeStore.taskBoardPointerDrag;
+  if (!drag || event.pointerId !== drag.pointerId) {
+    return false;
+  }
+  const changed = drag.status === "dragging"
+    && setTaskBoardTaskStatus(drag.taskId, drag.dropStatus);
+  finishTaskBoardPointerDrag();
+  if (changed) {
+    requestTaskBoardRender();
+  }
+  event.preventDefault();
+  event.stopPropagation();
+  return true;
+}
+
+function cancelTaskBoardPointerDrag(event) {
+  const drag = runtimeStore.taskBoardPointerDrag;
+  if (!drag || event.pointerId !== drag.pointerId) {
+    return false;
+  }
+  finishTaskBoardPointerDrag();
+  return true;
+}
+
+function finishTaskBoardPointerDrag() {
+  const drag = runtimeStore.taskBoardPointerDrag;
+  runtimeStore.taskBoardPointerDrag = null;
+  document.body.classList.remove("is-dragging-task-board-card");
+  for (const element of document.querySelectorAll(".task-board-card.is-dragging, .task-board-column.is-drop-target")) {
+    element.classList.remove("is-dragging", "is-drop-target");
+  }
+  if (drag?.card instanceof Element && drag.card.hasPointerCapture?.(drag.pointerId)) {
+    try {
+      drag.card.releasePointerCapture(drag.pointerId);
+    } catch {
+      // The card may have been rerendered before the pointer is released.
+    }
+  }
+}
+
 function handleScroll(event) {
   const tabs = event.target instanceof Element && event.target.matches(".workspace-tabs")
     ? event.target
@@ -6842,6 +7222,7 @@ function handleWindowFocus() {
 }
 
 function handleWindowBlur() {
+  finishTaskBoardPointerDrag();
   if (isWorkspaceTabDragActive()) {
     cancelWorkspaceTabDrag();
   }
@@ -6878,6 +7259,24 @@ function handleFocusOut(event) {
 }
 
 async function handleSubmit(event) {
+  const taskBoardEditForm = event.target.closest("[data-task-board-edit-form]");
+  if (taskBoardEditForm) {
+    event.preventDefault();
+    if (saveTaskBoardEdit(taskBoardEditForm.dataset.taskId || "", uiState.taskBoard.editDraft)) {
+      requestTaskBoardRender();
+    }
+    return;
+  }
+
+  const taskBoardForm = event.target.closest('[data-action="create-task-board-task"]');
+  if (taskBoardForm) {
+    event.preventDefault();
+    if (addTaskBoardTask(uiState.taskBoard.draft)) {
+      requestTaskBoardRender();
+    }
+    return;
+  }
+
   const browserForm = event.target.closest('[data-action="navigate-browser"]');
   if (browserForm) {
     event.preventDefault();
@@ -6941,6 +7340,18 @@ async function handleSubmit(event) {
 }
 
 function handleInput(event) {
+  const taskBoardEditInput = event.target.closest("[data-task-board-edit-input]");
+  if (taskBoardEditInput) {
+    uiState.taskBoard.editDraft = taskBoardEditInput.value.slice(0, 160);
+    return;
+  }
+
+  const taskBoardInput = event.target.closest("[data-task-board-input]");
+  if (taskBoardInput) {
+    uiState.taskBoard.draft = taskBoardInput.value.slice(0, 160);
+    return;
+  }
+
   const browserInput = event.target.closest("[data-browser-address]");
   if (browserInput) {
     uiState.browser.input = browserInput.value;
@@ -7266,6 +7677,12 @@ async function handleKeyDown(event) {
     event.preventDefault();
     uiState.activityRailVisible = false;
     requestRender(RENDER_STATUS | RENDER_ACTIVITY);
+    return;
+  }
+
+  if (uiState.maximizedPaneId && event.key === "Escape") {
+    event.preventDefault();
+    restoreMaximizedPane();
     return;
   }
 
@@ -7751,6 +8168,16 @@ async function resumeSelectedCodexSession() {
     return;
   }
 
+  const selectedSession = uiState.codexSessionsSnapshot?.sessions?.find(
+    (session) => session.id === sessionId,
+  );
+  startCodexPanePresentation(paneId, {
+    workspaceId: workspace.id,
+    sessionId,
+    title: selectedSession?.displayTitle || "Codex session",
+    resolved: isResolvedCodexSessionTitle(selectedSession?.displayTitle),
+  });
+
   uiState.codexSubmitting = true;
   requestRender(RENDER_MODAL);
 
@@ -7761,6 +8188,7 @@ async function resumeSelectedCodexSession() {
     requestRender(RENDER_ALL);
     focusPaneTerminal(paneId);
   } catch (error) {
+    clearCodexPanePresentation(paneId);
     reportSourceControlError(error);
     uiState.codexSubmitting = false;
     requestRender(RENDER_MODAL);
@@ -7774,6 +8202,13 @@ async function startNewCodexSession() {
     return;
   }
 
+  startCodexPanePresentation(paneId, {
+    workspaceId: workspace.id,
+    previousSessionId: uiState.codexSessionsSnapshot?.rememberedSessionId || "",
+    title: "Codex session",
+  });
+  scheduleCodexPanePresentationRefresh(paneId, 1000);
+
   uiState.codexSubmitting = true;
   requestRender(RENDER_MODAL);
 
@@ -7784,6 +8219,7 @@ async function startNewCodexSession() {
     requestRender(RENDER_ALL);
     focusPaneTerminal(paneId);
   } catch (error) {
+    clearCodexPanePresentation(paneId);
     reportSourceControlError(error);
     uiState.codexSubmitting = false;
     requestRender(RENDER_MODAL);
@@ -8897,6 +9333,9 @@ function handlePaneLifecycleRuntimeEvent(event) {
   }
 
   pane.status = paneStatusForRuntimeKind(normalizedEvent.kind);
+  if (normalizedEvent.kind !== "paneReady") {
+    clearCodexPanePresentation(normalizedEvent.paneId);
+  }
   syncActiveWorkspacePaneStatusDom(normalizedEvent.workspaceId, normalizedEvent.paneId);
   return true;
 }
@@ -9822,6 +10261,163 @@ function recordRuntimeEvent(event) {
   return true;
 }
 
+function isResolvedCodexSessionTitle(title) {
+  return String(title || "").includes(": ");
+}
+
+function getCodexPanePresentation(paneId) {
+  return uiState.codexPanePresentationById.get(paneId) || null;
+}
+
+function startCodexPanePresentation(paneId, presentation) {
+  const next = reconcileCodexPanePresentation(null, {
+    kind: "start",
+    ...presentation,
+  });
+  uiState.codexPanePresentationById.set(paneId, next);
+  syncCodexPaneTitleDom(next.workspaceId, paneId);
+}
+
+function clearCodexPanePresentation(paneId, { syncDom = true } = {}) {
+  const current = getCodexPanePresentation(paneId);
+  const timer = runtimeStore.codexPaneRefreshTimers.get(paneId);
+  if (timer) {
+    clearTimeout(timer);
+    runtimeStore.codexPaneRefreshTimers.delete(paneId);
+  }
+  runtimeStore.codexPaneRefreshInFlight.delete(paneId);
+  const processTimer = runtimeStore.codexPaneProcessTimers.get(paneId);
+  if (processTimer) {
+    clearTimeout(processTimer);
+    runtimeStore.codexPaneProcessTimers.delete(paneId);
+  }
+  runtimeStore.codexPaneProcessInFlight.delete(paneId);
+  uiState.codexPanePresentationById.delete(paneId);
+  if (syncDom && current) {
+    syncCodexPaneTitleDom(current.workspaceId, paneId);
+  }
+}
+
+function handlePaneTerminalTitleChange(workspaceId, paneId, title) {
+  const current = getCodexPanePresentation(paneId);
+  schedulePaneCodexProcessInspection(workspaceId, paneId);
+  if (title && current?.workspaceId === workspaceId && !current.resolved) {
+    scheduleCodexPanePresentationRefresh(paneId, 300);
+  }
+}
+
+function schedulePaneCodexProcessInspection(workspaceId, paneId, delay = 0) {
+  const currentTimer = runtimeStore.codexPaneProcessTimers.get(paneId);
+  if (currentTimer) {
+    clearTimeout(currentTimer);
+  }
+  const timer = setTimeout(() => {
+    runtimeStore.codexPaneProcessTimers.delete(paneId);
+    void inspectPaneCodexProcess(workspaceId, paneId);
+  }, delay);
+  runtimeStore.codexPaneProcessTimers.set(paneId, timer);
+}
+
+async function inspectPaneCodexProcess(workspaceId, paneId) {
+  if (!bridge.paneHasCodexProcess) {
+    return;
+  }
+  if (runtimeStore.codexPaneProcessInFlight.has(paneId)) {
+    return runtimeStore.codexPaneProcessInFlight.get(paneId);
+  }
+
+  const inspection = Promise.resolve(bridge.paneHasCodexProcess(paneId)).then((isRunning) => {
+    const current = getCodexPanePresentation(paneId);
+    if (!isRunning) {
+      if (current?.workspaceId === workspaceId) {
+        clearCodexPanePresentation(paneId);
+      }
+      return;
+    }
+    if (!current) {
+      const sessions = uiState.codexSessionsSnapshot;
+      startCodexPanePresentation(paneId, {
+        workspaceId,
+        previousSessionId: sessions?.workspaceId === workspaceId
+          ? sessions.rememberedSessionId || ""
+          : "",
+        startedAtMs: Date.now(),
+        selectLatest: true,
+        title: "Codex session",
+      });
+    }
+    scheduleCodexPanePresentationRefresh(paneId, 300);
+  }).catch((error) => console.error(error)).finally(() => {
+    if (runtimeStore.codexPaneProcessInFlight.get(paneId) === inspection) {
+      runtimeStore.codexPaneProcessInFlight.delete(paneId);
+    }
+  });
+  runtimeStore.codexPaneProcessInFlight.set(paneId, inspection);
+  return inspection;
+}
+
+function scheduleCodexPanePresentationRefresh(paneId, delay = 0) {
+  if (runtimeStore.codexPaneRefreshTimers.has(paneId)) {
+    return;
+  }
+  const timer = setTimeout(() => {
+    runtimeStore.codexPaneRefreshTimers.delete(paneId);
+    void refreshCodexPanePresentation(paneId);
+  }, delay);
+  runtimeStore.codexPaneRefreshTimers.set(paneId, timer);
+}
+
+async function refreshCodexPanePresentation(paneId) {
+  const current = getCodexPanePresentation(paneId);
+  if (!current || current.resolved || !bridge.loadWorkspaceCodexSessions) {
+    return;
+  }
+  if (runtimeStore.codexPaneRefreshInFlight.has(paneId)) {
+    return runtimeStore.codexPaneRefreshInFlight.get(paneId);
+  }
+
+  const refresh = (async () => {
+    const snapshot = await bridge.loadWorkspaceCodexSessions(current.workspaceId);
+    const latest = getCodexPanePresentation(paneId);
+    if (!latest || latest.workspaceId !== current.workspaceId) {
+      return;
+    }
+
+    let sessionId = latest.sessionId;
+    let session = null;
+    if (!sessionId && latest.selectLatest) {
+      session = snapshot.sessions?.find(
+        (entry) => Number(entry.lastActiveAtMs || 0) >= latest.startedAtMs - 5_000,
+      );
+      sessionId = String(session?.id || "");
+    } else if (!sessionId) {
+      sessionId = String(snapshot.rememberedSessionId || "");
+    }
+    if (!sessionId || (!latest.sessionId && !latest.selectLatest && sessionId === latest.previousSessionId)) {
+      return;
+    }
+    session ||= snapshot.sessions?.find((entry) => entry.id === sessionId);
+    if (!session) {
+      return;
+    }
+
+    const next = reconcileCodexPanePresentation(latest, {
+      kind: "bound",
+      sessionId,
+      title: session.displayTitle || "Codex session",
+      resolved: isResolvedCodexSessionTitle(session.displayTitle),
+    });
+    uiState.codexPanePresentationById.set(paneId, next);
+    syncCodexPaneTitleDom(next.workspaceId, paneId);
+  })().catch((error) => console.error(error)).finally(() => {
+    if (runtimeStore.codexPaneRefreshInFlight.get(paneId) === refresh) {
+      runtimeStore.codexPaneRefreshInFlight.delete(paneId);
+    }
+  });
+  runtimeStore.codexPaneRefreshInFlight.set(paneId, refresh);
+  return refresh;
+}
+
 function normalizeCodexRestoreRuntimeEvent(event) {
   if (!event || typeof event !== "object") {
     return null;
@@ -9851,6 +10447,12 @@ function handleCodexRestoreRuntimeEvent(event) {
   const existingStatus = uiState.codexRestoreByPane.get(normalizedEvent.paneId) || null;
   switch (normalizedEvent.kind) {
     case "codexRestoreStarted":
+      startCodexPanePresentation(normalizedEvent.paneId, {
+        workspaceId: normalizedEvent.workspaceId,
+        sessionId: normalizedEvent.sessionId,
+        title: "Codex session",
+      });
+      scheduleCodexPanePresentationRefresh(normalizedEvent.paneId);
       uiState.codexRestoreByPane.set(normalizedEvent.paneId, {
         tone: "restoring",
         label: "Restoring Codex",
@@ -9860,6 +10462,7 @@ function handleCodexRestoreRuntimeEvent(event) {
       });
       return true;
     case "codexRestoreSucceeded":
+      scheduleCodexPanePresentationRefresh(normalizedEvent.paneId);
       uiState.codexRestoreByPane.set(normalizedEvent.paneId, {
         tone: "ready",
         label: "Codex restored",
@@ -9869,6 +10472,7 @@ function handleCodexRestoreRuntimeEvent(event) {
       });
       return true;
     case "codexRestoreFailed":
+      clearCodexPanePresentation(normalizedEvent.paneId);
       uiState.codexRestoreByPane.set(normalizedEvent.paneId, {
         tone: "failed",
         label: "Restore failed",
@@ -10496,7 +11100,8 @@ function clearWorkspaceCompanionTimer() {
 function syncWorkspaceCompanionRoutine() {
   const isActive = normalizeWorkspaceCompanionId(uiState.workspaceCompanionId) !== "off"
     && Boolean(uiState.snapshot?.activeWorkspace)
-    && !uiState.launcherVisible;
+    && !uiState.launcherVisible
+    && !uiState.taskBoard.visible;
   if (!isActive) {
     clearWorkspaceCompanionTimer();
     return;
@@ -10673,6 +11278,8 @@ function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskInterse
   pruneCodexRestoreState(snapshot);
   prunePaneAttentionState(snapshot);
   ensureFrame();
+  app.querySelector(".app-shell")?.classList.toggle("is-task-board", uiState.taskBoard.visible);
+  app.querySelector(".workspace-main-shell")?.classList.toggle("is-task-board", uiState.taskBoard.visible);
   syncWorkspaceCompanion();
   if (!isTimeBlockingEnabled(snapshot)) {
     closeTimeBlockPopover();
@@ -10876,6 +11483,46 @@ function render({ mask = RENDER_ALL, refreshVisibleTerminals = renderMaskInterse
       scheduleVisibleTerminalRefresh(activeWorkspace);
       recordRenderMetric("terminals");
     }
+    return;
+  }
+
+  if (uiState.taskBoard.visible) {
+    destroyLauncherParticles(runtimeStore);
+    if (uiState.mountedWorkspaceId) {
+      stashMountedWorkspaceScreen(stageRegion);
+    }
+    const signature = JSON.stringify([
+      uiState.taskBoard.tasks,
+      uiState.taskBoard.editingTaskId,
+    ]);
+    if (
+      stageRegion.dataset.stageMode !== "task-board"
+      || stageRegion.dataset.stageSignature !== signature
+    ) {
+      stageRegion.innerHTML = renderTaskBoard();
+      stageRegion.dataset.stageMode = "task-board";
+      stageRegion.dataset.stageSignature = signature;
+    }
+    if (uiState.taskBoard.shouldFocus) {
+      uiState.taskBoard.shouldFocus = false;
+      requestAnimationFrame(() => {
+        const input = stageRegion.querySelector("[data-task-board-input]");
+        if (input instanceof HTMLInputElement) {
+          input.focus({ preventScroll: true });
+        }
+      });
+    }
+    if (uiState.taskBoard.editShouldFocus) {
+      uiState.taskBoard.editShouldFocus = false;
+      requestAnimationFrame(() => {
+        const input = stageRegion.querySelector("[data-task-board-edit-input]");
+        if (input instanceof HTMLInputElement) {
+          input.focus({ preventScroll: true });
+          input.select();
+        }
+      });
+    }
+    recordRenderMetric("stage");
     return;
   }
 
@@ -11310,6 +11957,8 @@ function renderChevronIcon(direction = "down") {
     ? "rotate(180 12 12)"
     : direction === "right"
       ? "rotate(-90 12 12)"
+      : direction === "left"
+        ? "rotate(90 12 12)"
       : "rotate(0 12 12)";
   return `
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
@@ -15699,6 +16348,159 @@ function renderWorkspaceOpenControl(workspace) {
   `;
 }
 
+function renderTaskBoard() {
+  const total = uiState.taskBoard.tasks.length;
+  const done = uiState.taskBoard.tasks.filter((task) => task.status === "done").length;
+  const active = total - done;
+  const progress = total ? Math.round((done / total) * 100) : 0;
+
+  return `
+    <main class="task-board-view" aria-label="Personal Task Board">
+      <header class="task-board-hero">
+        <div class="task-board-hero-copy">
+          <span class="task-board-kicker">Personal command deck</span>
+          <h1>Task Board</h1>
+          <p>Move work from idea to shipped without leaving CrewDock.</p>
+        </div>
+        <div class="task-board-hero-actions">
+          ${done ? `
+            <button class="task-board-quiet-action" type="button" data-action="clear-task-board-done">
+              Clear done
+            </button>
+          ` : ""}
+          <button class="task-board-close" type="button" data-action="toggle-task-board">
+            <span>Back to workspace</span>
+            ${renderCloseIcon()}
+          </button>
+        </div>
+        <div class="task-board-progress" aria-label="${escapeHtml(`${progress}% complete`)}">
+          <span style="--task-board-progress:${escapeHtml(String(progress))}%"></span>
+        </div>
+        <div class="task-board-metrics" aria-label="Task summary">
+          <span><strong>${escapeHtml(String(active))}</strong> open</span>
+          <span><strong>${escapeHtml(String(done))}</strong> shipped</span>
+          <span><strong>${escapeHtml(String(progress))}%</strong> complete</span>
+        </div>
+      </header>
+
+      <form class="task-board-create" data-action="create-task-board-task">
+        <span class="task-board-create-icon" aria-hidden="true">${renderTasksIcon()}</span>
+        <input
+          type="text"
+          value="${escapeHtml(uiState.taskBoard.draft)}"
+          maxlength="160"
+          data-task-board-input
+          placeholder="Add the next concrete task..."
+          aria-label="New task"
+          autocomplete="off"
+        />
+        <button type="submit">Add task</button>
+      </form>
+
+      <section class="task-board-columns" aria-label="Task workflow">
+        ${TASK_BOARD_STATUSES.map((status) => renderTaskBoardColumn(status)).join("")}
+      </section>
+    </main>
+  `;
+}
+
+function renderTaskBoardColumn(status) {
+  const meta = TASK_BOARD_COLUMN_META[status];
+  const tasks = uiState.taskBoard.tasks.filter((task) => task.status === status);
+  return `
+    <section class="task-board-column is-${status}" data-task-board-column="${status}">
+      <header class="task-board-column-header">
+        <span class="task-board-column-mark" aria-hidden="true"></span>
+        <div>
+          <small>${escapeHtml(meta.eyebrow)}</small>
+          <h2>${escapeHtml(meta.label)}</h2>
+        </div>
+        <strong>${escapeHtml(String(tasks.length))}</strong>
+      </header>
+      <div class="task-board-card-list">
+        ${tasks.length
+          ? tasks.map((task) => renderTaskBoardCard(task)).join("")
+          : `
+            <div class="task-board-empty">
+              <span aria-hidden="true"></span>
+              <p>${status === "todo" ? "Your queue is clear." : status === "in-progress" ? "Pull a task in when you start." : "Completed work lands here."}</p>
+            </div>
+          `}
+      </div>
+    </section>
+  `;
+}
+
+function renderTaskBoardCard(task) {
+  const statusIndex = TASK_BOARD_STATUSES.indexOf(task.status);
+  const isEditing = uiState.taskBoard.editingTaskId === task.id;
+  return `
+    <article class="task-board-card ${isEditing ? "is-editing" : ""}" data-task-board-card="${escapeHtml(task.id)}">
+      <div class="task-board-card-topline">
+        <span class="task-board-card-grip" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i></span>
+        <small>${escapeHtml(TASK_BOARD_COLUMN_META[task.status].eyebrow)}</small>
+      </div>
+      ${isEditing ? `
+        <form
+          class="task-board-card-edit"
+          data-task-board-edit-form
+          data-task-id="${escapeHtml(task.id)}"
+        >
+          <input
+            type="text"
+            value="${escapeHtml(uiState.taskBoard.editDraft)}"
+            maxlength="160"
+            data-task-board-edit-input
+            aria-label="Edit task"
+            required
+          />
+          <div>
+            <button type="button" data-action="cancel-task-board-edit">Cancel</button>
+            <button type="submit" class="is-primary" data-action="save-task-board-edit">Save</button>
+          </div>
+        </form>
+      ` : `
+        <p>${escapeHtml(task.text)}</p>
+        <footer class="task-board-card-actions">
+          <button
+            type="button"
+            data-action="move-task-board-task"
+            data-task-id="${escapeHtml(task.id)}"
+            data-direction="left"
+            aria-label="Move ${escapeHtml(task.text)} left"
+            title="Move left"
+            ${statusIndex === 0 ? "disabled" : ""}
+          >${renderChevronIcon("left")}</button>
+          <button
+            type="button"
+            data-action="move-task-board-task"
+            data-task-id="${escapeHtml(task.id)}"
+            data-direction="right"
+            aria-label="Move ${escapeHtml(task.text)} right"
+            title="Move right"
+            ${statusIndex === TASK_BOARD_STATUSES.length - 1 ? "disabled" : ""}
+          >${renderChevronIcon("right")}</button>
+          <span></span>
+          <button
+            class="is-text"
+            type="button"
+            data-action="edit-task-board-task"
+            data-task-id="${escapeHtml(task.id)}"
+          >Edit</button>
+          <button
+            class="is-danger"
+            type="button"
+            data-action="delete-task-board-task"
+            data-task-id="${escapeHtml(task.id)}"
+            aria-label="Delete ${escapeHtml(task.text)}"
+            title="Delete task"
+          >${renderCloseIcon()}</button>
+        </footer>
+      `}
+    </article>
+  `;
+}
+
 function renderWorkspace(workspace) {
   const paneLayout = resolveWorkspacePaneLayout(workspace);
   const maximizedPane = resolveWorkspaceMaximizedPane(workspace);
@@ -15708,11 +16510,7 @@ function renderWorkspace(workspace) {
   return `
     <main class="workspace-screen ${maximizedPane ? "is-maximized" : ""} ${fileExplorerVisible ? "has-file-explorer" : ""} ${fileEditorVisible ? "has-file-editor" : ""}">
       <section class="terminal-layout">
-        ${
-          maximizedPane
-            ? renderPaneShell(maximizedPane, paneIndexById.get(maximizedPane.id) || 0)
-            : renderPaneLayout(paneLayout, workspace, paneIndexById)
-        }
+        ${renderPaneLayout(paneLayout, workspace, paneIndexById)}
       </section>
       ${renderWorkspaceFileExplorerShell(workspace)}
       ${renderWorkspaceFileEditorShell(workspace)}
@@ -16936,7 +17734,7 @@ function resolveWorkspaceMaximizedPane(workspace) {
 }
 
 function getRenderedWorkspacePaneCount(workspace) {
-  return resolveWorkspaceMaximizedPane(workspace) ? 1 : (workspace?.panes?.length || 0);
+  return workspace?.panes?.length || 0;
 }
 
 function normalizePaneLayoutNode(node) {
@@ -16979,13 +17777,14 @@ function normalizePaneLayoutNode(node) {
 function workspaceStageSignature(workspace) {
   return JSON.stringify({
     layout: resolveWorkspacePaneLayout(workspace),
-    maximizedPaneId: resolveWorkspaceMaximizedPane(workspace)?.id || null,
   });
 }
 
 function renderPaneShell(pane, paneIndex) {
   const paneNumber = String(paneIndex + 1).padStart(2, "0");
   const dispatchTone = uiState.paneAttentionById.get(pane.id) || "";
+  const canSplit = (getActiveWorkspace()?.panes?.length || 0) < 16;
+  const isMaximized = uiState.maximizedPaneId === pane.id;
   return `
     <article
       class="terminal-pane"
@@ -16993,9 +17792,45 @@ function renderPaneShell(pane, paneIndex) {
       data-status="${escapeHtml(pane.status)}"
       data-density="default"
       data-active="${uiState.activePaneId === pane.id ? "true" : "false"}"
+      data-maximized="${isMaximized ? "true" : "false"}"
       data-dispatch-attention="${dispatchTone ? "true" : "false"}"
       data-dispatch-tone="${escapeHtml(dispatchTone)}"
     >
+      <header class="terminal-pane-header">
+        ${renderPaneHeaderTitle(pane, paneIndex)}
+        <span class="terminal-pane-actions" role="group" aria-label="Terminal ${paneNumber} layout actions">
+          ${[
+            ["left", "Split pane left"],
+            ["right", "Split pane right"],
+            ["up", "Split pane up"],
+            ["down", "Split pane down"],
+          ].map(([direction, label]) => `
+            <button
+              class="terminal-pane-action"
+              type="button"
+              data-action="run-pane-header-action"
+              data-pane-action="context-split-pane"
+              data-direction="${direction}"
+              aria-label="${label}"
+              title="${label}"
+              ${canSplit ? "" : "disabled"}
+            >
+              ${renderPaneActionIcon(direction)}
+            </button>
+          `).join("")}
+          <button
+            class="terminal-pane-action"
+            type="button"
+            data-action="run-pane-header-action"
+            data-pane-action="context-maximize-pane"
+            aria-label="${isMaximized ? "Restore pane" : "Maximize pane"}"
+            title="${isMaximized ? "Restore pane" : "Maximize pane"}"
+            aria-pressed="${isMaximized ? "true" : "false"}"
+          >
+            ${renderPaneActionIcon("maximize")}
+          </button>
+        </span>
+      </header>
       <div class="terminal-pane-overlay" data-pane-codex-restore>
         ${renderPaneCodexRestoreStatus(pane.id)}
       </div>
@@ -17004,6 +17839,43 @@ function renderPaneShell(pane, paneIndex) {
       </div>
     </article>
   `;
+}
+
+function formatCodexPaneTaskTitle(title) {
+  const value = String(title || "Codex session").trim() || "Codex session";
+  const separatorIndex = value.indexOf(": ");
+  return separatorIndex >= 0 ? value.slice(separatorIndex + 2) : value;
+}
+
+function renderPaneHeaderTitle(pane, paneIndex) {
+  const paneNumber = String(paneIndex + 1).padStart(2, "0");
+  const presentation = getCodexPanePresentation(pane.id);
+  if (!presentation) {
+    return `<span class="terminal-pane-title">Terminal ${paneNumber}</span>`;
+  }
+
+  const taskTitle = formatCodexPaneTaskTitle(presentation.title);
+  return `
+    <span class="terminal-pane-title is-codex" title="${escapeHtml(`Codex · ${presentation.title}`)}">
+      <span class="terminal-pane-title-icon" aria-hidden="true">${renderCodexIcon()}</span>
+      <span class="terminal-pane-title-copy">${escapeHtml(taskTitle)}</span>
+    </span>
+  `;
+}
+
+function syncCodexPaneTitleDom(workspaceId, paneId) {
+  const workspace = getActiveWorkspace();
+  if (workspace?.id !== workspaceId) {
+    return;
+  }
+  const paneIndex = workspace.panes?.findIndex((pane) => pane.id === paneId) ?? -1;
+  if (paneIndex < 0) {
+    return;
+  }
+  const title = document.querySelector(`[data-pane-id="${paneId}"] .terminal-pane-title`);
+  if (title instanceof HTMLElement) {
+    title.outerHTML = renderPaneHeaderTitle(workspace.panes[paneIndex], paneIndex);
+  }
 }
 
 function renderContextMenu(contextMenu, workspace) {
@@ -17019,21 +17891,23 @@ function renderContextMenu(contextMenu, workspace) {
   return `
     <div
       class="terminal-context-menu"
+      role="menu"
+      aria-label="Pane actions"
       data-context-x="${contextMenu.x}"
       data-context-y="${contextMenu.y}"
       style="left:0; top:0; visibility:hidden;"
     >
-      <button class="terminal-context-item" data-action="context-copy-selection" ${hasTerminalSelection ? "" : "disabled"}>
+      <button class="terminal-context-item" role="menuitem" data-action="context-copy-selection" ${hasTerminalSelection ? "" : "disabled"}>
         <span>Copy selection</span>
         <span class="terminal-context-shortcut">${copyShortcut}</span>
       </button>
-      <button class="terminal-context-item" data-action="context-copy-path">
+      <button class="terminal-context-item" role="menuitem" data-action="context-copy-path">
         <span>Copy Path</span>
       </button>
-      <button class="terminal-context-item" data-action="context-show-in-file-manager">
+      <button class="terminal-context-item" role="menuitem" data-action="context-show-in-file-manager">
         <span>Show in ${escapeHtml(fileManagerLabel)}</span>
       </button>
-      <button class="terminal-context-item" data-action="context-open-browser">
+      <button class="terminal-context-item" role="menuitem" data-action="context-open-browser">
         <span>Open browser in pane</span>
       </button>
       <div class="terminal-context-divider"></div>
@@ -17051,13 +17925,57 @@ function renderContextSplitAction(label, action, direction, shortcut, enabled) {
   return `
     <button
       class="terminal-context-item"
+      role="menuitem"
       data-action="${action}"
       ${direction ? `data-direction="${direction}"` : ""}
       ${enabled ? "" : "disabled"}
     >
-      <span>${label}</span>
+      <span class="terminal-context-label">
+        <span class="terminal-context-icon" aria-hidden="true">${renderPaneActionIcon(direction || (action === "context-maximize-pane" ? "maximize" : "close"))}</span>
+        <span>${label}</span>
+      </span>
       <span class="terminal-context-shortcut">${shortcut}</span>
     </button>
+  `;
+}
+
+function renderPaneActionIcon(kind) {
+  if (kind === "close") {
+    return renderCloseIcon();
+  }
+
+  if (kind === "maximize") {
+    return `
+      <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+        <path d="M3.5 8V3.5H8M12 3.5h4.5V8M16.5 12v4.5H12M8 16.5H3.5V12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"></path>
+      </svg>
+    `;
+  }
+
+  if (["left", "right", "up", "down"].includes(kind)) {
+    const divider = kind === "left" || kind === "right"
+      ? '<path d="M10 3.5v13" stroke="currentColor" stroke-width="1.5"></path>'
+      : '<path d="M3.5 10h13" stroke="currentColor" stroke-width="1.5"></path>';
+    const arrow = {
+      left: "M8 10H4.5m0 0L6.5 8m-2 2 2 2",
+      right: "M12 10h3.5m0 0-2-2m2 2-2 2",
+      up: "M10 8V4.5m0 0L8 6.5m2-2 2 2",
+      down: "M10 12v3.5m0 0L8 13.5m2 2 2-2",
+    }[kind];
+    return `
+      <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+        <rect x="2.75" y="2.75" width="14.5" height="14.5" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"></rect>
+        ${divider}
+        <path d="${arrow}" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round"></path>
+      </svg>
+    `;
+  }
+
+  return `
+    <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+      <rect x="2.75" y="2.75" width="14.5" height="14.5" rx="2" fill="none" stroke="currentColor" stroke-width="1.5"></rect>
+      <path d="M7 15 13 5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"></path>
+    </svg>
   `;
 }
 
@@ -17143,6 +18061,17 @@ async function runPaneAction(action, paneId, options = {}) {
   return resolveActivePaneId(workspace);
 }
 
+function restoreMaximizedPane() {
+  const paneId = uiState.maximizedPaneId;
+  if (!paneId) {
+    return false;
+  }
+  uiState.maximizedPaneId = null;
+  render();
+  focusPaneTerminal(paneId);
+  return true;
+}
+
 async function handleContextMenuAction(target) {
   const action = target.dataset.action;
   const contextMenu = uiState.contextMenu;
@@ -17221,6 +18150,11 @@ function mountWorkspaceTerminals(workspace, root = document) {
     terminal.loadAddon(fitAddon);
     terminal.open(surface);
     terminal.attachCustomKeyEventHandler((event) => {
+      if (event.key === "Escape" && uiState.maximizedPaneId) {
+        event.preventDefault();
+        restoreMaximizedPane();
+        return false;
+      }
       const isCopyShortcut =
         event.key.toLowerCase() === "c"
         && !event.altKey
@@ -17241,6 +18175,7 @@ function mountWorkspaceTerminals(workspace, root = document) {
       fitAddon,
       observer: new ResizeObserver(() => fitTerminal(pane.id)),
       postFitFrame: 0,
+      postFitViewportLine: null,
       size: { cols: 0, rows: 0 },
       themeId: theme.id,
       fontSize: terminalFontSize,
@@ -17256,7 +18191,13 @@ function mountWorkspaceTerminals(workspace, root = document) {
     host.addEventListener("pointerdown", syncPaneFocusState);
     terminal.textarea?.addEventListener("focus", syncPaneFocusState);
     terminal.onData((data) => {
+      if (/[\r\n\x03\x04]/.test(data)) {
+        schedulePaneCodexProcessInspection(workspace.id, pane.id, 350);
+      }
       bridge.writeToPane(pane.id, data).catch((error) => console.error(error));
+    });
+    terminal.onTitleChange((title) => {
+      handlePaneTerminalTitleChange(workspace.id, pane.id, title);
     });
     terminal.onScroll(() => {
       terminalViewportLines.set(pane.id, captureTerminalViewportLine(terminal));
@@ -17422,6 +18363,10 @@ function syncWorkspace(workspace) {
   const terminalFontSize = getTerminalFontSize();
   const nextPaneIds = workspace.panes.map((pane) => pane.id);
   const previousPaneIds = workspacePaneIds.get(workspace.id) || [];
+  const maximizedPaneId = resolveWorkspaceMaximizedPane(workspace)?.id || "";
+  const screen = document.querySelector(`.workspace-screen[data-workspace-id="${workspace.id}"]`);
+
+  screen?.classList.toggle("is-maximized", Boolean(maximizedPaneId));
 
   syncWorkspaceFileExplorerSurface(workspace);
   syncWorkspaceFileEditorSurface(workspace);
@@ -17430,7 +18375,16 @@ function syncWorkspace(workspace) {
   for (const pane of workspace.panes) {
     const paneElement = document.querySelector(`[data-pane-id="${pane.id}"]`);
     if (paneElement) {
+      const isMaximized = pane.id === maximizedPaneId;
       paneElement.dataset.status = pane.status;
+      paneElement.dataset.maximized = isMaximized ? "true" : "false";
+      const maximizeButton = paneElement.querySelector('[data-pane-action="context-maximize-pane"]');
+      if (maximizeButton instanceof HTMLButtonElement) {
+        const label = isMaximized ? "Restore pane" : "Maximize pane";
+        maximizeButton.setAttribute("aria-label", label);
+        maximizeButton.setAttribute("aria-pressed", isMaximized ? "true" : "false");
+        maximizeButton.title = label;
+      }
       const restoreSlot = paneElement.querySelector("[data-pane-codex-restore]");
       if (restoreSlot) {
         restoreSlot.innerHTML = renderPaneCodexRestoreStatus(pane.id);
@@ -17586,7 +18540,13 @@ function fitTerminal(paneId) {
     return;
   }
 
-  terminalViewportLines.set(paneId, captureTerminalViewportLine(pane.terminal));
+  const viewportLine = resolveTerminalFitViewportLine(
+    terminalViewportLines.get(paneId),
+    pane.postFitViewportLine,
+    captureTerminalViewportLine(pane.terminal),
+  );
+  pane.postFitViewportLine = viewportLine;
+  terminalViewportLines.set(paneId, viewportLine);
   syncPaneDensity(pane);
   pane.fitAddon.fit();
   schedulePostFitTerminalResize(paneId);
@@ -17667,7 +18627,9 @@ function finalizeTerminalFit(paneId) {
   }
 
   clampTerminalRowsToViewport(pane);
-  restoreTerminalViewport(paneId);
+  const viewportLine = pane.postFitViewportLine;
+  pane.postFitViewportLine = null;
+  restoreTerminalViewport(paneId, viewportLine);
   const nextCols = pane.terminal.cols;
   const nextRows = pane.terminal.rows;
 
@@ -17697,7 +18659,12 @@ function disposeTerminal(paneId) {
     return;
   }
 
-  terminalViewportLines.set(paneId, captureTerminalViewportLine(pane.terminal));
+  terminalViewportLines.set(
+    paneId,
+    Number.isFinite(pane.postFitViewportLine)
+      ? pane.postFitViewportLine
+      : captureTerminalViewportLine(pane.terminal),
+  );
   if (pane.postFitFrame) {
     cancelAnimationFrame(pane.postFitFrame);
   }
@@ -17733,13 +18700,15 @@ function disposeAllTerminals() {
   }
 }
 
-function restoreTerminalViewport(paneId) {
+function restoreTerminalViewport(paneId, viewportLineOverride = null) {
   const pane = paneTerminals.get(paneId);
   if (!pane) {
     return;
   }
 
-  const viewportLine = terminalViewportLines.get(paneId);
+  const viewportLine = Number.isFinite(viewportLineOverride)
+    ? viewportLineOverride
+    : terminalViewportLines.get(paneId);
   if (!Number.isFinite(viewportLine)) {
     return;
   }
@@ -17748,10 +18717,12 @@ function restoreTerminalViewport(paneId) {
     viewportLine === TERMINAL_VIEWPORT_PINNED_TO_BOTTOM
     || isTerminalViewportNearBottom(pane.terminal?.buffer?.active)
   ) {
+    terminalViewportLines.set(paneId, TERMINAL_VIEWPORT_PINNED_TO_BOTTOM);
     pane.terminal.scrollToBottom();
     return;
   }
 
+  terminalViewportLines.set(paneId, viewportLine);
   pane.terminal.scrollToLine(viewportLine);
 }
 

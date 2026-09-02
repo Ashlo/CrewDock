@@ -18,6 +18,82 @@ export function reconcileSourceControlTask(task, previousTask = null) {
     : task;
 }
 
+export const TASK_BOARD_STATUSES = Object.freeze(["todo", "in-progress", "done"]);
+export const TERMINAL_VIEWPORT_PINNED_TO_BOTTOM = -1;
+
+export function resolveTerminalFitViewportLine(rememberedLine, pendingLine, capturedLine) {
+  if (Number.isFinite(pendingLine)) {
+    return pendingLine;
+  }
+  return rememberedLine === TERMINAL_VIEWPORT_PINNED_TO_BOTTOM
+    ? TERMINAL_VIEWPORT_PINNED_TO_BOTTOM
+    : capturedLine;
+}
+
+export function normalizeTaskBoardTasks(value) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const seenIds = new Set();
+  return value.slice(0, 500).flatMap((task, index) => {
+    const text = String(task?.text || "").trim().slice(0, 160);
+    if (!text) {
+      return [];
+    }
+
+    let id = String(task?.id || `task-${index + 1}`).trim().slice(0, 120);
+    while (seenIds.has(id)) {
+      id = `${id}-${index + 1}`;
+    }
+    seenIds.add(id);
+
+    return [{
+      id,
+      text,
+      status: TASK_BOARD_STATUSES.includes(task?.status) ? task.status : "todo",
+      createdAtMs: Math.max(0, Number(task?.createdAtMs || 0)),
+      updatedAtMs: Math.max(0, Number(task?.updatedAtMs || 0)),
+    }];
+  });
+}
+
+export function moveTaskBoardTask(tasks, taskId, status) {
+  if (!TASK_BOARD_STATUSES.includes(status)) {
+    return tasks;
+  }
+  return tasks.map((task) => task.id === taskId ? { ...task, status } : task);
+}
+
+export function reconcileCodexPanePresentation(current, update) {
+  if (update?.kind === "start") {
+    return {
+      workspaceId: String(update.workspaceId || ""),
+      sessionId: String(update.sessionId || ""),
+      previousSessionId: String(update.previousSessionId || ""),
+      startedAtMs: Number(update.startedAtMs || 0),
+      selectLatest: Boolean(update.selectLatest),
+      title: String(update.title || "Codex session"),
+      resolved: Boolean(update.resolved),
+    };
+  }
+
+  if (!current) {
+    return null;
+  }
+
+  if (update?.kind === "bound") {
+    return {
+      ...current,
+      sessionId: String(update.sessionId || current.sessionId || ""),
+      title: String(update.title || current.title || "Codex session"),
+      resolved: Boolean(update.resolved),
+    };
+  }
+
+  return current;
+}
+
 export function createUiState() {
   return {
     snapshot: null,
@@ -128,6 +204,15 @@ export function createUiState() {
       durationMinutes: 50,
       current: null,
     },
+    taskBoard: {
+      visible: false,
+      tasks: [],
+      draft: "",
+      shouldFocus: false,
+      editingTaskId: "",
+      editDraft: "",
+      editShouldFocus: false,
+    },
     activityRailVisible: false,
     activityRailScope: "all",
     dispatchToasts: [],
@@ -149,6 +234,7 @@ export function createUiState() {
     runtimeActivity: [],
     runtimeAttentionByWorkspace: new Map(),
     codexRestoreByPane: new Map(),
+    codexPanePresentationById: new Map(),
   };
 }
 
@@ -164,12 +250,17 @@ export function createRuntimeStore() {
     browserHandledDropAt: 0,
     workspaceTabAutoScrollFrame: 0,
     workspaceFileEditorResizeDrag: null,
+    taskBoardPointerDrag: null,
     launcherCardTransitionTimer: 0,
     launcherCardAnimationFrame: 0,
     launcherParticles: null,
     sourceControlModalSyncFrame: 0,
     sourceControlTaskRefreshTimer: 0,
     sourceControlTaskRefreshInFlight: null,
+    codexPaneRefreshTimers: new Map(),
+    codexPaneRefreshInFlight: new Map(),
+    codexPaneProcessTimers: new Map(),
+    codexPaneProcessInFlight: new Map(),
     gitRefreshInFlight: null,
     gitRefreshQueuedWorkspaceId: null,
     systemHealthRefreshTimer: 0,

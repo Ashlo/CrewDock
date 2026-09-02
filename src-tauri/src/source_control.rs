@@ -1678,6 +1678,7 @@ fn run_git_strings(repo_root: &Path, args: &[String]) -> Result<String, String> 
 }
 
 fn strip_tooling_env(command: &mut CommandBuilder) {
+    command.env_remove("NO_COLOR");
     for (key, _) in env::vars_os() {
         let key = key.to_string_lossy();
         if key.starts_with("npm_") || key.starts_with("NPM_") {

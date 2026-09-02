@@ -78,6 +78,8 @@ export function createBridge({
         tauriApi.core.invoke("resume_workspace_codex_session", { workspaceId, paneId, sessionId }),
       startWorkspaceCodexSession: (workspaceId, paneId) =>
         tauriApi.core.invoke("start_workspace_codex_session", { workspaceId, paneId }),
+      paneHasCodexProcess: (paneId) =>
+        tauriApi.core.invoke("pane_has_codex_process", { paneId }),
       loadSystemHealthSnapshot: () =>
         tauriApi.core.invoke("load_system_health_snapshot"),
       createWorkspace: (path, paneCount) =>
@@ -1103,6 +1105,7 @@ function createMockBridge({
 
       return buildMockCodexSessionsSnapshot(workspace);
     },
+    paneHasCodexProcess: async () => false,
     resumeWorkspaceCodexSession: async (workspaceId, paneId, sessionId) => {
       const workspace = workspaces.find((entry) => entry.id === workspaceId);
       if (!workspace) {
